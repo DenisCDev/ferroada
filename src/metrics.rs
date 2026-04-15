@@ -19,6 +19,7 @@ pub struct Metrics {
     pub blocked_body_xss: AtomicU64,
     pub blocked_method: AtomicU64,
     pub blocked_size_limit: AtomicU64,
+    pub blocked_host: AtomicU64,
     pub https_redirect: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
@@ -47,6 +48,7 @@ impl Metrics {
             blocked_body_xss: AtomicU64::new(0),
             blocked_method: AtomicU64::new(0),
             blocked_size_limit: AtomicU64::new(0),
+            blocked_host: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
@@ -115,6 +117,7 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
         "body_xss" => &METRICS.blocked_body_xss,
         "method" => &METRICS.blocked_method,
         "size_limit" => &METRICS.blocked_size_limit,
+        "host" => &METRICS.blocked_host,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
     };
@@ -166,7 +169,8 @@ pub fn snapshot_json() -> String {
             "body_sqli": m.blocked_body_sqli.load(Ordering::Relaxed),
             "body_xss": m.blocked_body_xss.load(Ordering::Relaxed),
             "method": m.blocked_method.load(Ordering::Relaxed),
-            "size_limit": m.blocked_size_limit.load(Ordering::Relaxed)
+            "size_limit": m.blocked_size_limit.load(Ordering::Relaxed),
+            "host": m.blocked_host.load(Ordering::Relaxed)
         },
         "https_redirect": m.https_redirect.load(Ordering::Relaxed),
         "dlp": {

@@ -47,24 +47,36 @@ Formularios, APIs JSON e qualquer payload enviado via POST, PUT ou PATCH e inspe
 
 | Protecao | O que faz | Resposta |
 |----------|-----------|----------|
-| **Security Headers** | Injeta HSTS, X-Content-Type-Options, X-Frame-Options, CSP, Referrer-Policy, Permissions-Policy em toda resposta | Headers automaticos |
+| **Security Headers** | Injeta X-Content-Type-Options, X-Frame-Options, Referrer-Policy em toda resposta | Headers automaticos |
 | **Server Header Stripping** | Remove `Server`, `X-Powered-By`, `X-AspNet-Version`, `X-Debug-Token`, `X-Runtime` | Informacao de infra oculta |
 | **HTTP Method Restriction** | Bloqueia TRACE, CONNECT e metodos nao configurados | 405 Method Not Allowed |
 | **Request Size Limiting** | Limita tamanho do body (10MB default) e URI (8KB default) | 413 / 414 |
-| **HTTPS Enforcement** | Redireciona HTTP → HTTPS quando TLS esta configurado | 301 Moved Permanently |
+| **Host Validation** | Valida Host header contra allowlist `ALLOWED_HOSTS` (previne DNS rebinding) | 421 Misdirected Request |
+| **HTTPS Enforcement** | Redireciona HTTP → HTTPS quando TLS esta configurado + injeta HSTS | 301 Moved Permanently |
 | **Dashboard Auth** | Protege dashboard com Bearer token quando `DASHBOARD_TOKEN` esta definido | 401 Unauthorized |
 | **Double-encoding Protection** | Decodifica URL recursivamente (max 3x) antes do WAF | Previne bypass `%252e%252e` |
+| **Dependency Audit** | `cargo audit` roda no Docker build — falha se houver crate com CVE conhecida | Build falha |
 
-#### Security Headers injetados automaticamente
+#### Security Headers — filosofia "nao quebrar"
 
+**Sempre ligados** (zero risco de quebrar sites):
 ```
-Strict-Transport-Security: max-age=31536000; includeSubDomains
 X-Content-Type-Options: nosniff
-X-Frame-Options: DENY
+X-Frame-Options: SAMEORIGIN
 Referrer-Policy: strict-origin-when-cross-origin
-Permissions-Policy: camera=(), microphone=(), geolocation=()
-Content-Security-Policy: default-src 'self'
 X-XSS-Protection: 0
+```
+
+**Condicionais** (so ativam quando voce explicitamente configura):
+```
+Strict-Transport-Security    → so quando FORCE_HTTPS=true
+Content-Security-Policy      → so quando CSP_POLICY esta definido
+Permissions-Policy           → so quando PERMISSIONS_POLICY esta definido
+```
+
+**Removidos** da resposta (sempre):
+```
+Server, X-Powered-By, X-AspNet-Version, X-Debug-Token, X-Runtime
 ```
 
 #### O que continua fora do escopo do proxy
@@ -186,11 +198,13 @@ Todas as configuracoes sao via variaveis de ambiente:
 | `TLS_CERT_PATH` | *(opcional)* | Caminho para certificado TLS (fullchain.pem) |
 | `TLS_KEY_PATH` | *(opcional)* | Caminho para chave privada TLS |
 | `DASHBOARD_PORT` | `9000` | Porta do dashboard de monitoramento |
-| `SECURITY_HEADERS` | `true` | Injetar headers de seguranca nas respostas |
-| `CSP_POLICY` | `default-src 'self'` | Content-Security-Policy customizado |
+| `SECURITY_HEADERS` | `true` | Injetar headers seguros nas respostas (nosniff, X-Frame, Referrer) |
+| `CSP_POLICY` | *(desativado)* | Content-Security-Policy — so ativar se souber o que esta fazendo |
+| `PERMISSIONS_POLICY` | *(desativado)* | Permissions-Policy — so ativar se nao usar camera/mic/geo |
 | `ALLOWED_METHODS` | `GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS` | Metodos HTTP permitidos |
 | `MAX_BODY_SIZE` | `10485760` | Tamanho maximo do body em bytes (10MB) |
 | `MAX_URI_LENGTH` | `8192` | Tamanho maximo da URI em bytes (8KB) |
+| `ALLOWED_HOSTS` | *(desativado)* | Allowlist de dominios no Host header (ex: `meusite.com,www.meusite.com`) |
 | `FORCE_HTTPS` | `false` | Redirecionar HTTP → HTTPS (requer TLS configurado) |
 | `DASHBOARD_TOKEN` | *(vazio)* | Token Bearer para proteger o dashboard |
 
@@ -256,10 +270,10 @@ Aponte o ALB/Target Group para a porta 3000 do container Ferroada em vez do back
 ```
 src/
 ├── main.rs          # Bootstrap: server, TLS, dashboard, env config
-├── proxy.rs         # ProxyHttp: pipeline HTTPS → Method → Size → Rate Limit → WAF → Upstream → Headers → DLP
+├── proxy.rs         # ProxyHttp: pipeline HTTPS → Host → Method → Size → Rate Limit → WAF → Upstream → Headers → DLP
 ├── waf.rs           # WAF: SQLi + XSS + Path Traversal + Sensitive Paths + Body Inspection + double-decode
 ├── headers.rs       # Security headers injection + server header stripping
-├── shield.rs        # HTTP method restriction + request size limiting
+├── shield.rs        # HTTP method restriction + request size limiting + host validation
 ├── dlp.rs           # DLP: CPF + Bearer Token masking nas respostas
 ├── rate_limit.rs    # Sliding window rate limiter por IP (DashMap)
 ├── metrics.rs       # Contadores atomicos + ring buffer de eventos
@@ -273,6 +287,9 @@ Cliente
   │
   ▼
 [HTTPS Redirect] ──301──→ Cliente (se FORCE_HTTPS e request HTTP)
+  │ ok
+  ▼
+[Host Check] ──421──→ Cliente (Host nao permitido, DNS rebinding)
   │ ok
   ▼
 [Method Check] ──405──→ Cliente (TRACE, CONNECT, etc.)

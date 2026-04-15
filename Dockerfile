@@ -8,7 +8,8 @@ COPY Cargo.toml ./
 COPY Cargo.lock* ./
 RUN mkdir src && echo 'fn main(){}' > src/main.rs && cargo build --release && rm -rf src
 COPY src/ src/
-RUN touch src/main.rs && cargo build --release
+RUN cargo install cargo-audit --quiet
+RUN touch src/main.rs && cargo audit && cargo build --release
 
 # Stage 2: Runtime
 FROM gcr.io/distroless/cc-debian12

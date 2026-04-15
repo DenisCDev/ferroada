@@ -99,6 +99,31 @@ impl ProxyHttp for FerroadaProxy {
             }
         }
 
+        // Host header validation (DNS rebinding protection)
+        if let Some(host_val) = session
+            .req_header()
+            .headers
+            .get("Host")
+            .and_then(|v| v.to_str().ok())
+        {
+            match shield::check_host(host_val, &uri, &client_addr) {
+                ShieldVerdict::BlockHost => {
+                    let body = "421 Misdirected Request\n";
+                    let mut header = ResponseHeader::build(421, None)?;
+                    header.insert_header("Content-Type", "text/plain")?;
+                    header.insert_header("Content-Length", body.len().to_string())?;
+                    session
+                        .write_response_header(Box::new(header), false)
+                        .await?;
+                    session
+                        .write_response_body(Some(Bytes::from(body)), true)
+                        .await?;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
         // Method restriction check
         let method = session.req_header().method.as_str().to_string();
         match shield::check_method(&method, &uri, &client_addr) {

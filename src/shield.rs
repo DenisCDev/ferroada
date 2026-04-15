@@ -36,11 +36,22 @@ static MAX_URI_LENGTH: Lazy<usize> = Lazy::new(|| {
         .unwrap_or(DEFAULT_MAX_URI)
 });
 
+static ALLOWED_HOSTS: Lazy<Option<HashSet<String>>> = Lazy::new(|| {
+    std::env::var("ALLOWED_HOSTS").ok().map(|hosts_str| {
+        hosts_str
+            .split(',')
+            .map(|h| h.trim().to_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect()
+    })
+});
+
 pub enum ShieldVerdict {
     Allow,
     BlockMethod,
     BlockBodySize,
     BlockUriLength,
+    BlockHost,
 }
 
 /// Check if the HTTP method is allowed.
@@ -84,6 +95,25 @@ pub fn check_body_size(content_length: usize, uri: &str, client_addr: &str) -> S
         );
         metrics::record_block("size_limit", client_addr, uri, &format!("Body size {} > max {}", content_length, *MAX_BODY_SIZE));
         return ShieldVerdict::BlockBodySize;
+    }
+    ShieldVerdict::Allow
+}
+
+/// Check Host header against allowlist to prevent DNS rebinding attacks.
+/// Only active when ALLOWED_HOSTS is set. If not set, all hosts are allowed.
+pub fn check_host(host_header: &str, uri: &str, client_addr: &str) -> ShieldVerdict {
+    if let Some(ref allowed) = *ALLOWED_HOSTS {
+        // Strip port from Host header (e.g., "example.com:3000" -> "example.com")
+        let host = host_header.split(':').next().unwrap_or(host_header).to_lowercase();
+        if !allowed.contains(&host) {
+            warn!(
+                client = client_addr,
+                host = host_header,
+                "Blocked: Host header not in allowlist"
+            );
+            metrics::record_block("host", client_addr, uri, &format!("Blocked host: {}", host_header));
+            return ShieldVerdict::BlockHost;
+        }
     }
     ShieldVerdict::Allow
 }
