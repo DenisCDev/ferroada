@@ -17,6 +17,9 @@ pub struct Metrics {
     pub blocked_sensitive_path: AtomicU64,
     pub blocked_body_sqli: AtomicU64,
     pub blocked_body_xss: AtomicU64,
+    pub blocked_method: AtomicU64,
+    pub blocked_size_limit: AtomicU64,
+    pub https_redirect: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
     pub recent_events: Mutex<VecDeque<SecurityEvent>>,
@@ -42,6 +45,9 @@ impl Metrics {
             blocked_sensitive_path: AtomicU64::new(0),
             blocked_body_sqli: AtomicU64::new(0),
             blocked_body_xss: AtomicU64::new(0),
+            blocked_method: AtomicU64::new(0),
+            blocked_size_limit: AtomicU64::new(0),
+            https_redirect: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
             recent_events: Mutex::new(VecDeque::with_capacity(MAX_EVENTS)),
@@ -107,6 +113,9 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
         "sensitive_path" => &METRICS.blocked_sensitive_path,
         "body_sqli" => &METRICS.blocked_body_sqli,
         "body_xss" => &METRICS.blocked_body_xss,
+        "method" => &METRICS.blocked_method,
+        "size_limit" => &METRICS.blocked_size_limit,
+        "https_redirect" => &METRICS.https_redirect,
         _ => return,
     };
     counter.fetch_add(1, Ordering::Relaxed);
@@ -155,8 +164,11 @@ pub fn snapshot_json() -> String {
             "rate_limit": m.blocked_rate_limit.load(Ordering::Relaxed),
             "sensitive_path": m.blocked_sensitive_path.load(Ordering::Relaxed),
             "body_sqli": m.blocked_body_sqli.load(Ordering::Relaxed),
-            "body_xss": m.blocked_body_xss.load(Ordering::Relaxed)
+            "body_xss": m.blocked_body_xss.load(Ordering::Relaxed),
+            "method": m.blocked_method.load(Ordering::Relaxed),
+            "size_limit": m.blocked_size_limit.load(Ordering::Relaxed)
         },
+        "https_redirect": m.https_redirect.load(Ordering::Relaxed),
         "dlp": {
             "cpf_masked": m.dlp_cpf_masked.load(Ordering::Relaxed),
             "tokens_masked": m.dlp_tokens_masked.load(Ordering::Relaxed)

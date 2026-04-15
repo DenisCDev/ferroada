@@ -23,6 +23,34 @@ impl ProxyHttp for DashboardService {
         session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<bool> {
+        // Dashboard token auth (if DASHBOARD_TOKEN is set)
+        if let Ok(expected_token) = std::env::var("DASHBOARD_TOKEN") {
+            if !expected_token.is_empty() {
+                let authorized = session
+                    .req_header()
+                    .headers
+                    .get("Authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.strip_prefix("Bearer ").unwrap_or("") == expected_token)
+                    .unwrap_or(false)
+                    || session
+                        .req_header()
+                        .uri
+                        .query()
+                        .and_then(|q| {
+                            q.split('&')
+                                .find_map(|pair| pair.strip_prefix("token="))
+                        })
+                        .map(|t| t == expected_token)
+                        .unwrap_or(false);
+
+                if !authorized {
+                    respond(session, 401, "text/plain", "401 Unauthorized\n").await?;
+                    return Ok(true);
+                }
+            }
+        }
+
         let path = session.req_header().uri.path();
 
         let (status, content_type, body) = match path {
@@ -196,6 +224,18 @@ fn dashboard_html() -> String {
     <div class="label">Tokens Masked</div>
     <div class="value" id="dlp_tokens">-</div>
   </div>
+  <div class="card rate">
+    <div class="label">Method Blocked</div>
+    <div class="value" id="blocked_method">-</div>
+  </div>
+  <div class="card rate">
+    <div class="label">Size Limited</div>
+    <div class="value" id="blocked_size_limit">-</div>
+  </div>
+  <div class="card total">
+    <div class="label">HTTPS Redirects</div>
+    <div class="value" id="https_redirect">-</div>
+  </div>
 </div>
 
 <div class="section-title">Recent Security Events</div>
@@ -222,6 +262,9 @@ const TAG_CLASSES = {
   sensitive_path: 'tag-sensitive_path',
   body_sqli: 'tag-body_sqli',
   body_xss: 'tag-body_xss',
+  method: 'tag-rate_limit',
+  size_limit: 'tag-rate_limit',
+  https_redirect: 'tag-sensitive_path',
   dlp: 'tag-dlp'
 };
 
@@ -257,6 +300,9 @@ async function refresh() {
     setText('blocked_sensitive_path', data.blocked.sensitive_path);
     setText('blocked_body_sqli', data.blocked.body_sqli);
     setText('blocked_body_xss', data.blocked.body_xss);
+    setText('blocked_method', data.blocked.method || 0);
+    setText('blocked_size_limit', data.blocked.size_limit || 0);
+    setText('https_redirect', data.https_redirect || 0);
     setText('dlp_cpf', data.dlp.cpf_masked);
     setText('dlp_tokens', data.dlp.tokens_masked);
 

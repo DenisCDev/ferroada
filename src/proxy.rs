@@ -8,8 +8,10 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::dlp;
+use crate::headers;
 use crate::metrics;
 use crate::rate_limit::RateLimiter;
+use crate::shield::{self, ShieldVerdict};
 use crate::waf::{self, WafVerdict};
 
 pub struct FerroadaProxy {
@@ -60,6 +62,106 @@ impl ProxyHttp for FerroadaProxy {
         ctx.request_uri = uri.clone();
         ctx.client_addr = client_addr.clone();
 
+        // HTTPS enforcement: redirect HTTP → HTTPS when FORCE_HTTPS=true and TLS is configured
+        let force_https = std::env::var("FORCE_HTTPS")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if force_https {
+            // Detect plain HTTP via X-Forwarded-Proto or scheme.
+            // On Pingora, requests arriving on the TLS listener have ssl_digest set.
+            let digest = session.digest();
+            let is_plain_http = digest
+                .as_ref()
+                .map(|d| d.ssl_digest.is_none())
+                .unwrap_or(true);
+            if is_plain_http {
+                let host = session
+                    .req_header()
+                    .headers
+                    .get("Host")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or(&self.host);
+                let location = format!("https://{}{}", host, uri);
+                let body = "301 Moved Permanently\n";
+                let mut header = ResponseHeader::build(301, None)?;
+                header.insert_header("Location", &location)?;
+                header.insert_header("Content-Type", "text/plain")?;
+                header.insert_header("Content-Length", body.len().to_string())?;
+                session
+                    .write_response_header(Box::new(header), false)
+                    .await?;
+                session
+                    .write_response_body(Some(Bytes::from(body)), true)
+                    .await?;
+                metrics::record_block("https_redirect", &client_addr, &uri, "HTTP→HTTPS redirect");
+                return Ok(true);
+            }
+        }
+
+        // Method restriction check
+        let method = session.req_header().method.as_str().to_string();
+        match shield::check_method(&method, &uri, &client_addr) {
+            ShieldVerdict::BlockMethod => {
+                let body = "405 Method Not Allowed\n";
+                let mut header = ResponseHeader::build(405, None)?;
+                header.insert_header("Content-Type", "text/plain")?;
+                header.insert_header("Content-Length", body.len().to_string())?;
+                session
+                    .write_response_header(Box::new(header), false)
+                    .await?;
+                session
+                    .write_response_body(Some(Bytes::from(body)), true)
+                    .await?;
+                return Ok(true);
+            }
+            _ => {}
+        }
+
+        // URI length check
+        match shield::check_uri_length(&uri, &client_addr) {
+            ShieldVerdict::BlockUriLength => {
+                let body = "414 URI Too Long\n";
+                let mut header = ResponseHeader::build(414, None)?;
+                header.insert_header("Content-Type", "text/plain")?;
+                header.insert_header("Content-Length", body.len().to_string())?;
+                session
+                    .write_response_header(Box::new(header), false)
+                    .await?;
+                session
+                    .write_response_body(Some(Bytes::from(body)), true)
+                    .await?;
+                return Ok(true);
+            }
+            _ => {}
+        }
+
+        // Body size check (via Content-Length header)
+        if let Some(cl) = session
+            .req_header()
+            .headers
+            .get("Content-Length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            match shield::check_body_size(cl, &uri, &client_addr) {
+                ShieldVerdict::BlockBodySize => {
+                    let body = "413 Payload Too Large\n";
+                    let mut header = ResponseHeader::build(413, None)?;
+                    header.insert_header("Content-Type", "text/plain")?;
+                    header.insert_header("Content-Length", body.len().to_string())?;
+                    session
+                        .write_response_header(Box::new(header), false)
+                        .await?;
+                    session
+                        .write_response_body(Some(Bytes::from(body)), true)
+                        .await?;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
         // Rate limiting check (before WAF to save CPU on floods)
         let ip = client_addr
             .parse::<std::net::SocketAddr>()
@@ -104,8 +206,7 @@ impl ProxyHttp for FerroadaProxy {
         }
 
         // WAF inspection on request body (POST/PUT/PATCH)
-        let method = session.req_header().method.as_str();
-        if matches!(method, "POST" | "PUT" | "PATCH") {
+        if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
             // Read buffered body if available
             if let Some(body) = session.read_request_body().await? {
                 match waf::inspect_body(&body, &uri, &client_addr) {
@@ -155,6 +256,13 @@ impl ProxyHttp for FerroadaProxy {
         upstream_response
             .insert_header("Transfer-Encoding", "chunked")
             .unwrap();
+
+        // Strip headers that leak server/framework info
+        headers::strip_server_headers(upstream_response);
+
+        // Inject security hardening headers
+        headers::apply_security_headers(upstream_response);
+
         Ok(())
     }
 

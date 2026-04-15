@@ -43,6 +43,40 @@ Arquivos e diretarios que nunca deveriam ser expostos publicamente:
 
 Formularios, APIs JSON e qualquer payload enviado via POST, PUT ou PATCH e inspecionado para SQL Injection e XSS antes de chegar ao seu backend. Limitado aos primeiros 64KB do body para evitar impacto de performance em uploads grandes.
 
+### Hardening de Infraestrutura (v0.3)
+
+| Protecao | O que faz | Resposta |
+|----------|-----------|----------|
+| **Security Headers** | Injeta HSTS, X-Content-Type-Options, X-Frame-Options, CSP, Referrer-Policy, Permissions-Policy em toda resposta | Headers automaticos |
+| **Server Header Stripping** | Remove `Server`, `X-Powered-By`, `X-AspNet-Version`, `X-Debug-Token`, `X-Runtime` | Informacao de infra oculta |
+| **HTTP Method Restriction** | Bloqueia TRACE, CONNECT e metodos nao configurados | 405 Method Not Allowed |
+| **Request Size Limiting** | Limita tamanho do body (10MB default) e URI (8KB default) | 413 / 414 |
+| **HTTPS Enforcement** | Redireciona HTTP → HTTPS quando TLS esta configurado | 301 Moved Permanently |
+| **Dashboard Auth** | Protege dashboard com Bearer token quando `DASHBOARD_TOKEN` esta definido | 401 Unauthorized |
+| **Double-encoding Protection** | Decodifica URL recursivamente (max 3x) antes do WAF | Previne bypass `%252e%252e` |
+
+#### Security Headers injetados automaticamente
+
+```
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Referrer-Policy: strict-origin-when-cross-origin
+Permissions-Policy: camera=(), microphone=(), geolocation=()
+Content-Security-Policy: default-src 'self'
+X-XSS-Protection: 0
+```
+
+#### O que continua fora do escopo do proxy
+
+| Vulnerabilidade | Por que nao da |
+|----------------|----------------|
+| Portas abertas no servidor | Firewall do OS (iptables/ufw) |
+| Software desatualizado | Gerenciamento de pacotes do servidor |
+| Permissoes de arquivo Linux | Configuracao do OS |
+| Segmentacao de rede | Arquitetura de rede (VPC, firewalls) |
+| Banco de dados exposto | Firewall + config do banco |
+
 ### Camada de Saida (DLP)
 
 | Dado sensivel | Padrao detectado | Resultado mascarado |
@@ -152,6 +186,13 @@ Todas as configuracoes sao via variaveis de ambiente:
 | `TLS_CERT_PATH` | *(opcional)* | Caminho para certificado TLS (fullchain.pem) |
 | `TLS_KEY_PATH` | *(opcional)* | Caminho para chave privada TLS |
 | `DASHBOARD_PORT` | `9000` | Porta do dashboard de monitoramento |
+| `SECURITY_HEADERS` | `true` | Injetar headers de seguranca nas respostas |
+| `CSP_POLICY` | `default-src 'self'` | Content-Security-Policy customizado |
+| `ALLOWED_METHODS` | `GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS` | Metodos HTTP permitidos |
+| `MAX_BODY_SIZE` | `10485760` | Tamanho maximo do body em bytes (10MB) |
+| `MAX_URI_LENGTH` | `8192` | Tamanho maximo da URI em bytes (8KB) |
+| `FORCE_HTTPS` | `false` | Redirecionar HTTP → HTTPS (requer TLS configurado) |
+| `DASHBOARD_TOKEN` | *(vazio)* | Token Bearer para proteger o dashboard |
 
 ### HTTPS (TLS Termination)
 
@@ -215,19 +256,30 @@ Aponte o ALB/Target Group para a porta 3000 do container Ferroada em vez do back
 ```
 src/
 ├── main.rs          # Bootstrap: server, TLS, dashboard, env config
-├── proxy.rs         # ProxyHttp: pipeline Rate Limit → WAF → Upstream → DLP
-├── waf.rs           # WAF: SQLi + XSS + Path Traversal + Sensitive Paths + Body Inspection
+├── proxy.rs         # ProxyHttp: pipeline HTTPS → Method → Size → Rate Limit → WAF → Upstream → Headers → DLP
+├── waf.rs           # WAF: SQLi + XSS + Path Traversal + Sensitive Paths + Body Inspection + double-decode
+├── headers.rs       # Security headers injection + server header stripping
+├── shield.rs        # HTTP method restriction + request size limiting
 ├── dlp.rs           # DLP: CPF + Bearer Token masking nas respostas
 ├── rate_limit.rs    # Sliding window rate limiter por IP (DashMap)
 ├── metrics.rs       # Contadores atomicos + ring buffer de eventos
-└── dashboard.rs     # Dashboard HTML + API JSON (/api/metrics)
+└── dashboard.rs     # Dashboard HTML + API JSON (/api/metrics) + token auth
 ```
 
-### Pipeline de request
+### Pipeline de request (v0.3)
 
 ```
 Cliente
   │
+  ▼
+[HTTPS Redirect] ──301──→ Cliente (se FORCE_HTTPS e request HTTP)
+  │ ok
+  ▼
+[Method Check] ──405──→ Cliente (TRACE, CONNECT, etc.)
+  │ ok
+  ▼
+[Size Check] ──413/414──→ Cliente (body/URI muito grande)
+  │ ok
   ▼
 [Rate Limiter] ──429──→ Cliente (Too Many Requests)
   │ ok
@@ -235,7 +287,7 @@ Cliente
 [WAF: Sensitive Paths] ──403──→ Cliente (Access Denied)
   │ ok
   ▼
-[WAF: URI + Headers] ──403──→ Cliente (SQLi/XSS/Traversal)
+[WAF: URI + Headers] ──403──→ Cliente (SQLi/XSS/Traversal) [com double-decode]
   │ ok
   ▼
 [WAF: Body Inspection] ──403──→ Cliente (SQLi/XSS in body)
@@ -244,10 +296,16 @@ Cliente
 [Upstream Backend]
   │
   ▼
+[Strip Server Headers] → Remove Server, X-Powered-By, etc.
+  │
+  ▼
+[Inject Security Headers] → HSTS, CSP, X-Frame-Options, etc.
+  │
+  ▼
 [DLP: Response Masking] → CPF e tokens mascarados
   │
   ▼
-Cliente (resposta limpa)
+Cliente (resposta limpa e hardened)
 ```
 
 ---

@@ -1,8 +1,10 @@
 mod dashboard;
 mod dlp;
+mod headers;
 mod metrics;
 mod proxy;
 mod rate_limit;
+mod shield;
 mod waf;
 
 use dashboard::DashboardService;

@@ -86,7 +86,7 @@ const BLOCKED_PATH_PREFIXES: &[&str] = &[
 
 /// Inspect URI, headers, and optionally request body
 pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -> WafVerdict {
-    let decoded_uri = urldecode(uri);
+    let decoded_uri = recursive_urldecode(uri);
 
     // Extract just the path (before query string) for sensitive path check
     let path = decoded_uri.split('?').next().unwrap_or(&decoded_uri);
@@ -171,7 +171,7 @@ pub fn inspect_body(body: &[u8], uri: &str, client_addr: &str) -> WafVerdict {
 
     // Limit inspection to first 64KB to avoid DoS on large uploads
     let text = if text.len() > 65536 { &text[..65536] } else { text };
-    let decoded = urldecode(text);
+    let decoded = recursive_urldecode(text);
 
     if let Some(m) = SQL_INJECTION_RE.find(&decoded) {
         warn!(client = client_addr, uri = uri, pattern = m.as_str(), "WAF blocked: SQL injection in request body");
@@ -186,6 +186,20 @@ pub fn inspect_body(body: &[u8], uri: &str, client_addr: &str) -> WafVerdict {
     }
 
     WafVerdict::Allow
+}
+
+/// Recursively URL-decode to defeat double/triple encoding bypass attempts.
+/// Max 3 iterations to prevent infinite loops.
+fn recursive_urldecode(input: &str) -> String {
+    let mut current = input.to_string();
+    for _ in 0..3 {
+        let decoded = urldecode(&current);
+        if decoded == current {
+            break;
+        }
+        current = decoded;
+    }
+    current
 }
 
 fn urldecode(input: &str) -> String {
