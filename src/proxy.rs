@@ -157,6 +157,28 @@ impl ProxyHttp for FerroadaProxy {
             }
         }
 
+        // HTTP Request Smuggling detection
+        let has_cl = session.req_header().headers.get("Content-Length").is_some();
+        let cl_count = session.req_header().headers.get_all("Content-Length").iter().count();
+        let te = session.req_header().headers.get("Transfer-Encoding")
+            .and_then(|v| v.to_str().ok());
+        match shield::check_smuggling(has_cl, cl_count, te, &uri, &client_addr) {
+            ShieldVerdict::BlockSmuggling => {
+                return self.send_400(session, "Bad Request: HTTP request smuggling detected").await;
+            }
+            _ => {}
+        }
+
+        // Bad Bot User-Agent check
+        let ua = session.req_header().headers.get("User-Agent")
+            .and_then(|v| v.to_str().ok()).unwrap_or("");
+        match shield::check_user_agent(ua, &uri, &client_addr) {
+            ShieldVerdict::BlockBadBot => {
+                return self.send_403(session, "Blocked: suspicious user-agent").await;
+            }
+            _ => {}
+        }
+
         // Method restriction check
         let method = session.req_header().method.as_str().to_string();
         match shield::check_method(&method, &uri, &client_addr) {
@@ -265,9 +287,11 @@ impl ProxyHttp for FerroadaProxy {
 
         // WAF inspection on request body (POST/PUT/PATCH)
         if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
+            let req_content_type = session.req_header().headers.get("Content-Type")
+                .and_then(|v| v.to_str().ok());
             // Read buffered body if available
             if let Some(body) = session.read_request_body().await? {
-                match waf::inspect_body(&body, &uri, &client_addr) {
+                match waf::inspect_body(&body, &uri, &client_addr, req_content_type) {
                     WafVerdict::Allow => {
                         // Body was consumed; write it back for upstream
                         session.write_request_body(Some(body), true).await?;
@@ -369,6 +393,20 @@ impl ProxyHttp for FerroadaProxy {
 }
 
 impl FerroadaProxy {
+    async fn send_400(&self, session: &mut Session, reason: &str) -> Result<bool> {
+        let body = format!("400 Bad Request: {reason}\n");
+        let mut header = ResponseHeader::build(400, None)?;
+        header.insert_header("Content-Type", "text/plain")?;
+        header.insert_header("Content-Length", body.len().to_string())?;
+        session
+            .write_response_header(Box::new(header), false)
+            .await?;
+        session
+            .write_response_body(Some(Bytes::from(body)), true)
+            .await?;
+        Ok(true)
+    }
+
     async fn send_403(&self, session: &mut Session, reason: &str) -> Result<bool> {
         let body = format!("403 Forbidden: {reason}\n");
         let mut header = ResponseHeader::build(403, None)?;

@@ -48,6 +48,9 @@ pub fn apply_security_headers(resp: &mut ResponseHeader) {
     // only origin for cross-origin. Low risk — most analytics already handle this.
     let _ = resp.insert_header("Referrer-Policy", "strict-origin-when-cross-origin");
 
+    // Prevents Flash/Acrobat from loading data cross-domain.
+    let _ = resp.insert_header("X-Permitted-Cross-Domain-Policies", "none");
+
     // --- CONDITIONAL: Only inject if user explicitly opted in ---
 
     // HSTS: Only inject when FORCE_HTTPS=true, meaning the user has confirmed

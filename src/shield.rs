@@ -52,6 +52,8 @@ pub enum ShieldVerdict {
     BlockBodySize,
     BlockUriLength,
     BlockHost,
+    BlockBadBot,
+    BlockSmuggling,
 }
 
 /// Check if the HTTP method is allowed.
@@ -115,5 +117,92 @@ pub fn check_host(host_header: &str, uri: &str, client_addr: &str) -> ShieldVerd
             return ShieldVerdict::BlockHost;
         }
     }
+    ShieldVerdict::Allow
+}
+
+// --- Bad Bot Detection ---
+
+static BAD_BOT_ENABLED: Lazy<bool> = Lazy::new(|| {
+    std::env::var("BAD_BOT_ENABLED")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+});
+
+const BAD_BOT_SIGNATURES: &[&str] = &[
+    "nikto", "sqlmap", "nessus", "openvas", "nmap", "dirbuster",
+    "gobuster", "wfuzz", "ffuf", "hydra", "metasploit", "masscan",
+    "zmeu", "w3af", "nuclei", "whatweb", "skipfish", "arachni",
+];
+
+/// Check if the User-Agent matches known attack tool signatures.
+pub fn check_user_agent(ua: &str, uri: &str, client_addr: &str) -> ShieldVerdict {
+    if !*BAD_BOT_ENABLED {
+        return ShieldVerdict::Allow;
+    }
+    let ua_lower = ua.to_ascii_lowercase();
+    for sig in BAD_BOT_SIGNATURES {
+        if ua_lower.contains(sig) {
+            warn!(
+                client = client_addr,
+                ua = ua,
+                uri = uri,
+                signature = *sig,
+                "Blocked: bad bot user-agent"
+            );
+            metrics::record_block("bad_bot", client_addr, uri, &format!("Bad bot UA: {}", sig));
+            return ShieldVerdict::BlockBadBot;
+        }
+    }
+    ShieldVerdict::Allow
+}
+
+// --- HTTP Request Smuggling Detection ---
+
+/// Check for HTTP request smuggling indicators per RFC 7230 §3.3.3.
+pub fn check_smuggling(
+    has_content_length: bool,
+    content_length_count: usize,
+    transfer_encoding: Option<&str>,
+    uri: &str,
+    client_addr: &str,
+) -> ShieldVerdict {
+    // Multiple Content-Length headers
+    if content_length_count > 1 {
+        warn!(
+            client = client_addr,
+            uri = uri,
+            cl_count = content_length_count,
+            "Blocked: multiple Content-Length headers (smuggling)"
+        );
+        metrics::record_block("smuggling", client_addr, uri, "Multiple Content-Length headers");
+        return ShieldVerdict::BlockSmuggling;
+    }
+
+    if let Some(te) = transfer_encoding {
+        // CL + TE present simultaneously
+        if has_content_length {
+            warn!(
+                client = client_addr,
+                uri = uri,
+                "Blocked: Content-Length + Transfer-Encoding (smuggling)"
+            );
+            metrics::record_block("smuggling", client_addr, uri, "CL + TE conflict");
+            return ShieldVerdict::BlockSmuggling;
+        }
+
+        // TE with unexpected value
+        let te_lower = te.trim().to_ascii_lowercase();
+        if te_lower != "chunked" && te_lower != "identity" {
+            warn!(
+                client = client_addr,
+                uri = uri,
+                te = te,
+                "Blocked: suspicious Transfer-Encoding value (smuggling)"
+            );
+            metrics::record_block("smuggling", client_addr, uri, &format!("Bad TE: {}", te));
+            return ShieldVerdict::BlockSmuggling;
+        }
+    }
+
     ShieldVerdict::Allow
 }

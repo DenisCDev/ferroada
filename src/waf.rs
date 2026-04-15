@@ -21,6 +21,14 @@ static PATH_TRAVERSAL_RE: Lazy<Regex> = Lazy::new(|| {
         .expect("invalid path traversal regex")
 });
 
+static CRLF_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(%0[dD]%0[aA]|\r\n)").expect("invalid CRLF regex")
+});
+
+static JNDI_DEOBFUSCATE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\$\{(?:lower:|upper:|::-?)(\w)\}").expect("invalid JNDI deobfuscation regex")
+});
+
 static XSS_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r"(?i)(<script[\s>]|javascript\s*:|on(load|error|click|mouseover)\s*=|<img[^>]+onerror|<svg[^>]+onload|<iframe|<object|<embed|alert\s*\(|document\.(cookie|write|location)|eval\s*\()"
@@ -118,7 +126,21 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
         }
     }
 
-    // 2. SQL Injection on URI
+    // 2. CRLF Injection on URI
+    if CRLF_RE.is_match(uri) || CRLF_RE.is_match(&decoded_uri) {
+        warn!(client = client_addr, uri = uri, "WAF blocked: CRLF injection in URI");
+        metrics::record_block("crlf", client_addr, uri, "CRLF injection in URI");
+        return WafVerdict::Block("CRLF injection detected".to_string());
+    }
+
+    // 3. JNDI/Log4Shell on URI
+    if contains_jndi(&decoded_uri) {
+        warn!(client = client_addr, uri = uri, "WAF blocked: JNDI/Log4Shell in URI");
+        metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in URI");
+        return WafVerdict::Block("JNDI injection detected".to_string());
+    }
+
+    // 4. SQL Injection on URI
     if let Some(m) = SQL_INJECTION_RE.find(&decoded_uri) {
         warn!(client = client_addr, uri = uri, pattern = m.as_str(), "WAF blocked: SQL injection in URI");
         metrics::record_block("sqli", client_addr, uri, &format!("SQL injection: {}", m.as_str()));
@@ -141,6 +163,16 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
 
     // 5. Check header values
     for val in header_values {
+        if CRLF_RE.is_match(val) {
+            warn!(client = client_addr, uri = uri, header_value = val.as_str(), "WAF blocked: CRLF injection in header");
+            metrics::record_block("crlf", client_addr, uri, "CRLF injection in header");
+            return WafVerdict::Block("CRLF injection detected in header".to_string());
+        }
+        if contains_jndi(val) {
+            warn!(client = client_addr, uri = uri, header_value = val.as_str(), "WAF blocked: JNDI/Log4Shell in header");
+            metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in header");
+            return WafVerdict::Block("JNDI injection detected in header".to_string());
+        }
         if let Some(m) = SQL_INJECTION_RE.find(val) {
             warn!(client = client_addr, uri = uri, header_value = val.as_str(), "WAF blocked: SQL injection in header");
             metrics::record_block("sqli", client_addr, uri, &format!("SQLi in header: {}", m.as_str()));
@@ -161,8 +193,9 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
     WafVerdict::Allow
 }
 
-/// Inspect request body (POST/PUT/PATCH) for SQLi and XSS payloads
-pub fn inspect_body(body: &[u8], uri: &str, client_addr: &str) -> WafVerdict {
+/// Inspect request body (POST/PUT/PATCH) for SQLi, XSS, CRLF and JNDI payloads.
+/// `content_type` is used to skip CRLF checks on multipart/form-data (legitimate \r\n in uploads).
+pub fn inspect_body(body: &[u8], uri: &str, client_addr: &str, content_type: Option<&str>) -> WafVerdict {
     let text = match std::str::from_utf8(body) {
         Ok(s) => s,
         Err(_) => return WafVerdict::Allow, // binary body, skip
@@ -171,6 +204,23 @@ pub fn inspect_body(body: &[u8], uri: &str, client_addr: &str) -> WafVerdict {
     // Limit inspection to first 64KB to avoid DoS on large uploads
     let text = if text.len() > 65536 { &text[..65536] } else { text };
     let decoded = recursive_urldecode(text);
+
+    // CRLF check — skip for multipart/form-data (legitimate \r\n in uploads)
+    let is_multipart = content_type
+        .map(|ct| ct.to_ascii_lowercase().contains("multipart/form-data"))
+        .unwrap_or(false);
+    if !is_multipart && CRLF_RE.is_match(&decoded) {
+        warn!(client = client_addr, uri = uri, "WAF blocked: CRLF injection in request body");
+        metrics::record_block("crlf", client_addr, uri, "CRLF injection in body");
+        return WafVerdict::Block("CRLF injection detected in body".to_string());
+    }
+
+    // JNDI/Log4Shell check
+    if contains_jndi(&decoded) {
+        warn!(client = client_addr, uri = uri, "WAF blocked: JNDI/Log4Shell in request body");
+        metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in body");
+        return WafVerdict::Block("JNDI injection detected in body".to_string());
+    }
 
     if let Some(m) = SQL_INJECTION_RE.find(&decoded) {
         warn!(client = client_addr, uri = uri, pattern = m.as_str(), "WAF blocked: SQL injection in request body");
@@ -185,6 +235,35 @@ pub fn inspect_body(body: &[u8], uri: &str, client_addr: &str) -> WafVerdict {
     }
 
     WafVerdict::Allow
+}
+
+/// Detect JNDI injection patterns including obfuscated variants.
+/// Fast-path: if input doesn't contain "${", return false immediately (99.9%+ of requests).
+fn contains_jndi(input: &str) -> bool {
+    if !input.contains("${") {
+        return false;
+    }
+    let lower = input.to_lowercase();
+    if lower.contains("${jndi:") {
+        return true;
+    }
+    // Deobfuscate: ${lower:j} -> j, ${upper:N} -> N, ${::-d} -> d, etc.
+    let collapsed = collapse_jndi_obfuscation(&lower);
+    collapsed.contains("${jndi:")
+}
+
+/// Collapse JNDI obfuscation patterns like ${lower:j}, ${upper:N}, ${::-d}.
+/// Iterates up to 5 times to resolve nested obfuscation.
+fn collapse_jndi_obfuscation(input: &str) -> String {
+    let mut current = input.to_string();
+    for _ in 0..5 {
+        let replaced = JNDI_DEOBFUSCATE_RE.replace_all(&current, "$1").to_string();
+        if replaced == current {
+            break;
+        }
+        current = replaced;
+    }
+    current
 }
 
 /// Recursively URL-decode to defeat double/triple encoding bypass attempts.

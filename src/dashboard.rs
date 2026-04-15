@@ -171,6 +171,10 @@ fn dashboard_html() -> String {
   .tag-sensitive_path { background: #581c87; color: #e9d5ff; }
   .tag-body_sqli { background: #7f1d1d; color: #fca5a5; }
   .tag-body_xss { background: #78350f; color: #fde68a; }
+  .tag-crlf { background: #064e3b; color: #6ee7b7; }
+  .tag-smuggling { background: #1e3a5f; color: #93c5fd; }
+  .tag-jndi { background: #4a1d96; color: #d8b4fe; }
+  .tag-bad_bot { background: #3f3f46; color: #d4d4d8; }
   .tag-dlp { background: #312e81; color: #c4b5fd; }
   .card.sensitive .value { color: #c084fc; }
   .empty { text-align: center; padding: 40px; color: #475569; }
@@ -215,6 +219,22 @@ fn dashboard_html() -> String {
   <div class="card blocked">
     <div class="label">Body XSS</div>
     <div class="value" id="blocked_body_xss">-</div>
+  </div>
+  <div class="card blocked">
+    <div class="label">CRLF Injection</div>
+    <div class="value" id="blocked_crlf">-</div>
+  </div>
+  <div class="card blocked">
+    <div class="label">Smuggling</div>
+    <div class="value" id="blocked_smuggling">-</div>
+  </div>
+  <div class="card blocked">
+    <div class="label">Log4Shell/JNDI</div>
+    <div class="value" id="blocked_jndi">-</div>
+  </div>
+  <div class="card blocked">
+    <div class="label">Bad Bots</div>
+    <div class="value" id="blocked_bad_bot">-</div>
   </div>
   <div class="card dlp">
     <div class="label">CPFs Masked</div>
@@ -265,6 +285,10 @@ const TAG_CLASSES = {
   method: 'tag-rate_limit',
   size_limit: 'tag-rate_limit',
   https_redirect: 'tag-sensitive_path',
+  crlf: 'tag-crlf',
+  smuggling: 'tag-smuggling',
+  jndi: 'tag-jndi',
+  bad_bot: 'tag-bad_bot',
   dlp: 'tag-dlp'
 };
 
@@ -302,6 +326,10 @@ async function refresh() {
     setText('blocked_body_xss', data.blocked.body_xss);
     setText('blocked_method', data.blocked.method || 0);
     setText('blocked_size_limit', data.blocked.size_limit || 0);
+    setText('blocked_crlf', data.blocked.crlf || 0);
+    setText('blocked_smuggling', data.blocked.smuggling || 0);
+    setText('blocked_jndi', data.blocked.jndi || 0);
+    setText('blocked_bad_bot', data.blocked.bad_bot || 0);
     setText('https_redirect', data.https_redirect || 0);
     setText('dlp_cpf', data.dlp.cpf_masked);
     setText('dlp_tokens', data.dlp.tokens_masked);
