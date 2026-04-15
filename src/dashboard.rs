@@ -175,6 +175,8 @@ fn dashboard_html() -> String {
   .tag-smuggling { background: #1e3a5f; color: #93c5fd; }
   .tag-jndi { background: #4a1d96; color: #d8b4fe; }
   .tag-bad_bot { background: #3f3f46; color: #d4d4d8; }
+  .tag-behavioral_throttle { background: #854d0e; color: #fef08a; }
+  .tag-behavioral_block { background: #991b1b; color: #fecaca; }
   .tag-dlp { background: #312e81; color: #c4b5fd; }
   .card.sensitive .value { color: #c084fc; }
   .empty { text-align: center; padding: 40px; color: #475569; }
@@ -236,6 +238,14 @@ fn dashboard_html() -> String {
     <div class="label">Bad Bots</div>
     <div class="value" id="blocked_bad_bot">-</div>
   </div>
+  <div class="card rate">
+    <div class="label">Behavioral Throttle</div>
+    <div class="value" id="blocked_behavioral_throttle">-</div>
+  </div>
+  <div class="card blocked">
+    <div class="label">Behavioral Block</div>
+    <div class="value" id="blocked_behavioral_block">-</div>
+  </div>
   <div class="card dlp">
     <div class="label">CPFs Masked</div>
     <div class="value" id="dlp_cpf">-</div>
@@ -289,6 +299,8 @@ const TAG_CLASSES = {
   smuggling: 'tag-smuggling',
   jndi: 'tag-jndi',
   bad_bot: 'tag-bad_bot',
+  behavioral_throttle: 'tag-behavioral_throttle',
+  behavioral_block: 'tag-behavioral_block',
   dlp: 'tag-dlp'
 };
 
@@ -330,6 +342,8 @@ async function refresh() {
     setText('blocked_smuggling', data.blocked.smuggling || 0);
     setText('blocked_jndi', data.blocked.jndi || 0);
     setText('blocked_bad_bot', data.blocked.bad_bot || 0);
+    setText('blocked_behavioral_throttle', data.blocked.behavioral_throttle || 0);
+    setText('blocked_behavioral_block', data.blocked.behavioral_block || 0);
     setText('https_redirect', data.https_redirect || 0);
     setText('dlp_cpf', data.dlp.cpf_masked);
     setText('dlp_tokens', data.dlp.tokens_masked);

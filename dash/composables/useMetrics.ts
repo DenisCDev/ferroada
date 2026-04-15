@@ -37,6 +37,7 @@ export function useMetrics() {
       rate_limit: 'Rate Limited', sensitive_path: 'Sensitive Paths', body_sqli: 'Body SQL Injection',
       body_xss: 'Body XSS', method: 'Method Block', size_limit: 'Size Limit', host: 'Host Spoofing',
       crlf: 'CRLF Injection', smuggling: 'Request Smuggling', jndi: 'Log4Shell/JNDI', bad_bot: 'Bad Bots',
+      behavioral_throttle: 'Behavioral Throttle', behavioral_block: 'Behavioral Block',
     };
     return Object.entries(metrics.value.blocked)
       .map(([key, count]) => ({ key, label: labels[key] ?? key, count }))

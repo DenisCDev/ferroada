@@ -49,6 +49,7 @@ export function mockMetrics(): FerroaMetrics {
     'sqli', 'xss', 'path_traversal', 'rate_limit', 'sensitive_path',
     'body_sqli', 'body_xss', 'method', 'size_limit', 'host',
     'crlf', 'smuggling', 'jndi', 'bad_bot',
+    'behavioral_throttle', 'behavioral_block',
   ];
 
   // Weight IPs so top origins have varied counts (not all 1)
@@ -90,6 +91,8 @@ export function mockMetrics(): FerroaMetrics {
       smuggling: 1 + (base % 3),
       jndi: 2 + (base % 4),
       bad_bot: 15 + (base % 20),
+      behavioral_throttle: 8 + (base % 12),
+      behavioral_block: 2 + (base % 5),
     },
     https_redirect: 1200 + base * 2,
     dlp: {

@@ -1,3 +1,4 @@
+mod behavioral;
 mod config;
 mod dashboard;
 mod dlp;

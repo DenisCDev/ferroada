@@ -24,6 +24,8 @@ pub struct Metrics {
     pub blocked_smuggling: AtomicU64,
     pub blocked_jndi: AtomicU64,
     pub blocked_bad_bot: AtomicU64,
+    pub blocked_behavioral_throttle: AtomicU64,
+    pub blocked_behavioral_block: AtomicU64,
     pub https_redirect: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
@@ -57,6 +59,8 @@ impl Metrics {
             blocked_smuggling: AtomicU64::new(0),
             blocked_jndi: AtomicU64::new(0),
             blocked_bad_bot: AtomicU64::new(0),
+            blocked_behavioral_throttle: AtomicU64::new(0),
+            blocked_behavioral_block: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
@@ -130,6 +134,8 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
         "smuggling" => &METRICS.blocked_smuggling,
         "jndi" => &METRICS.blocked_jndi,
         "bad_bot" => &METRICS.blocked_bad_bot,
+        "behavioral_throttle" => &METRICS.blocked_behavioral_throttle,
+        "behavioral_block" => &METRICS.blocked_behavioral_block,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
     };
@@ -186,7 +192,9 @@ pub fn snapshot_json() -> String {
             "crlf": m.blocked_crlf.load(Ordering::Relaxed),
             "smuggling": m.blocked_smuggling.load(Ordering::Relaxed),
             "jndi": m.blocked_jndi.load(Ordering::Relaxed),
-            "bad_bot": m.blocked_bad_bot.load(Ordering::Relaxed)
+            "bad_bot": m.blocked_bad_bot.load(Ordering::Relaxed),
+            "behavioral_throttle": m.blocked_behavioral_throttle.load(Ordering::Relaxed),
+            "behavioral_block": m.blocked_behavioral_block.load(Ordering::Relaxed)
         },
         "https_redirect": m.https_redirect.load(Ordering::Relaxed),
         "dlp": {

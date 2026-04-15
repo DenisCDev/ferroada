@@ -6,6 +6,9 @@ use pingora::proxy::{ProxyHttp, Session};
 use std::sync::Arc;
 use tracing::info;
 
+use std::net::IpAddr;
+
+use crate::behavioral::{self, BehavioralVerdict};
 use crate::config::Config;
 use crate::dlp;
 use crate::headers;
@@ -13,6 +16,13 @@ use crate::metrics;
 use crate::rate_limit::RateLimiter;
 use crate::shield::{self, ShieldVerdict};
 use crate::waf::{self, WafVerdict};
+
+fn parse_ip(addr: &str) -> Option<IpAddr> {
+    addr.parse::<std::net::SocketAddr>()
+        .map(|s| s.ip())
+        .or_else(|_| addr.parse::<IpAddr>())
+        .ok()
+}
 
 pub struct FerroadaProxy {
     pub config: Arc<Config>,
@@ -69,6 +79,21 @@ impl ProxyHttp for FerroadaProxy {
         // Store in ctx for body filter
         ctx.request_uri = uri.clone();
         ctx.client_addr = client_addr.clone();
+
+        // Behavioral scoring — check threat score before any processing
+        if let Some(ip) = parse_ip(&client_addr) {
+            let ua = session.req_header().headers.get("User-Agent")
+                .and_then(|v| v.to_str().ok());
+            match behavioral::check_and_record(ip, &uri, ua, &client_addr) {
+                BehavioralVerdict::Block => {
+                    return self.send_403(session, "Temporarily blocked: suspicious activity").await;
+                }
+                BehavioralVerdict::Throttle => {
+                    return self.send_429(session, "Too many suspicious requests", 30).await;
+                }
+                BehavioralVerdict::Allow => {}
+            }
+        }
 
         // HTTPS enforcement: redirect HTTP → HTTPS when FORCE_HTTPS=true and TLS is configured
         let force_https = std::env::var("FORCE_HTTPS")
@@ -243,11 +268,7 @@ impl ProxyHttp for FerroadaProxy {
         }
 
         // Rate limiting check (before WAF to save CPU on floods)
-        let ip = client_addr
-            .parse::<std::net::SocketAddr>()
-            .map(|s| s.ip())
-            .or_else(|_| client_addr.parse::<std::net::IpAddr>())
-            .ok();
+        let ip = parse_ip(&client_addr);
 
         if let Some(ip) = ip {
             if !self.rate_limiter.check(ip, &uri) {
@@ -281,6 +302,9 @@ impl ProxyHttp for FerroadaProxy {
         match waf::inspect_request(&uri, &header_values, &client_addr) {
             WafVerdict::Allow => {}
             WafVerdict::Block(reason) => {
+                if let Some(ip) = parse_ip(&client_addr) {
+                    behavioral::record_waf_block(ip);
+                }
                 return self.send_403(session, &reason).await;
             }
         }
@@ -297,6 +321,9 @@ impl ProxyHttp for FerroadaProxy {
                         session.write_request_body(Some(body), true).await?;
                     }
                     WafVerdict::Block(reason) => {
+                        if let Some(ip) = parse_ip(&client_addr) {
+                            behavioral::record_waf_block(ip);
+                        }
                         return self.send_403(session, &reason).await;
                     }
                 }
@@ -336,6 +363,14 @@ impl ProxyHttp for FerroadaProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // Behavioral scoring: track upstream response codes
+        let status = upstream_response.status.as_u16();
+        if matches!(status, 401 | 403 | 404) {
+            if let Some(ip) = parse_ip(&ctx.client_addr) {
+                behavioral::record_response(ip, status);
+            }
+        }
+
         // Capture content-type for DLP (before modifying headers)
         ctx.content_type = upstream_response
             .headers
@@ -393,6 +428,21 @@ impl ProxyHttp for FerroadaProxy {
 }
 
 impl FerroadaProxy {
+    async fn send_429(&self, session: &mut Session, reason: &str, retry_after: u64) -> Result<bool> {
+        let body = format!("429 Too Many Requests: {reason}\n");
+        let mut header = ResponseHeader::build(429, None)?;
+        header.insert_header("Content-Type", "text/plain")?;
+        header.insert_header("Content-Length", body.len().to_string())?;
+        header.insert_header("Retry-After", retry_after.to_string())?;
+        session
+            .write_response_header(Box::new(header), false)
+            .await?;
+        session
+            .write_response_body(Some(Bytes::from(body)), true)
+            .await?;
+        Ok(true)
+    }
+
     async fn send_400(&self, session: &mut Session, reason: &str) -> Result<bool> {
         let body = format!("400 Bad Request: {reason}\n");
         let mut header = ResponseHeader::build(400, None)?;
