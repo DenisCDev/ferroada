@@ -21,10 +21,16 @@ pub struct FerroadaProxy {
     pub rate_limiter: Arc<RateLimiter>,
 }
 
+/// Max response body to buffer for DLP inspection (50MB).
+/// Responses larger than this are passed through without DLP.
+const MAX_RESPONSE_BUFFER: usize = 50 * 1024 * 1024;
+
 pub struct FerroadaCtx {
     pub body_buffer: Vec<u8>,
     pub request_uri: String,
     pub client_addr: String,
+    pub content_type: Option<String>,
+    pub skip_dlp: bool,
 }
 
 #[async_trait]
@@ -36,6 +42,8 @@ impl ProxyHttp for FerroadaProxy {
             body_buffer: Vec::new(),
             request_uri: String::new(),
             client_addr: String::new(),
+            content_type: None,
+            skip_dlp: false,
         }
     }
 
@@ -275,8 +283,15 @@ impl ProxyHttp for FerroadaProxy {
         &self,
         _session: &mut Session,
         upstream_response: &mut ResponseHeader,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // Capture content-type for DLP (before modifying headers)
+        ctx.content_type = upstream_response
+            .headers
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         upstream_response.remove_header("Content-Length");
         upstream_response
             .insert_header("Transfer-Encoding", "chunked")
@@ -298,12 +313,27 @@ impl ProxyHttp for FerroadaProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<std::time::Duration>> {
+        // If we already decided to skip DLP, pass body through directly
+        if ctx.skip_dlp {
+            return Ok(None);
+        }
+
         if let Some(b) = body.take() {
+            // Check if buffering this chunk would exceed the limit
+            if ctx.body_buffer.len() + b.len() > MAX_RESPONSE_BUFFER {
+                // Too large — flush what we have and skip DLP for the rest
+                ctx.skip_dlp = true;
+                let mut flushed = std::mem::take(&mut ctx.body_buffer);
+                flushed.extend_from_slice(&b);
+                *body = Some(Bytes::from(flushed));
+                return Ok(None);
+            }
             ctx.body_buffer.extend_from_slice(&b);
         }
 
         if end_of_stream {
-            let sanitized = dlp::sanitize_body(&ctx.body_buffer);
+            let ct = ctx.content_type.as_deref();
+            let sanitized = dlp::sanitize_body(&ctx.body_buffer, ct);
             *body = Some(sanitized);
         }
 

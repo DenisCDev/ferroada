@@ -11,13 +11,13 @@ pub enum WafVerdict {
 
 static SQL_INJECTION_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(UNION\s+SELECT|OR\s+1\s*=\s*1|'\s*OR\s*'|--|\;\s*DROP|'\s*;\s*--)"
+        r"(?i)(UNION\s+SELECT|OR\s+1\s*=\s*1|'\s*OR\s*'|'\s*--|;\s*DROP|'\s*;\s*--)"
     )
     .expect("invalid SQL injection regex")
 });
 
 static PATH_TRAVERSAL_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(\.\.\/|\.\./|%2e%2e|%2f)")
+    Regex::new(r"(?i)(\.\.\/|\.\./|%2e%2e)")
         .expect("invalid path traversal regex")
 });
 
@@ -48,7 +48,6 @@ const BLOCKED_PATHS: &[&str] = &[
     "/.htpasswd",
     "/server-status",
     "/server-info",
-    "/.well-known/security.txt", // allow this one — skip
     "/debug",
     "/actuator",
     "/actuator/env",
