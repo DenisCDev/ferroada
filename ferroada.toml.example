@@ -1,0 +1,22 @@
+# Ferroada Multi-Site Configuration
+#
+# Quando este arquivo existe, o Ferroada roda em modo multi-site:
+# cada request e roteado para o backend correto pelo Host header.
+#
+# Se preferir modo single-site, delete este arquivo e use TARGET_URL no .env.
+
+# Backend padrao para hosts nao configurados (opcional).
+# Se nao definido, requests com Host desconhecido recebem 421.
+# default_backend = "http://fallback:8080"
+
+[[sites]]
+hosts = ["meusite.com", "www.meusite.com"]
+backend = "http://backend-a:8080"
+
+[[sites]]
+hosts = ["api.meusite.com"]
+backend = "http://backend-b:3000"
+
+# [[sites]]
+# hosts = ["outrosite.com", "www.outrosite.com"]
+# backend = "https://backend-c:443"

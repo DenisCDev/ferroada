@@ -3,10 +3,10 @@ use bytes::Bytes;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
 use pingora::proxy::{ProxyHttp, Session};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::config::Config;
 use crate::dlp;
 use crate::headers;
 use crate::metrics;
@@ -15,9 +15,7 @@ use crate::shield::{self, ShieldVerdict};
 use crate::waf::{self, WafVerdict};
 
 pub struct FerroadaProxy {
-    pub addr: SocketAddr,
-    pub host: String,
-    pub tls: bool,
+    pub config: Arc<Config>,
     pub rate_limiter: Arc<RateLimiter>,
 }
 
@@ -31,6 +29,7 @@ pub struct FerroadaCtx {
     pub client_addr: String,
     pub content_type: Option<String>,
     pub skip_dlp: bool,
+    pub backend: Option<crate::config::Backend>,
 }
 
 #[async_trait]
@@ -44,6 +43,7 @@ impl ProxyHttp for FerroadaProxy {
             client_addr: String::new(),
             content_type: None,
             skip_dlp: false,
+            backend: None,
         }
     }
 
@@ -89,7 +89,7 @@ impl ProxyHttp for FerroadaProxy {
                     .headers
                     .get("Host")
                     .and_then(|v| v.to_str().ok())
-                    .unwrap_or(&self.host);
+                    .unwrap_or("localhost");
                 let location = format!("https://{}{}", host, uri);
                 let body = "301 Moved Permanently\n";
                 let mut header = ResponseHeader::build(301, None)?;
@@ -108,13 +108,15 @@ impl ProxyHttp for FerroadaProxy {
         }
 
         // Host header validation (DNS rebinding protection)
-        if let Some(host_val) = session
+        let host_val = session
             .req_header()
             .headers
             .get("Host")
             .and_then(|v| v.to_str().ok())
-        {
-            match shield::check_host(host_val, &uri, &client_addr) {
+            .map(|s| s.to_string());
+
+        if let Some(ref hv) = host_val {
+            match shield::check_host(hv, &uri, &client_addr) {
                 ShieldVerdict::BlockHost => {
                     let body = "421 Misdirected Request\n";
                     let mut header = ResponseHeader::build(421, None)?;
@@ -129,6 +131,29 @@ impl ProxyHttp for FerroadaProxy {
                     return Ok(true);
                 }
                 _ => {}
+            }
+        }
+
+        // Multi-site routing: resolve backend by Host header
+        let host_for_resolve = host_val.as_deref().unwrap_or("");
+        match self.config.resolve(host_for_resolve) {
+            Some(backend) => {
+                ctx.backend = Some(backend.clone());
+            }
+            None => {
+                // No matching site and no default backend → 421
+                let body = "421 Misdirected Request\n";
+                let mut header = ResponseHeader::build(421, None)?;
+                header.insert_header("Content-Type", "text/plain")?;
+                header.insert_header("Content-Length", body.len().to_string())?;
+                session
+                    .write_response_header(Box::new(header), false)
+                    .await?;
+                session
+                    .write_response_body(Some(Bytes::from(body)), true)
+                    .await?;
+                metrics::record_block("host", &client_addr, &uri, &format!("No site for host: {}", host_for_resolve));
+                return Ok(true);
             }
         }
 
@@ -260,10 +285,11 @@ impl ProxyHttp for FerroadaProxy {
     async fn upstream_peer(
         &self,
         _session: &mut Session,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        info!(addr = %self.addr, tls = self.tls, "Connecting to upstream");
-        let peer = HttpPeer::new(self.addr, self.tls, self.host.clone());
+        let backend = ctx.backend.as_ref().expect("backend must be resolved in request_filter");
+        info!(addr = %backend.addr, tls = backend.tls, host = %backend.host, "Connecting to upstream");
+        let peer = HttpPeer::new(backend.addr, backend.tls, backend.host.clone());
         Ok(Box::new(peer))
     }
 
@@ -271,10 +297,11 @@ impl ProxyHttp for FerroadaProxy {
         &self,
         _session: &mut Session,
         upstream_request: &mut RequestHeader,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> Result<()> {
+        let backend = ctx.backend.as_ref().expect("backend must be resolved");
         upstream_request
-            .insert_header("Host", &self.host)
+            .insert_header("Host", &backend.host)
             .unwrap();
         Ok(())
     }

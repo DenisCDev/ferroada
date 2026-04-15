@@ -10,6 +10,20 @@ Internet → [Ferroada :3000] → Seu Sistema :8080
          Dashboard :9000
 ```
 
+**Multi-site (v0.4):** Um unico deploy protege varios backends simultaneamente:
+
+```
+Internet
+  │
+  ├── meusite.com       ──→ backend-a:8080
+  ├── api.meusite.com   ──→ backend-b:3000
+  └── outrosite.com     ──→ backend-c:4000
+         │
+    [Ferroada :3000]
+         │
+    Dashboard :9000
+```
+
 ---
 
 ## O que o Ferroada protege
@@ -191,7 +205,7 @@ Todas as configuracoes sao via variaveis de ambiente:
 
 | Variavel | Default | Descricao |
 |----------|---------|-----------|
-| `TARGET_URL` | *(obrigatorio)* | URL do sistema upstream (ex: `http://meu-sistema:8080`) |
+| `TARGET_URL` | *(obrigatorio\*)* | URL do sistema upstream — modo single-site (ex: `http://meu-sistema:8080`) |
 | `RUST_LOG` | `info` | Nivel de log (`debug`, `info`, `warn`, `error`) |
 | `RATE_LIMIT_MAX` | `100` | Maximo de requests por IP na janela |
 | `RATE_LIMIT_WINDOW` | `60` | Janela de tempo em segundos |
@@ -207,6 +221,46 @@ Todas as configuracoes sao via variaveis de ambiente:
 | `ALLOWED_HOSTS` | *(desativado)* | Allowlist de dominios no Host header (ex: `meusite.com,www.meusite.com`) |
 | `FORCE_HTTPS` | `false` | Redirecionar HTTP → HTTPS (requer TLS configurado) |
 | `DASHBOARD_TOKEN` | *(vazio)* | Token Bearer para proteger o dashboard |
+
+*\* `TARGET_URL` e obrigatorio apenas no modo single-site. No modo multi-site, use `ferroada.toml`.*
+
+### Multi-Site (v0.4)
+
+Para proteger varios backends com um unico deploy, crie um arquivo `ferroada.toml`:
+
+```toml
+# Backend padrao para hosts nao configurados (opcional)
+# default_backend = "http://fallback:8080"
+
+[[sites]]
+hosts = ["meusite.com", "www.meusite.com"]
+backend = "http://backend-a:8080"
+
+[[sites]]
+hosts = ["api.meusite.com"]
+backend = "http://backend-b:3000"
+
+[[sites]]
+hosts = ["outrosite.com", "www.outrosite.com"]
+backend = "https://backend-c:443"
+```
+
+O roteamento e feito automaticamente pelo Host header de cada request. Hosts nao configurados recebem `421 Misdirected Request`.
+
+**Regras:**
+- Se `ferroada.toml` existe → modo multi-site (ignora `TARGET_URL`)
+- Se nao existe → usa `TARGET_URL` como antes (backward compatible)
+- WAF, DLP, rate limit e security headers sao compartilhados entre todos os sites
+- `ALLOWED_HOSTS` env ainda funciona como restricao adicional
+
+```bash
+# Multi-site com Docker
+docker run -d \
+  -v ./ferroada.toml:/ferroada.toml:ro \
+  -p 3000:3000 \
+  -p 9000:9000 \
+  ferroada
+```
 
 ### HTTPS (TLS Termination)
 
@@ -228,7 +282,7 @@ docker run -d \
 
 ## Integracao com sistemas existentes
 
-### Docker Compose
+### Docker Compose (single-site)
 
 ```yaml
 services:
@@ -247,6 +301,32 @@ services:
     image: seu-sistema:latest
     expose:
       - "8080"
+```
+
+### Docker Compose (multi-site)
+
+```yaml
+services:
+  ferroada:
+    build: ./ferroada
+    ports:
+      - "80:3000"
+      - "9000:9000"
+    volumes:
+      - ./ferroada.toml:/ferroada.toml:ro
+    depends_on:
+      - site-a
+      - site-b
+
+  site-a:
+    image: meusite:latest
+    expose:
+      - "8080"
+
+  site-b:
+    image: outrosite:latest
+    expose:
+      - "3000"
 ```
 
 ### Nginx (apontar para Ferroada)
@@ -269,8 +349,9 @@ Aponte o ALB/Target Group para a porta 3000 do container Ferroada em vez do back
 
 ```
 src/
-├── main.rs          # Bootstrap: server, TLS, dashboard, env config
-├── proxy.rs         # ProxyHttp: pipeline HTTPS → Host → Method → Size → Rate Limit → WAF → Upstream → Headers → DLP
+├── main.rs          # Bootstrap: server, TLS, dashboard
+├── config.rs        # Multi-site config (ferroada.toml) ou single-site (TARGET_URL)
+├── proxy.rs         # ProxyHttp: pipeline HTTPS → Host → Route → Method → Size → Rate Limit → WAF → Upstream → Headers → DLP
 ├── waf.rs           # WAF: SQLi + XSS + Path Traversal + Sensitive Paths + Body Inspection + double-decode
 ├── headers.rs       # Security headers injection + server header stripping
 ├── shield.rs        # HTTP method restriction + request size limiting + host validation
@@ -280,7 +361,7 @@ src/
 └── dashboard.rs     # Dashboard HTML + API JSON (/api/metrics) + token auth
 ```
 
-### Pipeline de request (v0.3)
+### Pipeline de request (v0.4)
 
 ```
 Cliente
@@ -290,6 +371,9 @@ Cliente
   │ ok
   ▼
 [Host Check] ──421──→ Cliente (Host nao permitido, DNS rebinding)
+  │ ok
+  ▼
+[Route Backend] ──421──→ Cliente (Host sem site configurado, multi-site)
   │ ok
   ▼
 [Method Check] ──405──→ Cliente (TRACE, CONNECT, etc.)
