@@ -1,0 +1,92 @@
+@import 'tailwindcss';
+
+@theme {
+  /* Navy-tinted darks — warm undertone, never pure gray */
+  --color-bg: #0b1120;
+  --color-surface: #111a2e;
+  --color-surface-hi: #172038;
+  --color-surface-lo: #0a0e1a;
+  --color-border: #1a2844;
+  --color-border-hi: #253660;
+
+  /* Text — cool-white hierarchy */
+  --color-txt: #e2e8f0;
+  --color-txt-2: #8b9dc3;
+  --color-txt-3: #4a5f8a;
+
+  /* Accent */
+  --color-green: #4ade80;
+  --color-green-dim: #166534;
+  --color-red: #ef4444;
+  --color-red-dim: #450a0a;
+  --color-amber: #f59e0b;
+  --color-amber-dim: #451a03;
+  --color-blue: #3b82f6;
+  --color-blue-dim: #172554;
+  --color-violet: #a78bfa;
+
+  /* Typography */
+  --font-display: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { height: 100%; width: 100%; overflow: hidden; }
+
+body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--color-bg);
+  color: var(--color-txt);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-border-hi); }
+
+/* Utility */
+.font-display { font-family: var(--font-display); }
+.font-mono { font-family: var(--font-mono); }
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* Card system — dual shadows */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: border-color 0.15s ease-out;
+}
+.card:hover {
+  border-color: var(--color-border-hi);
+}
+
+/* Pulse */
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.pulse { animation: pulse-live 2s ease-in-out infinite; }
+
+/* Stagger entrance */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.stagger-in {
+  animation: slide-up 0.3s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stagger-in, .pulse { animation: none; }
+}

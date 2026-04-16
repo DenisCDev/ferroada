@@ -1,0 +1,83 @@
+@import 'tailwindcss';
+
+@theme {
+	--color-bg: #0a0f1a;
+	--color-surface: #111827;
+	--color-surface-2: #1a2332;
+	--color-surface-3: #0d1420;
+	--color-border: #1e293b;
+	--color-border-light: #334155;
+	--color-text: #f1f5f9;
+	--color-text-secondary: #94a3b8;
+	--color-text-muted: #475569;
+	--color-accent: #4ade80;
+	--color-accent-dim: #22c55e;
+	--color-accent-bg: #052e16;
+	--color-danger: #f87171;
+	--color-danger-dim: #450a0a;
+	--color-warning: #fbbf24;
+	--color-warning-dim: #451a03;
+	--color-purple: #a78bfa;
+	--color-purple-dim: #2e1065;
+	--color-info: #60a5fa;
+	--color-info-dim: #172554;
+
+	--font-sans: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+	--font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+	background: var(--color-bg);
+	color: var(--color-text);
+	font-family: var(--font-sans);
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	overflow: hidden;
+	height: 100vh;
+}
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-border-light); }
+
+.tabular-nums { font-variant-numeric: tabular-nums; }
+
+@keyframes fadeIn {
+	from { opacity: 0; transform: translateY(4px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+.animate-in { animation: fadeIn 0.25s ease-out; }
+
+@keyframes pulse-dot {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.3; }
+}
+.pulse { animation: pulse-dot 2s ease-in-out infinite; }
+
+@keyframes flash-green {
+	0% { color: var(--color-accent); }
+	100% { color: inherit; }
+}
+.flash { animation: flash-green 0.5s ease-out; }
+
+/* ===== CARD ===== */
+.card {
+	background: var(--color-surface);
+	border: 1px solid var(--color-border);
+	border-radius: 12px;
+	padding: 20px;
+	transition: border-color 0.15s;
+}
+.card:hover {
+	border-color: var(--color-border-light);
+}
+
+.card-flush {
+	background: var(--color-surface);
+	border: 1px solid var(--color-border);
+	border-radius: 12px;
+	overflow: hidden;
+}

@@ -1,0 +1,29 @@
+# Rust
+target/
+
+# Node
+node_modules/
+
+# Nuxt
+.nuxt/
+.output/
+dist/
+
+# SvelteKit
+.svelte-kit/
+build/
+
+# Environment
+.env
+*.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
