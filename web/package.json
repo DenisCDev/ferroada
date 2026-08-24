@@ -1,0 +1,22 @@
+{
+  "name": "ferroada-web",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3100",
+    "build": "next build",
+    "start": "next start -p 3100",
+    "screenshot": "node scripts/screenshot.mjs"
+  },
+  "dependencies": {
+    "next": "16.3.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "playwright": "^1.50.0",
+    "typescript": "^5.7.3"
+  }
+}
