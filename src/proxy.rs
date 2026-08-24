@@ -1,12 +1,31 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use once_cell::sync::Lazy;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
-use pingora::proxy::{ProxyHttp, Session};
+use pingora::proxy::{FailToProxy, ProxyHttp, Session};
+use pingora::{Error, ErrorType};
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
-use std::net::IpAddr;
+fn env_secs(var: &str, default: u64) -> Duration {
+    Duration::from_secs(
+        std::env::var(var)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(default),
+    )
+}
+
+static UPSTREAM_CONNECT_TIMEOUT: Lazy<Duration> =
+    Lazy::new(|| env_secs("UPSTREAM_CONNECT_TIMEOUT", 5));
+static UPSTREAM_READ_TIMEOUT: Lazy<Duration> = Lazy::new(|| env_secs("UPSTREAM_READ_TIMEOUT", 30));
+static UPSTREAM_WRITE_TIMEOUT: Lazy<Duration> =
+    Lazy::new(|| env_secs("UPSTREAM_WRITE_TIMEOUT", 30));
+static BODY_READ_TIMEOUT: Lazy<Duration> = Lazy::new(|| env_secs("BODY_READ_TIMEOUT", 10));
 
 use crate::behavioral::{self, BehavioralVerdict};
 use crate::config::Config;
@@ -35,10 +54,14 @@ const MAX_RESPONSE_BUFFER: usize = 50 * 1024 * 1024;
 
 pub struct FerroadaCtx {
     pub body_buffer: Vec<u8>,
+    pub request_body: Vec<u8>,
     pub request_uri: String,
     pub client_addr: String,
     pub content_type: Option<String>,
+    pub request_content_type: Option<String>,
+    pub request_content_encoding: Option<String>,
     pub skip_dlp: bool,
+    pub inspect_request_body: bool,
     pub backend: Option<crate::config::Backend>,
 }
 
@@ -49,10 +72,14 @@ impl ProxyHttp for FerroadaProxy {
     fn new_ctx(&self) -> Self::CTX {
         FerroadaCtx {
             body_buffer: Vec::new(),
+            request_body: Vec::new(),
             request_uri: String::new(),
             client_addr: String::new(),
             content_type: None,
+            request_content_type: None,
+            request_content_encoding: None,
             skip_dlp: false,
+            inspect_request_body: false,
             backend: None,
         }
     }
@@ -309,28 +336,111 @@ impl ProxyHttp for FerroadaProxy {
             }
         }
 
-        // WAF inspection on request body (POST/PUT/PATCH)
+        // Body inspection happens in request_body_filter so every Pingora chunk
+        // is seen. Stealing the body here would leave the upstream with nothing:
+        // Session has no write_request_body in pingora 0.8.
         if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
-            let req_content_type = session.req_header().headers.get("Content-Type")
-                .and_then(|v| v.to_str().ok());
-            // Read buffered body if available
-            if let Some(body) = session.read_request_body().await? {
-                match waf::inspect_body(&body, &uri, &client_addr, req_content_type) {
-                    WafVerdict::Allow => {
-                        // Body was consumed; write it back for upstream
-                        session.write_request_body(Some(body), true).await?;
-                    }
-                    WafVerdict::Block(reason) => {
-                        if let Some(ip) = parse_ip(&client_addr) {
-                            behavioral::record_waf_block(ip);
-                        }
-                        return self.send_403(session, &reason).await;
-                    }
-                }
-            }
+            ctx.inspect_request_body = true;
+            ctx.request_content_type = session
+                .req_header()
+                .headers
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            ctx.request_content_encoding = session
+                .req_header()
+                .headers
+                .get("Content-Encoding")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            session.set_read_timeout(Some(*BODY_READ_TIMEOUT));
         }
 
         Ok(false)
+    }
+
+    async fn request_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if !ctx.inspect_request_body {
+            return Ok(());
+        }
+
+        if let Some(chunk) = body.take() {
+            if shield::body_would_exceed(ctx.request_body.len(), chunk.len()) {
+                self.send_413(session, &ctx.request_uri, &ctx.client_addr)
+                    .await?;
+                return Error::e_explain(
+                    ErrorType::HTTPStatus(413),
+                    "request body exceeded MAX_BODY_SIZE",
+                );
+            }
+            ctx.request_body.extend_from_slice(&chunk);
+        }
+
+        if !end_of_stream {
+            // Pingora 0.8 treats None as EOS (`end_of_body || data.is_none()`).
+            // Some(empty) keeps the upstream stream open while we buffer.
+            *body = hold_body_until_complete();
+            return Ok(());
+        }
+
+        let inspect_bytes = waf::inflate_for_inspect(
+            &ctx.request_body,
+            ctx.request_content_encoding.as_deref(),
+        );
+        match waf::inspect_body(
+            &inspect_bytes,
+            &ctx.request_uri,
+            &ctx.client_addr,
+            ctx.request_content_type.as_deref(),
+        ) {
+            WafVerdict::Allow => {
+                *body = assembled_body_to_upstream(std::mem::take(&mut ctx.request_body));
+                Ok(())
+            }
+            WafVerdict::Block(reason) => {
+                if let Some(ip) = parse_ip(&ctx.client_addr) {
+                    behavioral::record_waf_block(ip);
+                }
+                self.send_403(session, &reason).await?;
+                Error::e_explain(ErrorType::HTTPStatus(403), reason)
+            }
+        }
+    }
+
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        e: &Error,
+        _ctx: &mut Self::CTX,
+    ) -> FailToProxy {
+        let code = match e.etype() {
+            ErrorType::HTTPStatus(code) => *code,
+            _ => 502,
+        };
+        if session.response_written().is_none() {
+            if let Err(err) = session.respond_error(code).await {
+                tracing::warn!(error = %err, status = code, "failed to write error response");
+            }
+        }
+        FailToProxy {
+            error_code: code,
+            can_reuse_downstream: false,
+        }
+    }
+
+    fn suppress_error_log(
+        &self,
+        _session: &Session,
+        _ctx: &Self::CTX,
+        error: &Error,
+    ) -> bool {
+        matches!(error.etype(), ErrorType::HTTPStatus(403 | 413))
     }
 
     async fn upstream_peer(
@@ -340,7 +450,10 @@ impl ProxyHttp for FerroadaProxy {
     ) -> Result<Box<HttpPeer>> {
         let backend = ctx.backend.as_ref().expect("backend must be resolved in request_filter");
         info!(addr = %backend.addr, tls = backend.tls, host = %backend.host, "Connecting to upstream");
-        let peer = HttpPeer::new(backend.addr, backend.tls, backend.host.clone());
+        let mut peer = HttpPeer::new(backend.addr, backend.tls, backend.host.clone());
+        peer.options.connection_timeout = Some(*UPSTREAM_CONNECT_TIMEOUT);
+        peer.options.read_timeout = Some(*UPSTREAM_READ_TIMEOUT);
+        peer.options.write_timeout = Some(*UPSTREAM_WRITE_TIMEOUT);
         Ok(Box::new(peer))
     }
 
@@ -427,6 +540,16 @@ impl ProxyHttp for FerroadaProxy {
     }
 }
 
+/// Pingora 0.8: `None` in `request_body_filter` is end-of-body even when
+/// `end_of_stream` is false. Yield an empty Some to pause the upstream write.
+fn hold_body_until_complete() -> Option<Bytes> {
+    Some(Bytes::new())
+}
+
+fn assembled_body_to_upstream(assembled: Vec<u8>) -> Option<Bytes> {
+    Some(Bytes::from(assembled))
+}
+
 impl FerroadaProxy {
     async fn send_429(&self, session: &mut Session, reason: &str, retry_after: u64) -> Result<bool> {
         let body = format!("429 Too Many Requests: {reason}\n");
@@ -457,6 +580,26 @@ impl FerroadaProxy {
         Ok(true)
     }
 
+    async fn send_413(&self, session: &mut Session, uri: &str, client_addr: &str) -> Result<bool> {
+        metrics::record_block(
+            "size_limit",
+            client_addr,
+            uri,
+            &format!("Body size > max {}", shield::max_body_size()),
+        );
+        let body = "413 Payload Too Large\n";
+        let mut header = ResponseHeader::build(413, None)?;
+        header.insert_header("Content-Type", "text/plain")?;
+        header.insert_header("Content-Length", body.len().to_string())?;
+        session
+            .write_response_header(Box::new(header), false)
+            .await?;
+        session
+            .write_response_body(Some(Bytes::from(body)), true)
+            .await?;
+        Ok(true)
+    }
+
     async fn send_403(&self, session: &mut Session, reason: &str) -> Result<bool> {
         let body = format!("403 Forbidden: {reason}\n");
         let mut header = ResponseHeader::build(403, None)?;
@@ -469,5 +612,29 @@ impl FerroadaProxy {
             .write_response_body(Some(Bytes::from(body)), true)
             .await?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hold_is_empty_some_not_none() {
+        let held = hold_body_until_complete();
+        assert!(
+            held.is_some(),
+            "None is EOS in pingora 0.8; holding must be Some"
+        );
+        assert!(
+            held.unwrap().is_empty(),
+            "the hold chunk must not leak buffered bytes early"
+        );
+    }
+
+    #[test]
+    fn eos_forwards_the_assembled_original() {
+        let out = assembled_body_to_upstream(b"{\"q\":\"1 UNION SELECT\"}".to_vec());
+        assert_eq!(out.unwrap().as_ref(), b"{\"q\":\"1 UNION SELECT\"}");
     }
 }

@@ -96,8 +96,13 @@ Arquivos e diretórios que nunca deveriam ser expostos publicamente:
 #### Inspeção de body (POST/PUT/PATCH)
 
 Formulários, APIs JSON e qualquer payload enviado via POST, PUT ou PATCH são
-inspecionados antes de chegar ao backend. A inspeção é limitada aos primeiros
-64KB do body para não penalizar uploads grandes.
+inspecionados antes de chegar ao backend. O proxy lê **todos** os chunks do
+body (não só o primeiro), aplica o teto de `MAX_BODY_SIZE` também em
+`Transfer-Encoding: chunked`, e se o cliente mandou `Content-Encoding: gzip`
+ou `deflate` o WAF infla uma cópia só para inspecionar — o bytes originais
+seguem para o upstream. A inspeção em si olha os primeiros 64KB do texto
+(inflado, se for o caso) para não penalizar uploads grandes. Um gzip
+gigante é cortado em 256KB inflados, então um zip bomb não estoura a memória.
 
 ### Análise de comportamento (behavioral scoring)
 
@@ -130,7 +135,9 @@ LRU, e a lógica de decay, scoring e ban tem testes unitários
 | **Host Validation** | Valida o Host header contra a allowlist `ALLOWED_HOSTS` (previne DNS rebinding) | 421 Misdirected Request |
 | **HTTPS Enforcement** | Redireciona HTTP → HTTPS quando TLS está configurado + injeta HSTS | 301 Moved Permanently |
 | **Dashboard Auth** | Protege o dashboard com Bearer token quando `DASHBOARD_TOKEN` está definido | 401 Unauthorized |
-| **Double-encoding Protection** | Decodifica a URL recursivamente (máx. 3x) antes do WAF | Previne bypass `%252e%252e` |
+| **Multi-encoding Protection** | Decodifica URL e headers recursivamente (máx. 8x), inclusive `%uXXXX` e `+` como espaço na query | Previne bypass `%2525252e`, XSS percent-encoded em header |
+| **Upstream timeouts** | `HttpPeer` com connect/read/write; body do cliente tem deadline próprio | Upstream morto não segura o worker |
+| **Rate limit com evicção** | Sliding window por IP; chaves expiradas saem do mapa; teto de IPs rastreados | Flood de IPs únicos não cresce a memória para sempre |
 | **Dependency Audit** | `cargo audit` roda no build Docker — falha se houver crate com CVE conhecida | Build falha |
 
 #### Security headers — filosofia "não quebrar"
@@ -271,6 +278,11 @@ Toda a configuração é feita por variáveis de ambiente:
 | `RUST_LOG` | `info` | Nível de log (`debug`, `info`, `warn`, `error`) |
 | `RATE_LIMIT_MAX` | `100` | Máximo de requests por IP na janela |
 | `RATE_LIMIT_WINDOW` | `60` | Janela de tempo em segundos |
+| `RATE_LIMIT_MAX_IPS` | `50000` | Teto de IPs no mapa (evicção LRU acima disso) |
+| `UPSTREAM_CONNECT_TIMEOUT` | `5` | Segundos para o `connect()` no backend |
+| `UPSTREAM_READ_TIMEOUT` | `30` | Segundos máximos lendo a resposta do backend |
+| `UPSTREAM_WRITE_TIMEOUT` | `30` | Segundos máximos escrevendo no backend |
+| `BODY_READ_TIMEOUT` | `10` | Segundos máximos lendo o body do cliente |
 | `TLS_CERT_PATH` | *(opcional)* | Caminho para o certificado TLS (fullchain.pem) |
 | `TLS_KEY_PATH` | *(opcional)* | Caminho para a chave privada TLS |
 | `DASHBOARD_PORT` | `9000` | Porta do dashboard de monitoramento |
@@ -422,13 +434,13 @@ backend direto.
 src/
 ├── main.rs          # Bootstrap: server, TLS, dashboard
 ├── config.rs        # Multi-site (ferroada.toml) ou single-site (TARGET_URL)
-├── proxy.rs         # ProxyHttp: pipeline HTTPS → Host → Route → Method → Size → Rate Limit → Behavioral → WAF → Upstream → Headers → DLP
-├── waf.rs           # WAF: SQLi + XSS + Path Traversal + CRLF + JNDI + Smuggling + Sensitive Paths + Body Inspection + double-decode
+├── proxy.rs         # ProxyHttp: pipeline HTTPS → Host → Route → Method → Size → Rate Limit → Behavioral → WAF (todos os chunks, gzip) → Upstream (com timeout) → Headers → DLP
+├── waf.rs           # WAF: SQLi + XSS + Path Traversal + CRLF + JNDI + Smuggling + Sensitive Paths + body gzip/deflate + decode 8x + headers
 ├── behavioral.rs    # Score de comportamento por IP: scoring, decay, ban, LRU (com testes unitários)
 ├── headers.rs       # Injeção de security headers + remoção de headers de servidor
 ├── shield.rs        # Restrição de métodos + limites de tamanho + validação de Host + bad bots
 ├── dlp.rs           # DLP: mascaramento de CPF e Bearer Token nas respostas
-├── rate_limit.rs    # Rate limiter sliding window por IP (DashMap)
+├── rate_limit.rs    # Rate limiter sliding window por IP, evicção de janela vazia, teto de IPs (DashMap)
 ├── metrics.rs       # Contadores atômicos + ring buffer de eventos
 └── dashboard.rs     # API JSON /api/metrics + HTML mínimo
 web/                 # Painel Next.js (preto e branco)

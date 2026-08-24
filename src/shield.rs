@@ -86,6 +86,16 @@ pub fn check_uri_length(uri: &str, client_addr: &str) -> ShieldVerdict {
     ShieldVerdict::Allow
 }
 
+pub fn max_body_size() -> usize {
+    *MAX_BODY_SIZE
+}
+
+/// True when buffering `chunk_len` more bytes would exceed MAX_BODY_SIZE.
+/// Used for chunked bodies that have no Content-Length.
+pub fn body_would_exceed(current_len: usize, chunk_len: usize) -> bool {
+    current_len.saturating_add(chunk_len) > *MAX_BODY_SIZE
+}
+
 /// Check if the request body size exceeds the configured maximum.
 pub fn check_body_size(content_length: usize, uri: &str, client_addr: &str) -> ShieldVerdict {
     if content_length > *MAX_BODY_SIZE {
@@ -205,4 +215,17 @@ pub fn check_smuggling(
     }
 
     ShieldVerdict::Allow
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunked_body_without_content_length_still_has_a_cap() {
+        assert!(!body_would_exceed(0, 100));
+        assert!(body_would_exceed(max_body_size(), 1));
+        assert!(body_would_exceed(max_body_size() - 10, 11));
+        assert!(!body_would_exceed(max_body_size() - 10, 10));
+    }
 }

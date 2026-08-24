@@ -1,8 +1,17 @@
+use flate2::read::{DeflateDecoder, GzDecoder};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::borrow::Cow;
+use std::io::Read;
 use tracing::warn;
 
 use crate::metrics;
+
+/// Bytes of inflated body the WAF will look at. Caps zip bombs.
+const MAX_INFLATE_FOR_INSPECT: u64 = 256 * 1024;
+const INSPECT_TEXT_LIMIT: usize = 65_536;
+/// Percent-decode passes. 3 was shallow: `%2525252e` (4 layers) survived.
+const MAX_DECODE_PASSES: usize = 8;
 
 pub enum WafVerdict {
     Allow,
@@ -145,7 +154,7 @@ const BLOCKED_PATH_PREFIXES: &[&str] = &[
 
 /// Inspect URI, headers, and optionally request body
 pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -> WafVerdict {
-    let decoded_uri = recursive_urldecode(uri);
+    let decoded_uri = decode_uri(uri);
 
     // Extract just the path (before query string) for sensitive path check
     let path = decoded_uri.split('?').next().unwrap_or(&decoded_uri);
@@ -251,72 +260,76 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
         return WafVerdict::Block(format!("XSS detected: {}", m.as_str()));
     }
 
-    // 5. Check header values
+    // 5. Check header values (raw and decoded — encoded XSS/SQLi in Referer etc.)
     for val in header_values {
-        if CRLF_RE.is_match(val) {
-            warn!(
-                client = client_addr,
-                uri = uri,
-                header_value = val.as_str(),
-                "WAF blocked: CRLF injection in header"
-            );
-            metrics::record_block("crlf", client_addr, uri, "CRLF injection in header");
-            return WafVerdict::Block("CRLF injection detected in header".to_string());
-        }
-        if contains_jndi(val) {
-            warn!(
-                client = client_addr,
-                uri = uri,
-                header_value = val.as_str(),
-                "WAF blocked: JNDI/Log4Shell in header"
-            );
-            metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in header");
-            return WafVerdict::Block("JNDI injection detected in header".to_string());
-        }
-        if let Some(category) = check_sqli(val) {
-            warn!(
-                client = client_addr,
-                uri = uri,
-                header_value = val.as_str(),
-                "WAF blocked: SQL injection in header"
-            );
-            metrics::record_block(
-                "sqli",
-                client_addr,
-                uri,
-                &format!("SQLi in header ({})", category),
-            );
-            return WafVerdict::Block(format!("SQL injection detected in header ({})", category));
-        }
-        if let Some(m) = PATH_TRAVERSAL_RE.find(val) {
-            warn!(
-                client = client_addr,
-                uri = uri,
-                header_value = val.as_str(),
-                "WAF blocked: path traversal in header"
-            );
-            metrics::record_block(
-                "path_traversal",
-                client_addr,
-                uri,
-                &format!("Path traversal in header: {}", m.as_str()),
-            );
-            return WafVerdict::Block(format!("Path traversal detected in header: {}", m.as_str()));
-        }
-        if let Some(m) = XSS_RE.find(val) {
-            warn!(
-                client = client_addr,
-                uri = uri,
-                header_value = val.as_str(),
-                "WAF blocked: XSS in header"
-            );
-            metrics::record_block(
-                "xss",
-                client_addr,
-                uri,
-                &format!("XSS in header: {}", m.as_str()),
-            );
-            return WafVerdict::Block(format!("XSS detected in header: {}", m.as_str()));
+        let decoded_header = recursive_urldecode(val);
+        let to_check: [&str; 2] = [val.as_str(), decoded_header.as_str()];
+        for inspected in to_check {
+            if CRLF_RE.is_match(inspected) {
+                warn!(
+                    client = client_addr,
+                    uri = uri,
+                    header_value = val.as_str(),
+                    "WAF blocked: CRLF injection in header"
+                );
+                metrics::record_block("crlf", client_addr, uri, "CRLF injection in header");
+                return WafVerdict::Block("CRLF injection detected in header".to_string());
+            }
+            if contains_jndi(inspected) {
+                warn!(
+                    client = client_addr,
+                    uri = uri,
+                    header_value = val.as_str(),
+                    "WAF blocked: JNDI/Log4Shell in header"
+                );
+                metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in header");
+                return WafVerdict::Block("JNDI injection detected in header".to_string());
+            }
+            if let Some(category) = check_sqli(inspected) {
+                warn!(
+                    client = client_addr,
+                    uri = uri,
+                    header_value = val.as_str(),
+                    "WAF blocked: SQL injection in header"
+                );
+                metrics::record_block(
+                    "sqli",
+                    client_addr,
+                    uri,
+                    &format!("SQLi in header ({})", category),
+                );
+                return WafVerdict::Block(format!("SQL injection detected in header ({})", category));
+            }
+            if let Some(m) = PATH_TRAVERSAL_RE.find(inspected) {
+                warn!(
+                    client = client_addr,
+                    uri = uri,
+                    header_value = val.as_str(),
+                    "WAF blocked: path traversal in header"
+                );
+                metrics::record_block(
+                    "path_traversal",
+                    client_addr,
+                    uri,
+                    &format!("Path traversal in header: {}", m.as_str()),
+                );
+                return WafVerdict::Block(format!("Path traversal detected in header: {}", m.as_str()));
+            }
+            if let Some(m) = XSS_RE.find(inspected) {
+                warn!(
+                    client = client_addr,
+                    uri = uri,
+                    header_value = val.as_str(),
+                    "WAF blocked: XSS in header"
+                );
+                metrics::record_block(
+                    "xss",
+                    client_addr,
+                    uri,
+                    &format!("XSS in header: {}", m.as_str()),
+                );
+                return WafVerdict::Block(format!("XSS detected in header: {}", m.as_str()));
+            }
         }
     }
 
@@ -336,13 +349,29 @@ pub fn inspect_body(
         Err(_) => return WafVerdict::Allow, // binary body, skip
     };
 
-    // Limit inspection to first 64KB to avoid DoS on large uploads
-    let text = if text.len() > 65536 {
-        &text[..65536]
+    // Limit inspection to first 64KB to avoid DoS on large uploads.
+    // Cut on a char boundary so a multibyte UTF-8 scalar at 64KB cannot panic.
+    let text = if text.len() > INSPECT_TEXT_LIMIT {
+        let mut end = INSPECT_TEXT_LIMIT;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
     } else {
         text
     };
-    let decoded = recursive_urldecode(text);
+
+    let is_form = content_type
+        .map(|ct| {
+            ct.to_ascii_lowercase()
+                .contains("application/x-www-form-urlencoded")
+        })
+        .unwrap_or(false);
+    let decoded = if is_form {
+        recursive_urldecode(&text.replace('+', " "))
+    } else {
+        recursive_urldecode(text)
+    };
 
     // CRLF check — skip for multipart/form-data (legitimate \r\n in uploads)
     let is_multipart = content_type
@@ -433,11 +462,49 @@ fn collapse_jndi_obfuscation(input: &str) -> String {
     current
 }
 
-/// Recursively URL-decode to defeat double/triple encoding bypass attempts.
-/// Max 3 iterations to prevent infinite loops.
+/// Inflate gzip/deflate for WAF inspection only. The original bytes stay on
+/// the wire to the upstream. Unknown encodings (br, zstd) and corrupt streams
+/// fall back to the raw bytes so a declared encoding cannot hide plaintext.
+pub fn inflate_for_inspect<'a>(body: &'a [u8], content_encoding: Option<&str>) -> Cow<'a, [u8]> {
+    let enc = content_encoding.unwrap_or("").to_ascii_lowercase();
+    if enc.is_empty() || enc == "identity" {
+        return Cow::Borrowed(body);
+    }
+    let tokens: Vec<&str> = enc.split(',').map(|t| t.trim()).collect();
+    if tokens.iter().any(|t| *t == "gzip" || *t == "x-gzip") {
+        return inflate_with(GzDecoder::new(body), body);
+    }
+    if tokens.iter().any(|t| *t == "deflate") {
+        return inflate_with(DeflateDecoder::new(body), body);
+    }
+    Cow::Borrowed(body)
+}
+
+fn inflate_with<'a, R: Read>(decoder: R, fallback: &'a [u8]) -> Cow<'a, [u8]> {
+    let mut out = Vec::new();
+    let mut limited = decoder.take(MAX_INFLATE_FOR_INSPECT);
+    match limited.read_to_end(&mut out) {
+        Ok(_) if !out.is_empty() => Cow::Owned(out),
+        _ => Cow::Borrowed(fallback),
+    }
+}
+
+fn decode_uri(uri: &str) -> String {
+    match uri.split_once('?') {
+        Some((path, query)) => {
+            let path = recursive_urldecode(path);
+            let query = recursive_urldecode(&query.replace('+', " "));
+            format!("{path}?{query}")
+        }
+        None => recursive_urldecode(uri),
+    }
+}
+
+/// Recursively URL-decode to defeat multi-layer encoding bypasses.
+/// Also collapses IIS-style `%uXXXX` unicode escapes.
 fn recursive_urldecode(input: &str) -> String {
     let mut current = input.to_string();
-    for _ in 0..3 {
+    for _ in 0..MAX_DECODE_PASSES {
         let decoded = urldecode(&current);
         if decoded == current {
             break;
@@ -448,29 +515,187 @@ fn recursive_urldecode(input: &str) -> String {
 }
 
 fn urldecode(input: &str) -> String {
+    let bytes = input.as_bytes();
     let mut result = String::with_capacity(input.len());
-    let mut chars = input.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next();
-            let lo = chars.next();
-            if let (Some(h), Some(l)) = (hi, lo) {
-                let hex = [h, l];
-                if let Ok(s) = std::str::from_utf8(&hex) {
-                    if let Ok(byte) = u8::from_str_radix(s, 16) {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 6 <= bytes.len() && (bytes[i + 1] == b'u' || bytes[i + 1] == b'U') {
+                if let Ok(hex) = std::str::from_utf8(&bytes[i + 2..i + 6]) {
+                    if let Ok(cp) = u32::from_str_radix(hex, 16) {
+                        if let Some(ch) = char::from_u32(cp) {
+                            result.push(ch);
+                            i += 6;
+                            continue;
+                        }
+                    }
+                }
+            }
+            if i + 3 <= bytes.len() {
+                if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                    if let Ok(byte) = u8::from_str_radix(hex, 16) {
                         result.push(byte as char);
+                        i += 3;
                         continue;
                     }
                 }
-                result.push(b as char);
-                result.push(h as char);
-                result.push(l as char);
-            } else {
-                result.push(b as char);
             }
-        } else {
-            result.push(b as char);
         }
+        result.push(bytes[i] as char);
+        i += 1;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::write::{DeflateEncoder, GzEncoder};
+    use flate2::Compression;
+    use std::io::Write;
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(data).expect("gzip write");
+        enc.finish().expect("gzip finish")
+    }
+
+    fn deflate(data: &[u8]) -> Vec<u8> {
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(data).expect("deflate write");
+        enc.finish().expect("deflate finish")
+    }
+
+    fn blocked(v: WafVerdict) -> bool {
+        matches!(v, WafVerdict::Block(_))
+    }
+
+    #[test]
+    fn quadruple_encoded_traversal_is_blocked() {
+        // 4 layers of %25 — the old 3-pass decoder stopped at `%2e%2e`.
+        let uri = "/%2525252e%2525252e%2525252fetc%2525252fpasswd";
+        assert!(
+            blocked(inspect_request(uri, &[], "1.1.1.1")),
+            "4-layer encoded ../ must not slip past the WAF"
+        );
+    }
+
+    #[test]
+    fn unicode_percent_u_traversal_is_blocked() {
+        let uri = "/%u002e%u002e/%u002e%u002e/etc/passwd";
+        assert!(blocked(inspect_request(uri, &[], "1.1.1.1")));
+    }
+
+    #[test]
+    fn plus_as_space_in_query_sqli_is_blocked() {
+        let uri = "/search?q=1+OR+1=1";
+        assert!(
+            blocked(inspect_request(uri, &[], "1.1.1.1")),
+            "form-style + in the query string is a space"
+        );
+    }
+
+    #[test]
+    fn encoded_xss_in_header_is_blocked() {
+        let headers = vec!["%3Cscript%3Ealert(1)%3C/script%3E".to_string()];
+        assert!(
+            blocked(inspect_request("/", &headers, "1.1.1.1")),
+            "percent-encoded XSS in a header must be decoded then blocked"
+        );
+    }
+
+    #[test]
+    fn gzip_body_sqli_is_blocked() {
+        let payload = gzip(br#"{"id":"1 UNION SELECT * FROM users"}"#);
+        let inflated = inflate_for_inspect(&payload, Some("gzip"));
+        assert!(
+            blocked(inspect_body(&inflated, "/", "1.1.1.1", Some("application/json"))),
+            "SQLi inside gzip must be visible to the WAF"
+        );
+    }
+
+    #[test]
+    fn deflate_body_xss_is_blocked() {
+        let payload = deflate(b"<script>alert(1)</script>");
+        let inflated = inflate_for_inspect(&payload, Some("deflate"));
+        assert!(blocked(inspect_body(
+            &inflated,
+            "/",
+            "1.1.1.1",
+            Some("text/html")
+        )));
+    }
+
+    #[test]
+    fn gzip_inspect_does_not_mutate_original() {
+        let payload = gzip(b"hello");
+        let original = payload.clone();
+        let _ = inflate_for_inspect(&payload, Some("gzip"));
+        assert_eq!(payload, original);
+    }
+
+    #[test]
+    fn corrupt_gzip_falls_back_to_raw_so_plaintext_still_matches() {
+        let raw = b"1 UNION SELECT password FROM users";
+        let inflated = inflate_for_inspect(raw, Some("gzip"));
+        assert!(blocked(inspect_body(
+            &inflated,
+            "/",
+            "1.1.1.1",
+            Some("text/plain")
+        )));
+    }
+
+    #[test]
+    fn form_urlencoded_plus_sqli_in_body_is_blocked() {
+        let body = b"q=1+OR+1=1";
+        assert!(blocked(inspect_body(
+            body,
+            "/",
+            "1.1.1.1",
+            Some("application/x-www-form-urlencoded")
+        )));
+    }
+
+    #[test]
+    fn zip_bomb_inflate_is_capped() {
+        let zeros = vec![0u8; 1024 * 1024];
+        let payload = gzip(&zeros);
+        let inflated = inflate_for_inspect(&payload, Some("gzip"));
+        assert!(
+            inflated.len() as u64 <= MAX_INFLATE_FOR_INSPECT,
+            "inflate must stop at the inspect cap, got {}",
+            inflated.len()
+        );
+    }
+
+    #[test]
+    fn sqli_split_across_chunks_is_blocked_once_assembled() {
+        let first = br#"{"q":"1 UNI"#;
+        let second = br#"ON SELECT * FROM users"}"#;
+        let mut assembled = first.to_vec();
+        assembled.extend_from_slice(second);
+        assert!(
+            blocked(inspect_body(
+                &assembled,
+                "/",
+                "1.1.1.1",
+                Some("application/json")
+            )),
+            "payload split across chunks must still match after assembly"
+        );
+        assert!(
+            !blocked(inspect_body(first, "/", "1.1.1.1", Some("application/json"))),
+            "sanity: the first chunk alone is not a SQLi"
+        );
+    }
+
+    #[test]
+    fn identity_encoding_is_borrowed() {
+        let body = b"ok";
+        match inflate_for_inspect(body, Some("identity")) {
+            Cow::Borrowed(b) => assert_eq!(b, body),
+            Cow::Owned(_) => panic!("identity must not copy"),
+        }
+    }
 }

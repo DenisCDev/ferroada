@@ -569,6 +569,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "dotenvy",
+ "flate2",
  "http",
  "once_cell",
  "pingora",
