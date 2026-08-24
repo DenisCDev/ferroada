@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/dashboard.png" width="880" alt="Painel do Ferroada em preto e branco: visão geral com requisições, bloqueios, tráfego limpo e lista de eventos">
+  <img src="assets/mtg-sting.jpg" width="640" alt="Ferroada, o Punhal Reluzente — arte de Nino Is, Tales of Middle-earth (2023)">
 </p>
 
 > *"Sting, the Glinting Dagger"*, que a edição brasileira de **Magic: The Gathering** imprimiu como
@@ -174,6 +174,10 @@ Se o backend vazar um CPF ou um token na resposta, o cliente final nunca recebe
 o dado real.
 
 ### Monitoramento
+
+<p align="center">
+  <img src="assets/dashboard.png" width="880" alt="Painel do Ferroada em preto e branco: visão geral com requisições, bloqueios, tráfego limpo e lista de eventos">
+</p>
 
 O binário serve JSON em `http://localhost:9000/api/metrics` e um HTML mínimo na mesma porta.
 
