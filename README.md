@@ -1,14 +1,13 @@
 <h1 align="center">Ferroada</h1>
 
 <p align="center">
-  <b>Proxy reverso de segurança: WAF, DLP e análise de comportamento na frente do seu sistema, sem mudar uma linha dele</b><br>
-  <sub><i>"I will give you a name, and I shall call you Sting."</i></sub>
+  <b>Proxy reverso que filtra ataques conhecidos, mascara dados sensíveis e registra eventos</b>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/rust-pingora%200.8-D4A24E?labelColor=171310" alt="Rust com Pingora 0.8">
   <img src="https://img.shields.io/badge/bin%C3%A1rio%20%C3%BAnico-distroless%20~20MB-43A48E?labelColor=171310" alt="binário único, container distroless de ~20MB">
-  <img src="https://img.shields.io/badge/deps%20externas-zero-43A48E?labelColor=171310" alt="zero dependências externas">
+  <img src="https://img.shields.io/badge/servi%C3%A7os%20externos-n%C3%A3o%20exige-43A48E?labelColor=171310" alt="não exige serviços externos">
   <img src="https://img.shields.io/badge/cargo%20audit-no%20build-D4A24E?labelColor=171310" alt="cargo audit roda no build">
 </p>
 
@@ -16,22 +15,20 @@
   <img src="assets/mtg-sting.jpg" width="640" alt="Ferroada, o Punhal Reluzente — arte de Nino Is, Tales of Middle-earth (2023)">
 </p>
 
-> *"Sting, the Glinting Dagger"*, que a edição brasileira de **Magic: The Gathering** imprimiu como
-> **"Ferroada, o Punhal Reluzente"**. Arte de Nino Is, Tales of Middle-earth (2023).
-> A lâmina acende quando o inimigo se aproxima. É exatamente o serviço.
+<p align="center">
+  <sub><i>"I shall call you Sting"</i><br>
+  — <b>O Hobbit</b>, capítulo VIII · arte de Nino Is para Magic: The Gathering, Tales of Middle-earth (2023)
+</p>
 
-**Todo ataque chega pela mesma porta que o tráfego legítimo.** SQL injection, XSS,
-path traversal, scanner rodando a lista de sempre — tudo entra como requisição HTTP
-comum, e a maioria dos sistemas só percebe quando o estrago já está no log. Corrigir
-o backend é o caminho certo, e também o mais lento: cada framework, cada versão,
-cada sistema legado é uma frente nova.
+O Ferroada fica entre a internet e uma aplicação existente. Ele inspeciona
+requisições, bloqueia padrões conhecidos de ataque, limita tráfego por endereço
+IP e mascara dados sensíveis em respostas. Os eventos aparecem em um painel e
+em logs estruturados, sem exigir mudanças no código da aplicação protegida.
 
-O Ferroada ataca o problema pela infraestrutura: um proxy reverso que fica **na
-frente** do sistema existente, sem alterar uma linha dele. Bloqueia ataque conhecido
-na entrada, mascara dado sensível na saída e mantém um score de comportamento por IP
-— quem age como scanner é freado antes de achar alguma coisa. Construído com
-[Pingora](https://github.com/cloudflare/pingora), o motor de proxy da Cloudflare,
-compilado num binário único e distribuído como container distroless de ~20MB.
+Ele complementa a segurança do backend; não substitui autenticação, autorização
+ou validação dentro da aplicação. O proxy é construído em Rust com
+[Pingora](https://github.com/cloudflare/pingora), distribuído como um binário
+único e em uma imagem distroless de cerca de 20 MB.
 
 ```
 Internet → [Ferroada :3000] → Seu Sistema :8080
@@ -170,8 +167,9 @@ Server, X-Powered-By, X-AspNet-Version, X-Debug-Token, X-Runtime
 | **CPF** | `123.456.789-00` | `***.***.***-**` |
 | **Bearer Token** | `Bearer eyJhbGciOi...` | `Bearer [REDACTED]` |
 
-Se o backend vazar um CPF ou um token na resposta, o cliente final nunca recebe
-o dado real.
+Com `DLP_ENABLED=true`, respostas textuais em UTF-8 de até 50 MB têm CPF e
+tokens conhecidos mascarados antes de chegar ao cliente. Respostas comprimidas
+(por exemplo, com `Content-Encoding: gzip`) não são inspecionadas.
 
 ### Monitoramento
 
