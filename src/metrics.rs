@@ -152,10 +152,14 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
 
 pub fn record_dlp(cpf_count: u64, token_count: u64) {
     if cpf_count > 0 {
-        METRICS.dlp_cpf_masked.fetch_add(cpf_count, Ordering::Relaxed);
+        METRICS
+            .dlp_cpf_masked
+            .fetch_add(cpf_count, Ordering::Relaxed);
     }
     if token_count > 0 {
-        METRICS.dlp_tokens_masked.fetch_add(token_count, Ordering::Relaxed);
+        METRICS
+            .dlp_tokens_masked
+            .fetch_add(token_count, Ordering::Relaxed);
     }
     if cpf_count > 0 || token_count > 0 {
         METRICS.push_event(SecurityEvent {

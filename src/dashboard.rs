@@ -18,11 +18,7 @@ impl ProxyHttp for DashboardService {
         DashboardCtx
     }
 
-    async fn request_filter(
-        &self,
-        session: &mut Session,
-        _ctx: &mut Self::CTX,
-    ) -> Result<bool> {
+    async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
         let path = session.req_header().uri.path();
         let method = session.req_header().method.as_str();
 
@@ -66,12 +62,7 @@ impl ProxyHttp for DashboardService {
     }
 }
 
-async fn respond(
-    session: &mut Session,
-    status: u16,
-    content_type: &str,
-    body: &str,
-) -> Result<()> {
+async fn respond(session: &mut Session, status: u16, content_type: &str, body: &str) -> Result<()> {
     let mut header = ResponseHeader::build(status, None)?;
     header.insert_header("Content-Type", content_type)?;
     header.insert_header("Content-Length", body.len().to_string())?;
@@ -79,7 +70,10 @@ async fn respond(
     if let Ok(origin) = std::env::var("DASHBOARD_CORS") {
         if !origin.is_empty() {
             header.insert_header("Access-Control-Allow-Origin", origin)?;
-            header.insert_header("Access-Control-Allow-Headers", "Authorization, Content-Type")?;
+            header.insert_header(
+                "Access-Control-Allow-Headers",
+                "Authorization, Content-Type",
+            )?;
             header.insert_header("Access-Control-Allow-Methods", "GET, OPTIONS")?;
         }
     }

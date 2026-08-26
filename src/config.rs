@@ -41,8 +41,7 @@ impl Config {
         }
 
         // Fallback: single TARGET_URL (backward compatible)
-        let target_url =
-            std::env::var("TARGET_URL").expect("TARGET_URL or ferroada.toml required");
+        let target_url = std::env::var("TARGET_URL").expect("TARGET_URL or ferroada.toml required");
         let backend = resolve_url(&target_url);
         info!(
             backend = %target_url,
@@ -147,9 +146,7 @@ fn resolve_url(url: &str) -> Backend {
 
     let (host, port) = if let Some(idx) = authority.rfind(':') {
         let h = &authority[..idx];
-        let p = authority[idx + 1..]
-            .parse::<u16>()
-            .unwrap_or(default_port);
+        let p = authority[idx + 1..].parse::<u16>().unwrap_or(default_port);
         (h.to_string(), p)
     } else {
         (authority.to_string(), default_port)

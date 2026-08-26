@@ -84,11 +84,7 @@ impl ProxyHttp for FerroadaProxy {
         }
     }
 
-    async fn request_filter(
-        &self,
-        session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<bool> {
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         metrics::increment_requests();
 
         let uri = session
@@ -109,14 +105,21 @@ impl ProxyHttp for FerroadaProxy {
 
         // Behavioral scoring — check threat score before any processing
         if let Some(ip) = parse_ip(&client_addr) {
-            let ua = session.req_header().headers.get("User-Agent")
+            let ua = session
+                .req_header()
+                .headers
+                .get("User-Agent")
                 .and_then(|v| v.to_str().ok());
             match behavioral::check_and_record(ip, &uri, ua, &client_addr) {
                 BehavioralVerdict::Block => {
-                    return self.send_403(session, "Temporarily blocked: suspicious activity").await;
+                    return self
+                        .send_403(session, "Temporarily blocked: suspicious activity")
+                        .await;
                 }
                 BehavioralVerdict::Throttle => {
-                    return self.send_429(session, "Too many suspicious requests", 30).await;
+                    return self
+                        .send_429(session, "Too many suspicious requests", 30)
+                        .await;
                 }
                 BehavioralVerdict::Allow => {}
             }
@@ -204,29 +207,50 @@ impl ProxyHttp for FerroadaProxy {
                 session
                     .write_response_body(Some(Bytes::from(body)), true)
                     .await?;
-                metrics::record_block("host", &client_addr, &uri, &format!("No site for host: {}", host_for_resolve));
+                metrics::record_block(
+                    "host",
+                    &client_addr,
+                    &uri,
+                    &format!("No site for host: {}", host_for_resolve),
+                );
                 return Ok(true);
             }
         }
 
         // HTTP Request Smuggling detection
         let has_cl = session.req_header().headers.get("Content-Length").is_some();
-        let cl_count = session.req_header().headers.get_all("Content-Length").iter().count();
-        let te = session.req_header().headers.get("Transfer-Encoding")
+        let cl_count = session
+            .req_header()
+            .headers
+            .get_all("Content-Length")
+            .iter()
+            .count();
+        let te = session
+            .req_header()
+            .headers
+            .get("Transfer-Encoding")
             .and_then(|v| v.to_str().ok());
         match shield::check_smuggling(has_cl, cl_count, te, &uri, &client_addr) {
             ShieldVerdict::BlockSmuggling => {
-                return self.send_400(session, "Bad Request: HTTP request smuggling detected").await;
+                return self
+                    .send_400(session, "Bad Request: HTTP request smuggling detected")
+                    .await;
             }
             _ => {}
         }
 
         // Bad Bot User-Agent check
-        let ua = session.req_header().headers.get("User-Agent")
-            .and_then(|v| v.to_str().ok()).unwrap_or("");
+        let ua = session
+            .req_header()
+            .headers
+            .get("User-Agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         match shield::check_user_agent(ua, &uri, &client_addr) {
             ShieldVerdict::BlockBadBot => {
-                return self.send_403(session, "Blocked: suspicious user-agent").await;
+                return self
+                    .send_403(session, "Blocked: suspicious user-agent")
+                    .await;
             }
             _ => {}
         }
@@ -303,10 +327,7 @@ impl ProxyHttp for FerroadaProxy {
                 let mut header = ResponseHeader::build(429, None)?;
                 header.insert_header("Content-Type", "text/plain")?;
                 header.insert_header("Content-Length", body.len().to_string())?;
-                header.insert_header(
-                    "Retry-After",
-                    self.rate_limiter.window_secs().to_string(),
-                )?;
+                header.insert_header("Retry-After", self.rate_limiter.window_secs().to_string())?;
                 session
                     .write_response_header(Box::new(header), false)
                     .await?;
@@ -389,10 +410,8 @@ impl ProxyHttp for FerroadaProxy {
             return Ok(());
         }
 
-        let inspect_bytes = waf::inflate_for_inspect(
-            &ctx.request_body,
-            ctx.request_content_encoding.as_deref(),
-        );
+        let inspect_bytes =
+            waf::inflate_for_inspect(&ctx.request_body, ctx.request_content_encoding.as_deref());
         match waf::inspect_body(
             &inspect_bytes,
             &ctx.request_uri,
@@ -434,12 +453,7 @@ impl ProxyHttp for FerroadaProxy {
         }
     }
 
-    fn suppress_error_log(
-        &self,
-        _session: &Session,
-        _ctx: &Self::CTX,
-        error: &Error,
-    ) -> bool {
+    fn suppress_error_log(&self, _session: &Session, _ctx: &Self::CTX, error: &Error) -> bool {
         matches!(error.etype(), ErrorType::HTTPStatus(403 | 413))
     }
 
@@ -448,7 +462,10 @@ impl ProxyHttp for FerroadaProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let backend = ctx.backend.as_ref().expect("backend must be resolved in request_filter");
+        let backend = ctx
+            .backend
+            .as_ref()
+            .expect("backend must be resolved in request_filter");
         info!(addr = %backend.addr, tls = backend.tls, host = %backend.host, "Connecting to upstream");
         let mut peer = HttpPeer::new(backend.addr, backend.tls, backend.host.clone());
         peer.options.connection_timeout = Some(*UPSTREAM_CONNECT_TIMEOUT);
@@ -551,7 +568,12 @@ fn assembled_body_to_upstream(assembled: Vec<u8>) -> Option<Bytes> {
 }
 
 impl FerroadaProxy {
-    async fn send_429(&self, session: &mut Session, reason: &str, retry_after: u64) -> Result<bool> {
+    async fn send_429(
+        &self,
+        session: &mut Session,
+        reason: &str,
+        retry_after: u64,
+    ) -> Result<bool> {
         let body = format!("429 Too Many Requests: {reason}\n");
         let mut header = ResponseHeader::build(429, None)?;
         header.insert_header("Content-Type", "text/plain")?;

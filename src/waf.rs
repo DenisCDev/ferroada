@@ -298,7 +298,10 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
                     uri,
                     &format!("SQLi in header ({})", category),
                 );
-                return WafVerdict::Block(format!("SQL injection detected in header ({})", category));
+                return WafVerdict::Block(format!(
+                    "SQL injection detected in header ({})",
+                    category
+                ));
             }
             if let Some(m) = PATH_TRAVERSAL_RE.find(inspected) {
                 warn!(
@@ -313,7 +316,10 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
                     uri,
                     &format!("Path traversal in header: {}", m.as_str()),
                 );
-                return WafVerdict::Block(format!("Path traversal detected in header: {}", m.as_str()));
+                return WafVerdict::Block(format!(
+                    "Path traversal detected in header: {}",
+                    m.as_str()
+                ));
             }
             if let Some(m) = XSS_RE.find(inspected) {
                 warn!(
@@ -609,7 +615,12 @@ mod tests {
         let payload = gzip(br#"{"id":"1 UNION SELECT * FROM users"}"#);
         let inflated = inflate_for_inspect(&payload, Some("gzip"));
         assert!(
-            blocked(inspect_body(&inflated, "/", "1.1.1.1", Some("application/json"))),
+            blocked(inspect_body(
+                &inflated,
+                "/",
+                "1.1.1.1",
+                Some("application/json")
+            )),
             "SQLi inside gzip must be visible to the WAF"
         );
     }
@@ -685,7 +696,12 @@ mod tests {
             "payload split across chunks must still match after assembly"
         );
         assert!(
-            !blocked(inspect_body(first, "/", "1.1.1.1", Some("application/json"))),
+            !blocked(inspect_body(
+                first,
+                "/",
+                "1.1.1.1",
+                Some("application/json")
+            )),
             "sanity: the first chunk alone is not a SQLi"
         );
     }

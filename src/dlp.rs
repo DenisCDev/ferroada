@@ -5,13 +5,11 @@ use tracing::info;
 
 use crate::metrics;
 
-static CPF_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\d{3}\.\d{3}\.\d{3}-\d{2}").expect("invalid CPF regex")
-});
+static CPF_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\d{3}\.\d{3}\.\d{3}-\d{2}").expect("invalid CPF regex"));
 
-static BEARER_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*").expect("invalid Bearer regex")
-});
+static BEARER_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*").expect("invalid Bearer regex"));
 
 /// Check if DLP masking is enabled (default: true for backward compat).
 fn is_enabled() -> bool {

@@ -36,7 +36,12 @@ impl RateLimiter {
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_IPS);
 
-        tracing::info!(max_requests, window_secs, max_ips, "Rate limiter initialized");
+        tracing::info!(
+            max_requests,
+            window_secs,
+            max_ips,
+            "Rate limiter initialized"
+        );
 
         Self::new(max_requests, window_secs, max_ips)
     }

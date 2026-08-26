@@ -14,7 +14,8 @@ const DEFAULT_MAX_BODY: usize = 10_485_760;
 const DEFAULT_MAX_URI: usize = 8_192;
 
 static ALLOWED_METHODS: Lazy<HashSet<String>> = Lazy::new(|| {
-    let methods_str = std::env::var("ALLOWED_METHODS").unwrap_or_else(|_| DEFAULT_ALLOWED.to_string());
+    let methods_str =
+        std::env::var("ALLOWED_METHODS").unwrap_or_else(|_| DEFAULT_ALLOWED.to_string());
     methods_str
         .split(',')
         .map(|m| m.trim().to_uppercase())
@@ -65,7 +66,12 @@ pub fn check_method(method: &str, uri: &str, client_addr: &str) -> ShieldVerdict
             uri = uri,
             "Blocked disallowed HTTP method"
         );
-        metrics::record_block("method", client_addr, uri, &format!("Blocked method: {}", method));
+        metrics::record_block(
+            "method",
+            client_addr,
+            uri,
+            &format!("Blocked method: {}", method),
+        );
         return ShieldVerdict::BlockMethod;
     }
     ShieldVerdict::Allow
@@ -80,7 +86,12 @@ pub fn check_uri_length(uri: &str, client_addr: &str) -> ShieldVerdict {
             max = *MAX_URI_LENGTH,
             "Blocked: URI too long"
         );
-        metrics::record_block("size_limit", client_addr, &uri[..128.min(uri.len())], &format!("URI length {} > max {}", uri.len(), *MAX_URI_LENGTH));
+        metrics::record_block(
+            "size_limit",
+            client_addr,
+            &uri[..128.min(uri.len())],
+            &format!("URI length {} > max {}", uri.len(), *MAX_URI_LENGTH),
+        );
         return ShieldVerdict::BlockUriLength;
     }
     ShieldVerdict::Allow
@@ -105,7 +116,12 @@ pub fn check_body_size(content_length: usize, uri: &str, client_addr: &str) -> S
             max = *MAX_BODY_SIZE,
             "Blocked: body too large"
         );
-        metrics::record_block("size_limit", client_addr, uri, &format!("Body size {} > max {}", content_length, *MAX_BODY_SIZE));
+        metrics::record_block(
+            "size_limit",
+            client_addr,
+            uri,
+            &format!("Body size {} > max {}", content_length, *MAX_BODY_SIZE),
+        );
         return ShieldVerdict::BlockBodySize;
     }
     ShieldVerdict::Allow
@@ -116,14 +132,23 @@ pub fn check_body_size(content_length: usize, uri: &str, client_addr: &str) -> S
 pub fn check_host(host_header: &str, uri: &str, client_addr: &str) -> ShieldVerdict {
     if let Some(ref allowed) = *ALLOWED_HOSTS {
         // Strip port from Host header (e.g., "example.com:3000" -> "example.com")
-        let host = host_header.split(':').next().unwrap_or(host_header).to_lowercase();
+        let host = host_header
+            .split(':')
+            .next()
+            .unwrap_or(host_header)
+            .to_lowercase();
         if !allowed.contains(&host) {
             warn!(
                 client = client_addr,
                 host = host_header,
                 "Blocked: Host header not in allowlist"
             );
-            metrics::record_block("host", client_addr, uri, &format!("Blocked host: {}", host_header));
+            metrics::record_block(
+                "host",
+                client_addr,
+                uri,
+                &format!("Blocked host: {}", host_header),
+            );
             return ShieldVerdict::BlockHost;
         }
     }
@@ -139,9 +164,24 @@ static BAD_BOT_ENABLED: Lazy<bool> = Lazy::new(|| {
 });
 
 const BAD_BOT_SIGNATURES: &[&str] = &[
-    "nikto", "sqlmap", "nessus", "openvas", "nmap", "dirbuster",
-    "gobuster", "wfuzz", "ffuf", "hydra", "metasploit", "masscan",
-    "zmeu", "w3af", "nuclei", "whatweb", "skipfish", "arachni",
+    "nikto",
+    "sqlmap",
+    "nessus",
+    "openvas",
+    "nmap",
+    "dirbuster",
+    "gobuster",
+    "wfuzz",
+    "ffuf",
+    "hydra",
+    "metasploit",
+    "masscan",
+    "zmeu",
+    "w3af",
+    "nuclei",
+    "whatweb",
+    "skipfish",
+    "arachni",
 ];
 
 /// Check if the User-Agent matches known attack tool signatures.
@@ -184,7 +224,12 @@ pub fn check_smuggling(
             cl_count = content_length_count,
             "Blocked: multiple Content-Length headers (smuggling)"
         );
-        metrics::record_block("smuggling", client_addr, uri, "Multiple Content-Length headers");
+        metrics::record_block(
+            "smuggling",
+            client_addr,
+            uri,
+            "Multiple Content-Length headers",
+        );
         return ShieldVerdict::BlockSmuggling;
     }
 
