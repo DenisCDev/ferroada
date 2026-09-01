@@ -66,7 +66,11 @@ fn fuzz_h1(data: &[u8]) {
     let transfer_encoding = request
         .headers
         .iter()
-        .find(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
+        .filter(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
+        .collect::<Vec<_>>();
+    let transfer_encoding_count = transfer_encoding.len();
+    let transfer_encoding = transfer_encoding
+        .first()
         .map(|header| String::from_utf8_lossy(header.value));
 
     let _ = shield::check_headers(request.headers.len(), body_offset, uri, "127.0.0.1");
@@ -75,6 +79,7 @@ fn fuzz_h1(data: &[u8]) {
     let _ = shield::check_smuggling(
         !content_lengths.is_empty(),
         content_lengths.len(),
+        transfer_encoding_count,
         transfer_encoding.as_deref(),
         uri,
         "127.0.0.1",
