@@ -1,20 +1,13 @@
-import { EventTable } from "@/components/Dashboard";
-import { getMetrics } from "@/lib/get-metrics";
+import { EventsPanel } from "@/components/Dashboard";
+import { demoMetrics } from "@/lib/demo";
 
-export const dynamic = "force-dynamic";
-
-export default async function EventosPage() {
-  const data = await getMetrics();
+export default function EventosPage() {
+  const data = { ...demoMetrics(), demo: true as const, demo_reason: "unavailable" as const };
   return (
     <>
       <h1>Eventos</h1>
-      <p className="lede">Bloqueios e mascaramentos, mais recentes primeiro.</p>
-      {data.demo ? (
-        <p className="banner" role="status">
-          O proxy em :9000 não respondeu. Estes números são de demonstração.
-        </p>
-      ) : null}
-      <EventTable events={data.recent_events} />
+      <p className="lede">Eventos de segurança e observações, mais recentes primeiro.</p>
+      <EventsPanel initial={data} />
     </>
   );
 }

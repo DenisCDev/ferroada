@@ -12,6 +12,8 @@
 [[sites]]
 hosts = ["meusite.com", "www.meusite.com"]
 backend = "http://backend-a:8080"
+waf_profile = "wordpress"
+require_complete_waf_inspection = ["/api/payment", "/api/admin/"]
 
 [[sites]]
 hosts = ["api.meusite.com"]

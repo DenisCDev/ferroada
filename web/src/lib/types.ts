@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 export type BlockedKey =
   | "sqli"
   | "xss"
@@ -14,20 +16,40 @@ export type BlockedKey =
   | "jndi"
   | "bad_bot"
   | "behavioral_throttle"
-  | "behavioral_block";
+  | "behavioral_block"
+  | "request_buffer_limit"
+  | "dlp_partial_block";
 
-export interface SecurityEvent {
-  timestamp: string;
-  event_type: string;
-  client_ip: string;
-  uri: string;
-  detail: string;
-}
+const countSchema = z.number().finite().nonnegative();
 
-export interface FerroadaMetrics {
-  requests_total: number;
-  blocked: Record<string, number>;
-  https_redirect: number;
-  dlp: { cpf_masked: number; tokens_masked: number };
-  recent_events: SecurityEvent[];
-}
+export const securityEventSchema = z.object({
+  timestamp: z.string().datetime(),
+  event_type: z.string(),
+  client_ip: z.string(),
+  uri: z.string(),
+  detail: z.string(),
+});
+
+export const ferroadaMetricsSchema = z.object({
+  requests_total: countSchema,
+  blocked: z.record(z.string(), countSchema),
+  https_redirect: countSchema,
+  waf_inspection: z.object({
+    complete: countSchema,
+    truncated: countSchema,
+    unsupported_encoding: countSchema,
+    unsupported_content_type: countSchema,
+  }),
+  waf_monitored: countSchema,
+  dlp: z.object({ cpf_masked: countSchema, tokens_masked: countSchema }),
+  recent_events: z.array(securityEventSchema),
+});
+
+export const metricsResultSchema = ferroadaMetricsSchema.extend({
+  demo: z.boolean(),
+  demo_reason: z.enum(["unauthorized", "unavailable", "invalid_response"]).optional(),
+});
+
+export type SecurityEvent = z.infer<typeof securityEventSchema>;
+export type FerroadaMetrics = z.infer<typeof ferroadaMetricsSchema>;
+export type MetricsResult = z.infer<typeof metricsResultSchema>;

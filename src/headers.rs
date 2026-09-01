@@ -13,15 +13,13 @@ const STRIP_HEADERS: &[&str] = &[
 /// This is always safe — no website depends on these headers for functionality.
 pub fn strip_server_headers(resp: &mut ResponseHeader) {
     for name in STRIP_HEADERS {
-        resp.remove_header(name);
+        resp.remove_header(*name);
     }
 }
 
 /// Inject security hardening headers into every response.
 ///
-/// SAFETY PHILOSOPHY: Only inject headers that won't break existing sites.
-/// - Headers that STRIP info → always on (zero risk)
-/// - Headers that ADD restrictions → conservative defaults only
+/// Headers that add restrictions use conservative, configurable defaults.
 /// - CSP → OFF by default (breaks CDNs, inline scripts, fonts, analytics)
 /// - HSTS → only when FORCE_HTTPS=true (user explicitly opted into HTTPS)
 /// - X-Frame-Options → SAMEORIGIN not DENY (allows same-site iframes)
@@ -66,10 +64,12 @@ pub fn apply_security_headers(resp: &mut ResponseHeader) {
         );
     }
 
-    // X-Frame-Options: SAMEORIGIN allows the site to iframe itself (common for
-    // admin panels, payment modals, etc.) while blocking cross-site framing
-    // (clickjacking). DENY would break OAuth popups, embedded payment flows, etc.
-    let _ = resp.insert_header("X-Frame-Options", "SAMEORIGIN");
+    // SAMEORIGIN is a useful default but can break legitimate cross-origin embeds.
+    // Set FRAME_OPTIONS=off to preserve the upstream response, or provide DENY/SAMEORIGIN.
+    let frame_options = std::env::var("FRAME_OPTIONS").unwrap_or_else(|_| "SAMEORIGIN".to_string());
+    if !frame_options.eq_ignore_ascii_case("off") && !frame_options.trim().is_empty() {
+        let _ = resp.insert_header("X-Frame-Options", frame_options.trim());
+    }
 
     // Permissions-Policy: Only set if explicitly configured via env.
     // Default OFF because camera=()/microphone=()/geolocation=() breaks

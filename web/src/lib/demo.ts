@@ -13,7 +13,7 @@ const TYPES = ["sqli", "xss", "path_traversal", "sensitive_path", "rate_limit", 
 
 export function demoMetrics(): FerroadaMetrics {
   const recent_events: SecurityEvent[] = Array.from({ length: 12 }, (_, i) => ({
-    timestamp: new Date(Date.now() - (11 - i) * 45_000).toISOString(),
+    timestamp: new Date(Date.now() - i * 45_000).toISOString(),
     event_type: TYPES[i % TYPES.length] ?? "sqli",
     client_ip: `177.71.244.${60 + i}`,
     uri: URIS[i % URIS.length] ?? "/",
@@ -39,8 +39,21 @@ export function demoMetrics(): FerroadaMetrics {
       bad_bot: 11,
       behavioral_throttle: 5,
       behavioral_block: 1,
+      waf_incomplete: 2,
+      header_limit: 1,
+      concurrency_limit: 0,
+      connection_limit: 0,
+      request_buffer_limit: 0,
+      dlp_partial_block: 0,
     },
     https_redirect: 220,
+    waf_inspection: {
+      complete: 8100,
+      truncated: 7,
+      unsupported_encoding: 2,
+      unsupported_content_type: 4,
+    },
+    waf_monitored: 12,
     dlp: { cpf_masked: 8, tokens_masked: 3 },
     recent_events,
   };

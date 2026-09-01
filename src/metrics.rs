@@ -26,7 +26,18 @@ pub struct Metrics {
     pub blocked_bad_bot: AtomicU64,
     pub blocked_behavioral_throttle: AtomicU64,
     pub blocked_behavioral_block: AtomicU64,
+    pub blocked_waf_incomplete: AtomicU64,
+    pub blocked_header_limit: AtomicU64,
+    pub blocked_concurrency_limit: AtomicU64,
+    pub blocked_connection_limit: AtomicU64,
+    pub blocked_request_buffer_limit: AtomicU64,
+    pub blocked_dlp_partial: AtomicU64,
     pub https_redirect: AtomicU64,
+    pub waf_inspection_complete: AtomicU64,
+    pub waf_inspection_truncated: AtomicU64,
+    pub waf_inspection_unsupported_encoding: AtomicU64,
+    pub waf_inspection_unsupported_content_type: AtomicU64,
+    pub waf_monitored: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
     pub recent_events: Mutex<VecDeque<SecurityEvent>>,
@@ -61,7 +72,18 @@ impl Metrics {
             blocked_bad_bot: AtomicU64::new(0),
             blocked_behavioral_throttle: AtomicU64::new(0),
             blocked_behavioral_block: AtomicU64::new(0),
+            blocked_waf_incomplete: AtomicU64::new(0),
+            blocked_header_limit: AtomicU64::new(0),
+            blocked_concurrency_limit: AtomicU64::new(0),
+            blocked_connection_limit: AtomicU64::new(0),
+            blocked_request_buffer_limit: AtomicU64::new(0),
+            blocked_dlp_partial: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
+            waf_inspection_complete: AtomicU64::new(0),
+            waf_inspection_truncated: AtomicU64::new(0),
+            waf_inspection_unsupported_encoding: AtomicU64::new(0),
+            waf_inspection_unsupported_content_type: AtomicU64::new(0),
+            waf_monitored: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
             recent_events: Mutex::new(VecDeque::with_capacity(MAX_EVENTS)),
@@ -136,11 +158,43 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
         "bad_bot" => &METRICS.blocked_bad_bot,
         "behavioral_throttle" => &METRICS.blocked_behavioral_throttle,
         "behavioral_block" => &METRICS.blocked_behavioral_block,
+        "waf_incomplete" => &METRICS.blocked_waf_incomplete,
+        "header_limit" => &METRICS.blocked_header_limit,
+        "concurrency_limit" => &METRICS.blocked_concurrency_limit,
+        "connection_limit" => &METRICS.blocked_connection_limit,
+        "request_buffer_limit" => &METRICS.blocked_request_buffer_limit,
+        "dlp_partial_block" => &METRICS.blocked_dlp_partial,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
     };
     counter.fetch_add(1, Ordering::Relaxed);
 
+    METRICS.push_event(SecurityEvent {
+        timestamp: now_iso(),
+        event_type: event_type.to_string(),
+        client_ip: client_ip.to_string(),
+        uri: uri.to_string(),
+        detail: detail.to_string(),
+    });
+}
+
+pub fn record_waf_inspection(status: &str) {
+    let counter = match status {
+        "complete" => &METRICS.waf_inspection_complete,
+        "truncated" => &METRICS.waf_inspection_truncated,
+        "unsupported_encoding" => &METRICS.waf_inspection_unsupported_encoding,
+        "unsupported_content_type" => &METRICS.waf_inspection_unsupported_content_type,
+        _ => return,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_observation(event_type: &str, client_ip: &str, uri: &str, detail: &str) {
+    if event_type == "waf_monitor" {
+        METRICS.waf_monitored.fetch_add(1, Ordering::Relaxed);
+    } else if !matches!(event_type, "dlp_skip" | "range_removed") {
+        return;
+    }
     METRICS.push_event(SecurityEvent {
         timestamp: now_iso(),
         event_type: event_type.to_string(),
@@ -198,8 +252,21 @@ pub fn snapshot_json() -> String {
             "jndi": m.blocked_jndi.load(Ordering::Relaxed),
             "bad_bot": m.blocked_bad_bot.load(Ordering::Relaxed),
             "behavioral_throttle": m.blocked_behavioral_throttle.load(Ordering::Relaxed),
-            "behavioral_block": m.blocked_behavioral_block.load(Ordering::Relaxed)
+            "behavioral_block": m.blocked_behavioral_block.load(Ordering::Relaxed),
+            "waf_incomplete": m.blocked_waf_incomplete.load(Ordering::Relaxed),
+            "header_limit": m.blocked_header_limit.load(Ordering::Relaxed),
+            "concurrency_limit": m.blocked_concurrency_limit.load(Ordering::Relaxed),
+            "connection_limit": m.blocked_connection_limit.load(Ordering::Relaxed),
+            "request_buffer_limit": m.blocked_request_buffer_limit.load(Ordering::Relaxed),
+            "dlp_partial_block": m.blocked_dlp_partial.load(Ordering::Relaxed)
         },
+        "waf_inspection": {
+            "complete": m.waf_inspection_complete.load(Ordering::Relaxed),
+            "truncated": m.waf_inspection_truncated.load(Ordering::Relaxed),
+            "unsupported_encoding": m.waf_inspection_unsupported_encoding.load(Ordering::Relaxed),
+            "unsupported_content_type": m.waf_inspection_unsupported_content_type.load(Ordering::Relaxed)
+        },
+        "waf_monitored": m.waf_monitored.load(Ordering::Relaxed),
         "https_redirect": m.https_redirect.load(Ordering::Relaxed),
         "dlp": {
             "cpf_masked": m.dlp_cpf_masked.load(Ordering::Relaxed),
@@ -209,4 +276,76 @@ pub fn snapshot_json() -> String {
     });
 
     serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_string())
+}
+
+pub fn snapshot_prometheus() -> String {
+    let metrics = &*METRICS;
+    let blocks = [
+        ("sqli", &metrics.blocked_sqli),
+        ("xss", &metrics.blocked_xss),
+        ("path_traversal", &metrics.blocked_path_traversal),
+        ("rate_limit", &metrics.blocked_rate_limit),
+        ("sensitive_path", &metrics.blocked_sensitive_path),
+        ("body_sqli", &metrics.blocked_body_sqli),
+        ("body_xss", &metrics.blocked_body_xss),
+        ("method", &metrics.blocked_method),
+        ("size_limit", &metrics.blocked_size_limit),
+        ("header_limit", &metrics.blocked_header_limit),
+        ("host", &metrics.blocked_host),
+        ("crlf", &metrics.blocked_crlf),
+        ("smuggling", &metrics.blocked_smuggling),
+        ("jndi", &metrics.blocked_jndi),
+        ("bad_bot", &metrics.blocked_bad_bot),
+        ("behavioral_throttle", &metrics.blocked_behavioral_throttle),
+        ("behavioral_block", &metrics.blocked_behavioral_block),
+        ("waf_incomplete", &metrics.blocked_waf_incomplete),
+        ("concurrency_limit", &metrics.blocked_concurrency_limit),
+        ("connection_limit", &metrics.blocked_connection_limit),
+        (
+            "request_buffer_limit",
+            &metrics.blocked_request_buffer_limit,
+        ),
+        ("dlp_partial_block", &metrics.blocked_dlp_partial),
+    ];
+    let mut output = format!(
+        "# TYPE ferroada_requests_total counter\nferroada_requests_total {}\n# TYPE ferroada_blocks_total counter\n",
+        metrics.requests_total.load(Ordering::Relaxed)
+    );
+    for (event_type, counter) in blocks {
+        output.push_str(&format!(
+            "ferroada_blocks_total{{type=\"{event_type}\"}} {}\n",
+            counter.load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str("# TYPE ferroada_waf_inspection_total counter\n");
+    for (status, counter) in [
+        ("complete", &metrics.waf_inspection_complete),
+        ("truncated", &metrics.waf_inspection_truncated),
+        (
+            "unsupported_encoding",
+            &metrics.waf_inspection_unsupported_encoding,
+        ),
+        (
+            "unsupported_content_type",
+            &metrics.waf_inspection_unsupported_content_type,
+        ),
+    ] {
+        output.push_str(&format!(
+            "ferroada_waf_inspection_total{{status=\"{status}\"}} {}\n",
+            counter.load(Ordering::Relaxed)
+        ));
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prometheus_snapshot_exposes_bounded_metric_names() {
+        let snapshot = snapshot_prometheus();
+        assert!(snapshot.contains("ferroada_requests_total"));
+        assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"truncated\"}"));
+    }
 }

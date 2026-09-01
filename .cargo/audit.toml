@@ -1,0 +1,21 @@
+[advisories]
+# prometheus 0.13 (transitivo do Pingora 0.8.1) ativa protobuf 2, mas o Ferroada
+# não expõe nenhum parser protobuf. O advisory afeta apenas skip_group() ao
+# decodificar entrada protobuf não confiável; não há chamada desse tipo no grafo
+# executado pelo proxy. Remover quando Pingora migrar para prometheus/protobuf 3.
+#
+# lru 0.16.4 é fixado pelo Pingora 0.8.1. O problema de panic-safety em pop()
+# exige uma chave cujo Drop entre em pânico dentro de catch_unwind; os usos do
+# Pingora usam chaves primitivas u64/u128, e o Ferroada não habilita proxy cache.
+# A correção existe apenas em lru >=0.18.2; remover quando o Pingora migrar.
+#
+# daemonize, derivative e proc-macro-error2 são transitivos do Pingora 0.8.1.
+# Os três avisos são apenas de manutenção; os dois últimos executam somente na
+# compilação. Não há versão substituta compatível enquanto o Pingora os mantiver.
+ignore = [
+  "RUSTSEC-2024-0437",
+  "RUSTSEC-2025-0069",
+  "RUSTSEC-2024-0388",
+  "RUSTSEC-2026-0173",
+  "RUSTSEC-2026-0253",
+]

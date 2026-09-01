@@ -7,11 +7,14 @@ use crate::metrics;
 /// Default allowed HTTP methods
 const DEFAULT_ALLOWED: &str = "GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS";
 
-/// Default max body size: 10MB
-const DEFAULT_MAX_BODY: usize = 10_485_760;
+/// Pingora 0.8 can replay at most 64 KiB after pre-upstream inspection.
+const MAX_REPLAYABLE_BODY: usize = 65_536;
+const DEFAULT_MAX_BODY: usize = MAX_REPLAYABLE_BODY;
 
 /// Default max URI length: 8KB
 const DEFAULT_MAX_URI: usize = 8_192;
+const DEFAULT_MAX_HEADER_COUNT: usize = 100;
+const DEFAULT_MAX_HEADER_BYTES: usize = 65_536;
 
 static ALLOWED_METHODS: Lazy<HashSet<String>> = Lazy::new(|| {
     let methods_str =
@@ -27,7 +30,9 @@ static MAX_BODY_SIZE: Lazy<usize> = Lazy::new(|| {
     std::env::var("MAX_BODY_SIZE")
         .ok()
         .and_then(|v| v.parse().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_BODY)
+        .min(MAX_REPLAYABLE_BODY)
 });
 
 static MAX_URI_LENGTH: Lazy<usize> = Lazy::new(|| {
@@ -35,6 +40,22 @@ static MAX_URI_LENGTH: Lazy<usize> = Lazy::new(|| {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_MAX_URI)
+});
+
+static MAX_HEADER_COUNT: Lazy<usize> = Lazy::new(|| {
+    std::env::var("MAX_HEADER_COUNT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_HEADER_COUNT)
+});
+
+static MAX_HEADER_BYTES: Lazy<usize> = Lazy::new(|| {
+    std::env::var("MAX_HEADER_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_HEADER_BYTES)
 });
 
 static ALLOWED_HOSTS: Lazy<Option<HashSet<String>>> = Lazy::new(|| {
@@ -55,6 +76,33 @@ pub enum ShieldVerdict {
     BlockHost,
     BlockBadBot,
     BlockSmuggling,
+    BlockHeaders,
+}
+
+pub fn check_headers(
+    header_count: usize,
+    header_bytes: usize,
+    uri: &str,
+    client_addr: &str,
+) -> ShieldVerdict {
+    if header_count > *MAX_HEADER_COUNT || header_bytes > *MAX_HEADER_BYTES {
+        warn!(
+            client = client_addr,
+            header_count,
+            header_bytes,
+            max_header_count = *MAX_HEADER_COUNT,
+            max_header_bytes = *MAX_HEADER_BYTES,
+            "Blocked: request headers exceed configured limits"
+        );
+        metrics::record_block(
+            "header_limit",
+            client_addr,
+            uri,
+            &format!("{header_count} headers, {header_bytes} bytes"),
+        );
+        return ShieldVerdict::BlockHeaders;
+    }
+    ShieldVerdict::Allow
 }
 
 /// Check if the HTTP method is allowed.
@@ -212,6 +260,7 @@ pub fn check_user_agent(ua: &str, uri: &str, client_addr: &str) -> ShieldVerdict
 pub fn check_smuggling(
     has_content_length: bool,
     content_length_count: usize,
+    transfer_encoding_count: usize,
     transfer_encoding: Option<&str>,
     uri: &str,
     client_addr: &str,
@@ -233,8 +282,34 @@ pub fn check_smuggling(
         return ShieldVerdict::BlockSmuggling;
     }
 
+    if transfer_encoding_count > 1 {
+        warn!(
+            client = client_addr,
+            uri = uri,
+            te_count = transfer_encoding_count,
+            "Blocked: multiple Transfer-Encoding headers (smuggling)"
+        );
+        metrics::record_block(
+            "smuggling",
+            client_addr,
+            uri,
+            "Multiple Transfer-Encoding headers",
+        );
+        return ShieldVerdict::BlockSmuggling;
+    }
+
+    if has_content_length && transfer_encoding_count > 0 {
+        warn!(
+            client = client_addr,
+            uri = uri,
+            "Blocked: Content-Length + Transfer-Encoding (smuggling)"
+        );
+        metrics::record_block("smuggling", client_addr, uri, "CL + TE conflict");
+        return ShieldVerdict::BlockSmuggling;
+    }
+
     if let Some(te) = transfer_encoding {
-        // CL + TE present simultaneously
+        // The normalized view remains a fallback for non-HTTP/1 downstreams.
         if has_content_length {
             warn!(
                 client = client_addr,
@@ -272,5 +347,25 @@ mod tests {
         assert!(body_would_exceed(max_body_size(), 1));
         assert!(body_would_exceed(max_body_size() - 10, 11));
         assert!(!body_would_exceed(max_body_size() - 10, 10));
+    }
+
+    #[test]
+    fn duplicate_transfer_encoding_is_rejected() {
+        assert!(matches!(
+            check_smuggling(false, 0, 2, Some("chunked"), "/", "127.0.0.1"),
+            ShieldVerdict::BlockSmuggling
+        ));
+    }
+
+    #[test]
+    fn header_count_and_bytes_are_bounded() {
+        assert!(matches!(
+            check_headers(*MAX_HEADER_COUNT + 1, 1, "/", "127.0.0.1"),
+            ShieldVerdict::BlockHeaders
+        ));
+        assert!(matches!(
+            check_headers(1, *MAX_HEADER_BYTES + 1, "/", "127.0.0.1"),
+            ShieldVerdict::BlockHeaders
+        ));
     }
 }

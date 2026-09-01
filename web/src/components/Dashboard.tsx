@@ -2,22 +2,192 @@
 
 import { useEffect, useState } from "react";
 import { eventLabel, formatInt, formatTime, totalBlocked } from "@/lib/labels";
-import type { FerroadaMetrics } from "@/lib/types";
+import { metricsResultSchema, type FerroadaMetrics, type MetricsResult } from "@/lib/types";
 
-type Payload = FerroadaMetrics & { demo?: boolean };
+type AuthState =
+  | "loading"
+  | "required"
+  | "validating"
+  | "authenticated"
+  | "invalid"
+  | "misconfigured"
+  | "unavailable";
 
-export function Dashboard({ initial }: { initial: Payload }) {
+function demoMessage(reason: MetricsResult["demo_reason"]): string {
+  if (reason === "unauthorized") {
+    return "O token do proxy está ausente ou incorreto. Confira FERROADA_TOKEN.";
+  }
+  if (reason === "invalid_response") {
+    return "O proxy respondeu em um formato inesperado. Estes números são de demonstração.";
+  }
+  return "O proxy não está acessível. Estes números são de demonstração.";
+}
+
+function useMetricsPolling(initial: MetricsResult) {
   const [data, setData] = useState(initial);
+  const [pollError, setPollError] = useState(false);
+  const [token, setToken] = useState<string | null>(null);
+  const [authState, setAuthState] = useState<AuthState>("loading");
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      void fetch("/api/metrics", { cache: "no-store", signal: AbortSignal.timeout(4_000) })
-        .then((r) => r.json())
-        .then((json: Payload) => setData(json))
-        .catch(() => undefined);
-    }, 5_000);
-    return () => window.clearInterval(id);
+    const stored = window.sessionStorage.getItem("ferroada-web-token");
+    setToken(stored);
+    setAuthState(stored ? "validating" : "required");
   }, []);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const refresh = () => {
+      void fetch("/api/metrics", {
+        cache: "no-store",
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(4_000),
+      })
+        .then(async (response) => {
+          if (response.status === 401) {
+            window.sessionStorage.removeItem("ferroada-web-token");
+            setToken(null);
+            setAuthState("invalid");
+            setPollError(false);
+            return null;
+          }
+          if (response.status === 503) {
+            window.sessionStorage.removeItem("ferroada-web-token");
+            setToken(null);
+            setAuthState("misconfigured");
+            setPollError(false);
+            return null;
+          }
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return metricsResultSchema.parse(await response.json());
+        })
+        .then((payload) => {
+          if (!payload) return;
+          setData(payload);
+          setAuthState("authenticated");
+          setPollError(false);
+        })
+        .catch(() => {
+          setAuthState((current) => (current === "validating" ? "unavailable" : current));
+          setPollError(true);
+        });
+    };
+
+    refresh();
+    const id = window.setInterval(refresh, 5_000);
+    return () => window.clearInterval(id);
+  }, [token]);
+
+  const saveToken = (value: string) => {
+    const normalized = value.trim();
+    if (normalized.length < 16 || normalized.length > 512) return;
+    window.sessionStorage.setItem("ferroada-web-token", normalized);
+    setToken(normalized);
+    setAuthState("validating");
+    setPollError(false);
+  };
+
+  return { data, pollError, authState, saveToken };
+}
+
+function TokenPrompt({
+  onSubmit,
+  error,
+}: {
+  onSubmit: (token: string) => void;
+  error?: string;
+}) {
+  const [value, setValue] = useState("");
+  return (
+    <form
+      className="token-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(value);
+      }}
+    >
+      <p className="banner" role="status">
+        {error ?? "Informe o token do painel para carregar métricas e eventos reais."}
+      </p>
+      <label htmlFor="dashboard-token">Token do painel (mínimo de 16 caracteres)</label>
+      <input
+        id="dashboard-token"
+        type="password"
+        autoComplete="current-password"
+        minLength={16}
+        maxLength={512}
+        required
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+      />
+      <button
+        type="submit"
+        disabled={value.trim().length < 16 || value.trim().length > 512}
+      >
+        Entrar
+      </button>
+    </form>
+  );
+}
+
+function AuthBoundary({
+  state,
+  onSubmit,
+}: {
+  state: AuthState;
+  onSubmit: (token: string) => void;
+}) {
+  if (state === "loading" || state === "validating") {
+    return (
+      <p className="banner" role="status">
+        Validando o token do painel…
+      </p>
+    );
+  }
+  if (state === "required") return <TokenPrompt onSubmit={onSubmit} />;
+  if (state === "invalid") {
+    return <TokenPrompt onSubmit={onSubmit} error="Token rejeitado. Confira a credencial e tente novamente." />;
+  }
+  if (state === "misconfigured") {
+    return (
+      <p className="banner" role="alert">
+        O servidor do painel não possui FERROADA_WEB_TOKEN válido. Configure a variável e reinicie o painel.
+      </p>
+    );
+  }
+  if (state === "unavailable") {
+    return (
+      <p className="banner" role="alert">
+        Não foi possível validar o token agora. Uma nova tentativa será feita em cinco segundos.
+      </p>
+    );
+  }
+  return null;
+}
+
+function MetricsStatus({ data, pollError }: { data: MetricsResult; pollError: boolean }) {
+  return (
+    <>
+      {data.demo ? (
+        <p className="banner" role="status">
+          {demoMessage(data.demo_reason)}
+        </p>
+      ) : null}
+      {pollError ? (
+        <p className="banner" role="status">
+          Não foi possível atualizar as métricas. Uma nova tentativa será feita em cinco segundos.
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+export function Dashboard({ initial }: { initial: MetricsResult }) {
+  const { data, pollError, authState, saveToken } = useMetricsPolling(initial);
+  if (authState !== "authenticated") {
+    return <AuthBoundary state={authState} onSubmit={saveToken} />;
+  }
 
   const blocked = totalBlocked(data.blocked);
   const rate =
@@ -29,11 +199,7 @@ export function Dashboard({ initial }: { initial: Payload }) {
 
   return (
     <>
-      {data.demo ? (
-        <p className="banner" role="status">
-          O proxy em :9000 não respondeu. Estes números são de demonstração.
-        </p>
-      ) : null}
+      <MetricsStatus data={data} pollError={pollError} />
 
       <dl className="kpis">
         <div className="kpi">
@@ -76,11 +242,24 @@ export function Dashboard({ initial }: { initial: Payload }) {
   );
 }
 
+export function EventsPanel({ initial }: { initial: MetricsResult }) {
+  const { data, pollError, authState, saveToken } = useMetricsPolling(initial);
+  if (authState !== "authenticated") {
+    return <AuthBoundary state={authState} onSubmit={saveToken} />;
+  }
+  return (
+    <>
+      <MetricsStatus data={data} pollError={pollError} />
+      <EventTable events={data.recent_events} />
+    </>
+  );
+}
+
 export function EventTable({ events }: { events: FerroadaMetrics["recent_events"] }) {
   if (events.length === 0) {
     return (
       <div className="table-wrap">
-        <p className="empty">Nenhum evento recente. Quando o WAF bloquear, aparece aqui.</p>
+        <p className="empty">Nenhum evento de segurança recente.</p>
       </div>
     );
   }

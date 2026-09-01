@@ -1,5 +1,7 @@
 # Rust
 target/
+fuzz/artifacts/
+fuzz/corpus/
 
 # Node
 node_modules/

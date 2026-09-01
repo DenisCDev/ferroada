@@ -1,10 +1,27 @@
 use dashmap::DashMap;
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::warn;
 
+use crate::client_ip::{RiskIdentity, SiteClientKey};
 use crate::metrics;
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum RateKey {
+    Network(SiteClientKey),
+    Route {
+        network: SiteClientKey,
+        route: String,
+    },
+    Session {
+        site: String,
+        hash: u64,
+    },
+    ApiKey {
+        site: String,
+        hash: u64,
+    },
+}
 
 const DEFAULT_MAX: u64 = 100;
 const DEFAULT_WINDOW: u64 = 60;
@@ -12,7 +29,7 @@ const DEFAULT_MAX_IPS: usize = 50_000;
 const SWEEP_EVERY: u64 = 256;
 
 pub struct RateLimiter {
-    requests: DashMap<IpAddr, Vec<Instant>>,
+    requests: DashMap<RateKey, Vec<Instant>>,
     max_requests: u64,
     window_secs: u64,
     max_ips: usize,
@@ -21,10 +38,16 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn from_env() -> Self {
-        let max_requests = std::env::var("RATE_LIMIT_MAX")
+        let configured_max_requests = std::env::var("RATE_LIMIT_MAX")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX);
+        let replica_count = std::env::var("REPLICA_COUNT")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(1);
+        let max_requests = (configured_max_requests / replica_count).max(1);
 
         let window_secs = std::env::var("RATE_LIMIT_WINDOW")
             .ok()
@@ -38,6 +61,8 @@ impl RateLimiter {
 
         tracing::info!(
             max_requests,
+            configured_max_requests,
+            replica_count,
             window_secs,
             max_ips,
             "Rate limiter initialized"
@@ -57,33 +82,54 @@ impl RateLimiter {
     }
 
     /// Returns true if request is allowed, false if rate limited.
-    pub fn check(&self, ip: IpAddr, uri: &str) -> bool {
+    pub fn check(&self, identity: &RiskIdentity, uri: &str) -> bool {
         self.maybe_sweep();
 
         let now = Instant::now();
         let window = Duration::from_secs(self.window_secs);
-
-        let mut entry = self.requests.entry(ip).or_insert_with(Vec::new);
-        let timestamps = entry.value_mut();
-
-        timestamps.retain(|t| now.duration_since(*t) < window);
-
-        if timestamps.len() as u64 >= self.max_requests {
-            warn!(
-                client = %ip,
-                uri = uri,
-                requests = timestamps.len(),
-                window = self.window_secs,
-                "Rate limit exceeded"
-            );
-            metrics::record_block("rate_limit", &ip.to_string(), uri, "Rate limit exceeded");
-            return false;
+        let network = identity.network_key();
+        let mut keys = vec![
+            RateKey::Network(network.clone()),
+            RateKey::Route {
+                network,
+                route: identity.route.clone(),
+            },
+        ];
+        if let Some(hash) = identity.session_hash {
+            keys.push(RateKey::Session {
+                site: identity.site.clone(),
+                hash,
+            });
+        }
+        if let Some(hash) = identity.api_key_hash {
+            keys.push(RateKey::ApiKey {
+                site: identity.site.clone(),
+                hash,
+            });
         }
 
-        timestamps.push(now);
-        drop(entry);
-
-        self.enforce_cap(ip);
+        for key in &keys {
+            let mut entry = self.requests.entry(key.clone()).or_default();
+            entry.retain(|timestamp| now.duration_since(*timestamp) < window);
+            if entry.len() as u64 >= self.max_requests {
+                warn!(
+                    client = %identity.network,
+                    uri,
+                    requests = entry.len(),
+                    window = self.window_secs,
+                    "Rate limit exceeded"
+                );
+                metrics::record_block(
+                    "rate_limit",
+                    &identity.network.to_string(),
+                    uri,
+                    "Rate limit exceeded",
+                );
+                return false;
+            }
+            entry.push(now);
+        }
+        self.enforce_cap(&keys);
         true
     }
 
@@ -108,42 +154,42 @@ impl RateLimiter {
 
     fn maybe_sweep(&self) {
         let n = self.hits.fetch_add(1, Ordering::Relaxed);
-        if n % SWEEP_EVERY == 0 {
+        if n.is_multiple_of(SWEEP_EVERY) {
             self.evict_expired();
             if self.requests.len() > self.max_ips {
-                self.shrink_to_cap(None);
+                self.shrink_to_cap(&[]);
             }
         }
     }
 
-    fn enforce_cap(&self, keep: IpAddr) {
+    fn enforce_cap(&self, keep: &[RateKey]) {
         if self.requests.len() > self.max_ips {
             self.evict_expired();
             if self.requests.len() > self.max_ips {
-                self.shrink_to_cap(Some(keep));
+                self.shrink_to_cap(keep);
             }
         }
     }
 
-    fn shrink_to_cap(&self, keep: Option<IpAddr>) {
+    fn shrink_to_cap(&self, keep: &[RateKey]) {
         let overflow = self.requests.len().saturating_sub(self.max_ips);
         if overflow == 0 {
             return;
         }
-        let mut entries: Vec<(IpAddr, Instant)> = self
+        let mut entries: Vec<(RateKey, Instant)> = self
             .requests
             .iter()
             .filter_map(|e| {
-                let ip = *e.key();
-                if keep == Some(ip) {
+                let key = e.key().clone();
+                if keep.contains(&key) {
                     return None;
                 }
-                e.value().last().copied().map(|t| (ip, t))
+                e.value().last().copied().map(|t| (key, t))
             })
             .collect();
         entries.sort_by_key(|(_, t)| *t);
-        for (ip, _) in entries.into_iter().take(overflow) {
-            self.requests.remove(&ip);
+        for (key, _) in entries.into_iter().take(overflow) {
+            self.requests.remove(&key);
         }
     }
 }
@@ -151,26 +197,31 @@ impl RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     fn ip(n: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, n))
     }
 
+    fn identity(ip: IpAddr, site: &str, uri: &str) -> RiskIdentity {
+        RiskIdentity::new(site, ip, uri, None, None)
+    }
+
     #[test]
     fn allows_under_limit() {
         let rl = RateLimiter::new(3, 60, 100);
-        assert!(rl.check(ip(1), "/"));
-        assert!(rl.check(ip(1), "/"));
-        assert!(rl.check(ip(1), "/"));
-        assert!(!rl.check(ip(1), "/"));
+        let identity = identity(ip(1), "site-a", "/");
+        assert!(rl.check(&identity, "/"));
+        assert!(rl.check(&identity, "/"));
+        assert!(rl.check(&identity, "/"));
+        assert!(!rl.check(&identity, "/"));
     }
 
     #[test]
     fn evict_expired_drops_quiet_ips() {
         let rl = RateLimiter::new(10, 0, 100);
-        assert!(rl.check(ip(1), "/"));
-        assert_eq!(rl.tracked_ips(), 1);
+        assert!(rl.check(&identity(ip(1), "site-a", "/"), "/"));
+        assert_eq!(rl.tracked_ips(), 2);
         rl.evict_expired();
         assert_eq!(
             rl.tracked_ips(),
@@ -182,17 +233,18 @@ mod tests {
     #[test]
     fn cap_drops_oldest_when_full() {
         let rl = RateLimiter::new(10, 60, 2);
-        assert!(rl.check(ip(1), "/"));
-        assert!(rl.check(ip(2), "/"));
+        assert!(rl.check(&identity(ip(1), "site-a", "/"), "/"));
+        assert!(rl.check(&identity(ip(2), "site-a", "/"), "/"));
         assert_eq!(rl.tracked_ips(), 2);
-        assert!(rl.check(ip(3), "/"));
+        assert!(rl.check(&identity(ip(3), "site-a", "/"), "/"));
         assert!(
             rl.tracked_ips() <= 2,
             "map must not grow past max_ips, got {}",
             rl.tracked_ips()
         );
         assert!(
-            rl.requests.contains_key(&ip(3)),
+            rl.requests
+                .contains_key(&RateKey::Network(SiteClientKey::new("site-a", ip(3)))),
             "the IP just seen must be kept"
         );
     }
@@ -200,8 +252,25 @@ mod tests {
     #[test]
     fn independent_ips_do_not_share_budget() {
         let rl = RateLimiter::new(1, 60, 100);
-        assert!(rl.check(ip(1), "/"));
-        assert!(!rl.check(ip(1), "/"));
-        assert!(rl.check(ip(2), "/"));
+        assert!(rl.check(&identity(ip(1), "site-a", "/"), "/"));
+        assert!(!rl.check(&identity(ip(1), "site-a", "/"), "/"));
+        assert!(rl.check(&identity(ip(2), "site-a", "/"), "/"));
+    }
+
+    #[test]
+    fn sites_have_independent_budgets() {
+        let rl = RateLimiter::new(1, 60, 100);
+        assert!(rl.check(&identity(ip(1), "site-a", "/"), "/"));
+        assert!(!rl.check(&identity(ip(1), "site-a", "/"), "/"));
+        assert!(rl.check(&identity(ip(1), "site-b", "/"), "/"));
+    }
+
+    #[test]
+    fn api_key_budget_is_shared_across_networks() {
+        let rl = RateLimiter::new(1, 60, 100);
+        let first = RiskIdentity::new("site-a", ip(1), "/api", None, Some("same-key"));
+        let second = RiskIdentity::new("site-a", ip(2), "/api", None, Some("same-key"));
+        assert!(rl.check(&first, "/api"));
+        assert!(!rl.check(&second, "/api"));
     }
 }

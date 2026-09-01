@@ -1,4 +1,4 @@
-use flate2::read::{DeflateDecoder, GzDecoder};
+use flate2::read::{DeflateDecoder, MultiGzDecoder};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::borrow::Cow;
@@ -13,9 +13,87 @@ const INSPECT_TEXT_LIMIT: usize = 65_536;
 /// Percent-decode passes. 3 was shallow: `%2525252e` (4 layers) survived.
 const MAX_DECODE_PASSES: usize = 8;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WafProfile {
+    Generic,
+    Wordpress,
+    Strict,
+}
+
+static WAF_PROFILE: Lazy<WafProfile> = Lazy::new(|| {
+    WafProfile::parse(&std::env::var("WAF_PROFILE").unwrap_or_else(|_| "generic".to_string()))
+});
+
+impl WafProfile {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "generic" => Self::Generic,
+            "wordpress" => Self::Wordpress,
+            "strict" => Self::Strict,
+            value => panic!("WAF profile inválido: {value}; use generic, wordpress ou strict"),
+        }
+    }
+}
+
+pub fn default_profile() -> WafProfile {
+    *WAF_PROFILE
+}
+
+pub fn validate_config() {
+    Lazy::force(&WAF_PROFILE);
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum WafVerdict {
     Allow,
     Block(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InspectionStatus {
+    Complete,
+    Truncated,
+    UnsupportedEncoding,
+    UnsupportedContentType,
+}
+
+impl InspectionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Truncated => "truncated",
+            Self::UnsupportedEncoding => "unsupported_encoding",
+            Self::UnsupportedContentType => "unsupported_content_type",
+        }
+    }
+
+    pub fn is_complete(self) -> bool {
+        self == Self::Complete
+    }
+
+    pub fn combine(self, other: Self) -> Self {
+        use InspectionStatus::{Complete, Truncated, UnsupportedContentType, UnsupportedEncoding};
+        match (self, other) {
+            (UnsupportedEncoding, _) | (_, UnsupportedEncoding) => UnsupportedEncoding,
+            (UnsupportedContentType, _) | (_, UnsupportedContentType) => UnsupportedContentType,
+            (Truncated, _) | (_, Truncated) => Truncated,
+            (Complete, Complete) => Complete,
+        }
+    }
+}
+
+pub struct WafInspection {
+    pub verdict: WafVerdict,
+    pub status: InspectionStatus,
+}
+
+pub struct InspectionBody<'a> {
+    pub bytes: Cow<'a, [u8]>,
+    pub status: InspectionStatus,
+}
+
+pub fn max_inflate_buffer_bytes() -> usize {
+    MAX_INFLATE_FOR_INSPECT as usize + 1
 }
 
 // --- SQLi detection: 5 categories for robust coverage ---
@@ -85,6 +163,10 @@ static PATH_TRAVERSAL_RE: Lazy<Regex> =
 
 static CRLF_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(%0[dD]%0[aA]|\r\n)").expect("invalid CRLF regex"));
+static BODY_CRLF_INJECTION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\r\n[!#$%&'*+.^_`|~0-9A-Za-z-]+[ \t]*:")
+        .expect("invalid body CRLF injection regex")
+});
 
 static JNDI_DEOBFUSCATE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\$\{(?:lower:|upper:|::-?)(\w)\}").expect("invalid JNDI deobfuscation regex")
@@ -108,9 +190,6 @@ const BLOCKED_PATHS: &[&str] = &[
     "/.svn",
     "/.hg",
     "/.DS_Store",
-    "/wp-admin",
-    "/wp-login.php",
-    "/xmlrpc.php",
     "/phpmyadmin",
     "/phpinfo.php",
     "/.htaccess",
@@ -145,20 +224,57 @@ const BLOCKED_PATH_PREFIXES: &[&str] = &[
     "/.git/",
     "/.svn/",
     "/.hg/",
-    "/wp-admin/",
     "/phpmyadmin/",
     "/actuator/",
     "/.aws/",
     "/.ssh/",
 ];
 
+const WORDPRESS_OPERATIONAL_PATHS: &[&str] =
+    &["/wp-admin", "/wp-admin/", "/wp-login.php", "/xmlrpc.php"];
+
 /// Inspect URI, headers, and optionally request body
 pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -> WafVerdict {
+    inspect_request_with_profile(uri, header_values, client_addr, default_profile())
+}
+
+pub fn inspect_request_with_profile(
+    uri: &str,
+    header_values: &[String],
+    client_addr: &str,
+    profile: WafProfile,
+) -> WafVerdict {
     let decoded_uri = decode_uri(uri);
 
     // Extract just the path (before query string) for sensitive path check
     let path = decoded_uri.split('?').next().unwrap_or(&decoded_uri);
     let path_lower = path.to_lowercase();
+
+    let wordpress_operational_path = WORDPRESS_OPERATIONAL_PATHS.iter().any(|candidate| {
+        path_lower == *candidate || (candidate.ends_with('/') && path_lower.starts_with(candidate))
+    });
+    if wordpress_operational_path {
+        match profile {
+            WafProfile::Strict => {
+                metrics::record_block(
+                    "sensitive_path",
+                    client_addr,
+                    uri,
+                    "Blocked WordPress operational path in strict profile",
+                );
+                return WafVerdict::Block("Access denied by strict WAF profile".to_string());
+            }
+            WafProfile::Wordpress => {
+                metrics::record_observation(
+                    "waf_monitor",
+                    client_addr,
+                    uri,
+                    "WordPress operational path monitored",
+                );
+            }
+            WafProfile::Generic => {}
+        }
+    }
 
     // 1. Sensitive path blocking
     for blocked in BLOCKED_PATHS {
@@ -269,7 +385,6 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
                 warn!(
                     client = client_addr,
                     uri = uri,
-                    header_value = val.as_str(),
                     "WAF blocked: CRLF injection in header"
                 );
                 metrics::record_block("crlf", client_addr, uri, "CRLF injection in header");
@@ -279,7 +394,6 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
                 warn!(
                     client = client_addr,
                     uri = uri,
-                    header_value = val.as_str(),
                     "WAF blocked: JNDI/Log4Shell in header"
                 );
                 metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in header");
@@ -289,7 +403,6 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
                 warn!(
                     client = client_addr,
                     uri = uri,
-                    header_value = val.as_str(),
                     "WAF blocked: SQL injection in header"
                 );
                 metrics::record_block(
@@ -307,7 +420,6 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
                 warn!(
                     client = client_addr,
                     uri = uri,
-                    header_value = val.as_str(),
                     "WAF blocked: path traversal in header"
                 );
                 metrics::record_block(
@@ -325,7 +437,6 @@ pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -
                 warn!(
                     client = client_addr,
                     uri = uri,
-                    header_value = val.as_str(),
                     "WAF blocked: XSS in header"
                 );
                 metrics::record_block(
@@ -349,23 +460,61 @@ pub fn inspect_body(
     uri: &str,
     client_addr: &str,
     content_type: Option<&str>,
-) -> WafVerdict {
+) -> WafInspection {
+    if !is_inspectable_content_type(content_type) {
+        return WafInspection {
+            verdict: WafVerdict::Allow,
+            status: InspectionStatus::UnsupportedContentType,
+        };
+    }
+    let is_multipart = content_type
+        .map(|ct| ct.to_ascii_lowercase().contains("multipart/form-data"))
+        .unwrap_or(false);
+    if is_multipart
+        && body.len() <= INSPECT_TEXT_LIMIT
+        && multipart_has_unsupported_transfer_encoding(body)
+    {
+        return WafInspection {
+            verdict: WafVerdict::Allow,
+            status: InspectionStatus::UnsupportedContentType,
+        };
+    }
     let text = match std::str::from_utf8(body) {
         Ok(s) => s,
-        Err(_) => return WafVerdict::Allow, // binary body, skip
+        Err(_) => {
+            return WafInspection {
+                verdict: WafVerdict::Allow,
+                status: InspectionStatus::UnsupportedContentType,
+            }
+        }
     };
 
     // Limit inspection to first 64KB to avoid DoS on large uploads.
     // Cut on a char boundary so a multibyte UTF-8 scalar at 64KB cannot panic.
-    let text = if text.len() > INSPECT_TEXT_LIMIT {
+    let (text, status) = if text.len() > INSPECT_TEXT_LIMIT {
         let mut end = INSPECT_TEXT_LIMIT;
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }
-        &text[..end]
+        (&text[..end], InspectionStatus::Truncated)
     } else {
-        text
+        (text, InspectionStatus::Complete)
     };
+
+    let content_type_lower = content_type.unwrap_or("").to_ascii_lowercase();
+    let canonical_json = if status.is_complete()
+        && (content_type_lower.contains("application/json") || content_type_lower.contains("+json"))
+    {
+        serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .map(|value| json_strings(&value))
+    } else {
+        None
+    };
+    let inspection_text = canonical_json
+        .as_deref()
+        .map(|json| Cow::Owned(format!("{text}\n{json}")))
+        .unwrap_or_else(|| Cow::Borrowed(text));
 
     let is_form = content_type
         .map(|ct| {
@@ -374,23 +523,23 @@ pub fn inspect_body(
         })
         .unwrap_or(false);
     let decoded = if is_form {
-        recursive_urldecode(&text.replace('+', " "))
+        recursive_urldecode(&inspection_text.replace('+', " "))
     } else {
-        recursive_urldecode(text)
+        recursive_urldecode(&inspection_text)
     };
 
     // CRLF check — skip for multipart/form-data (legitimate \r\n in uploads)
-    let is_multipart = content_type
-        .map(|ct| ct.to_ascii_lowercase().contains("multipart/form-data"))
-        .unwrap_or(false);
-    if !is_multipart && CRLF_RE.is_match(&decoded) {
+    if !is_multipart && BODY_CRLF_INJECTION_RE.is_match(&decoded) {
         warn!(
             client = client_addr,
             uri = uri,
             "WAF blocked: CRLF injection in request body"
         );
         metrics::record_block("crlf", client_addr, uri, "CRLF injection in body");
-        return WafVerdict::Block("CRLF injection detected in body".to_string());
+        return WafInspection {
+            verdict: WafVerdict::Block("CRLF injection detected in body".to_string()),
+            status,
+        };
     }
 
     // JNDI/Log4Shell check
@@ -401,7 +550,10 @@ pub fn inspect_body(
             "WAF blocked: JNDI/Log4Shell in request body"
         );
         metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in body");
-        return WafVerdict::Block("JNDI injection detected in body".to_string());
+        return WafInspection {
+            verdict: WafVerdict::Block("JNDI injection detected in body".to_string()),
+            status,
+        };
     }
 
     if let Some(category) = check_sqli(&decoded) {
@@ -417,7 +569,10 @@ pub fn inspect_body(
             uri,
             &format!("SQLi in body ({})", category),
         );
-        return WafVerdict::Block(format!("SQL injection detected in body ({})", category));
+        return WafInspection {
+            verdict: WafVerdict::Block(format!("SQL injection detected in body ({})", category)),
+            status,
+        };
     }
 
     if let Some(m) = XSS_RE.find(&decoded) {
@@ -433,10 +588,78 @@ pub fn inspect_body(
             uri,
             &format!("XSS in body: {}", m.as_str()),
         );
-        return WafVerdict::Block(format!("XSS detected in body: {}", m.as_str()));
+        return WafInspection {
+            verdict: WafVerdict::Block(format!("XSS detected in body: {}", m.as_str())),
+            status,
+        };
     }
 
-    WafVerdict::Allow
+    WafInspection {
+        verdict: WafVerdict::Allow,
+        status,
+    }
+}
+
+fn multipart_has_unsupported_transfer_encoding(body: &[u8]) -> bool {
+    String::from_utf8_lossy(body).lines().any(|line| {
+        let line = line.trim().to_ascii_lowercase();
+        line.strip_prefix("content-transfer-encoding:")
+            .map(str::trim)
+            .is_some_and(|encoding| !matches!(encoding, "7bit" | "8bit" | "binary" | "identity"))
+    })
+}
+
+fn is_inspectable_content_type(content_type: Option<&str>) -> bool {
+    let Some(content_type) = content_type else {
+        return true;
+    };
+    let content_type = content_type.to_ascii_lowercase();
+    content_type.starts_with("text/")
+        || content_type.contains("application/json")
+        || content_type.contains("+json")
+        || content_type.contains("application/xml")
+        || content_type.contains("+xml")
+        || content_type.contains("application/x-www-form-urlencoded")
+        || content_type.contains("multipart/form-data")
+        || content_type.contains("application/graphql")
+}
+
+fn json_strings(value: &serde_json::Value) -> String {
+    fn visit(value: &serde_json::Value, output: &mut String) {
+        if output.len() >= INSPECT_TEXT_LIMIT {
+            return;
+        }
+        match value {
+            serde_json::Value::String(value) => {
+                output.push_str(value);
+                output.push('\n');
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, output);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    output.push_str(key);
+                    output.push('\n');
+                    visit(value, output);
+                }
+            }
+            _ => {}
+        }
+        if output.len() > INSPECT_TEXT_LIMIT {
+            let mut end = INSPECT_TEXT_LIMIT;
+            while end > 0 && !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            output.truncate(end);
+        }
+    }
+
+    let mut output = String::new();
+    visit(value, &mut output);
+    output
 }
 
 /// Detect JNDI injection patterns including obfuscated variants.
@@ -471,28 +694,69 @@ fn collapse_jndi_obfuscation(input: &str) -> String {
 /// Inflate gzip/deflate for WAF inspection only. The original bytes stay on
 /// the wire to the upstream. Unknown encodings (br, zstd) and corrupt streams
 /// fall back to the raw bytes so a declared encoding cannot hide plaintext.
-pub fn inflate_for_inspect<'a>(body: &'a [u8], content_encoding: Option<&str>) -> Cow<'a, [u8]> {
+pub fn inflate_for_inspect<'a>(
+    body: &'a [u8],
+    content_encoding: Option<&str>,
+) -> InspectionBody<'a> {
     let enc = content_encoding.unwrap_or("").to_ascii_lowercase();
     if enc.is_empty() || enc == "identity" {
-        return Cow::Borrowed(body);
+        return InspectionBody {
+            bytes: Cow::Borrowed(body),
+            status: InspectionStatus::Complete,
+        };
     }
     let tokens: Vec<&str> = enc.split(',').map(|t| t.trim()).collect();
-    if tokens.iter().any(|t| *t == "gzip" || *t == "x-gzip") {
-        return inflate_with(GzDecoder::new(body), body);
+    if tokens.len() != 1 {
+        return unsupported_encoding(body);
     }
-    if tokens.iter().any(|t| *t == "deflate") {
-        return inflate_with(DeflateDecoder::new(body), body);
+    match tokens[0] {
+        "gzip" | "x-gzip" => inflate_with(MultiGzDecoder::new(body), body),
+        "deflate" => inflate_with(DeflateDecoder::new(body), body),
+        _ => unsupported_encoding(body),
     }
-    Cow::Borrowed(body)
 }
 
-fn inflate_with<'a, R: Read>(decoder: R, fallback: &'a [u8]) -> Cow<'a, [u8]> {
-    let mut out = Vec::new();
-    let mut limited = decoder.take(MAX_INFLATE_FOR_INSPECT);
-    match limited.read_to_end(&mut out) {
-        Ok(_) if !out.is_empty() => Cow::Owned(out),
-        _ => Cow::Borrowed(fallback),
+fn unsupported_encoding(body: &[u8]) -> InspectionBody<'_> {
+    InspectionBody {
+        bytes: Cow::Borrowed(body),
+        status: InspectionStatus::UnsupportedEncoding,
     }
+}
+
+fn inflate_with<'a, R: Read>(decoder: R, fallback: &'a [u8]) -> InspectionBody<'a> {
+    match read_capped_inflate(decoder) {
+        Ok(mut out) if !out.is_empty() => {
+            let status = if out.len() as u64 > MAX_INFLATE_FOR_INSPECT {
+                out.truncate(MAX_INFLATE_FOR_INSPECT as usize);
+                InspectionStatus::Truncated
+            } else {
+                InspectionStatus::Complete
+            };
+            InspectionBody {
+                bytes: Cow::Owned(out),
+                status,
+            }
+        }
+        _ => unsupported_encoding(fallback),
+    }
+}
+
+fn read_capped_inflate<R: Read>(mut decoder: R) -> std::io::Result<Vec<u8>> {
+    // A fixed boxed slice makes the heap allocation match the budget exactly;
+    // the final byte is only a sentinel to distinguish complete from truncated.
+    let mut buffer = vec![0_u8; max_inflate_buffer_bytes()].into_boxed_slice();
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match decoder.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let mut out = buffer.into_vec();
+    out.truncate(filled);
+    Ok(out)
 }
 
 fn decode_uri(uri: &str) -> String {
@@ -576,6 +840,10 @@ mod tests {
         matches!(v, WafVerdict::Block(_))
     }
 
+    fn body_blocked(inspection: WafInspection) -> bool {
+        blocked(inspection.verdict)
+    }
+
     #[test]
     fn quadruple_encoded_traversal_is_blocked() {
         // 4 layers of %25 — the old 3-pass decoder stopped at `%2e%2e`.
@@ -615,8 +883,8 @@ mod tests {
         let payload = gzip(br#"{"id":"1 UNION SELECT * FROM users"}"#);
         let inflated = inflate_for_inspect(&payload, Some("gzip"));
         assert!(
-            blocked(inspect_body(
-                &inflated,
+            body_blocked(inspect_body(
+                &inflated.bytes,
                 "/",
                 "1.1.1.1",
                 Some("application/json")
@@ -626,11 +894,25 @@ mod tests {
     }
 
     #[test]
+    fn concatenated_gzip_members_are_all_inspected() {
+        let mut payload = gzip(b"conteudo seguro ");
+        payload.extend(gzip(b"1 UNION SELECT password FROM users"));
+        let inflated = inflate_for_inspect(&payload, Some("gzip"));
+        assert_eq!(inflated.status, InspectionStatus::Complete);
+        assert!(body_blocked(inspect_body(
+            &inflated.bytes,
+            "/",
+            "1.1.1.1",
+            Some("text/plain")
+        )));
+    }
+
+    #[test]
     fn deflate_body_xss_is_blocked() {
         let payload = deflate(b"<script>alert(1)</script>");
         let inflated = inflate_for_inspect(&payload, Some("deflate"));
-        assert!(blocked(inspect_body(
-            &inflated,
+        assert!(body_blocked(inspect_body(
+            &inflated.bytes,
             "/",
             "1.1.1.1",
             Some("text/html")
@@ -649,8 +931,8 @@ mod tests {
     fn corrupt_gzip_falls_back_to_raw_so_plaintext_still_matches() {
         let raw = b"1 UNION SELECT password FROM users";
         let inflated = inflate_for_inspect(raw, Some("gzip"));
-        assert!(blocked(inspect_body(
-            &inflated,
+        assert!(body_blocked(inspect_body(
+            &inflated.bytes,
             "/",
             "1.1.1.1",
             Some("text/plain")
@@ -660,7 +942,29 @@ mod tests {
     #[test]
     fn form_urlencoded_plus_sqli_in_body_is_blocked() {
         let body = b"q=1+OR+1=1";
-        assert!(blocked(inspect_body(
+        assert!(body_blocked(inspect_body(
+            body,
+            "/",
+            "1.1.1.1",
+            Some("application/x-www-form-urlencoded")
+        )));
+    }
+
+    #[test]
+    fn ordinary_crlf_whitespace_in_body_is_allowed() {
+        let body = b"{\r\n  \"message\": \"conteudo seguro\"\r\n}";
+        assert!(!body_blocked(inspect_body(
+            body,
+            "/",
+            "1.1.1.1",
+            Some("application/json")
+        )));
+    }
+
+    #[test]
+    fn encoded_crlf_header_in_body_is_blocked() {
+        let body = b"next=%0d%0aSet-Cookie%3a+admin%3dtrue";
+        assert!(body_blocked(inspect_body(
             body,
             "/",
             "1.1.1.1",
@@ -674,10 +978,11 @@ mod tests {
         let payload = gzip(&zeros);
         let inflated = inflate_for_inspect(&payload, Some("gzip"));
         assert!(
-            inflated.len() as u64 <= MAX_INFLATE_FOR_INSPECT,
+            inflated.bytes.len() as u64 <= MAX_INFLATE_FOR_INSPECT,
             "inflate must stop at the inspect cap, got {}",
-            inflated.len()
+            inflated.bytes.len()
         );
+        assert_eq!(inflated.status, InspectionStatus::Truncated);
     }
 
     #[test]
@@ -687,7 +992,7 @@ mod tests {
         let mut assembled = first.to_vec();
         assembled.extend_from_slice(second);
         assert!(
-            blocked(inspect_body(
+            body_blocked(inspect_body(
                 &assembled,
                 "/",
                 "1.1.1.1",
@@ -696,7 +1001,7 @@ mod tests {
             "payload split across chunks must still match after assembly"
         );
         assert!(
-            !blocked(inspect_body(
+            !body_blocked(inspect_body(
                 first,
                 "/",
                 "1.1.1.1",
@@ -709,9 +1014,63 @@ mod tests {
     #[test]
     fn identity_encoding_is_borrowed() {
         let body = b"ok";
-        match inflate_for_inspect(body, Some("identity")) {
+        match inflate_for_inspect(body, Some("identity")).bytes {
             Cow::Borrowed(b) => assert_eq!(b, body),
             Cow::Owned(_) => panic!("identity must not copy"),
         }
+    }
+
+    #[test]
+    fn text_after_inspection_limit_is_explicitly_truncated() {
+        let body = vec![b'a'; INSPECT_TEXT_LIMIT + 1];
+        let inspection = inspect_body(&body, "/", "1.1.1.1", Some("application/json"));
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionStatus::Truncated);
+    }
+
+    #[test]
+    fn unknown_encoding_is_explicitly_unsupported() {
+        let inspection = inflate_for_inspect(b"hello", Some("br"));
+        assert_eq!(inspection.status, InspectionStatus::UnsupportedEncoding);
+    }
+
+    #[test]
+    fn binary_body_is_explicitly_unsupported() {
+        let inspection = inspect_body(&[0xff, 0xfe], "/", "1.1.1.1", None);
+        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+    }
+
+    #[test]
+    fn json_unicode_escape_is_canonicalized_before_xss_check() {
+        let body = br#"{"value":"\u003cscript\u003ealert(1)\u003c/script\u003e"}"#;
+        assert!(body_blocked(inspect_body(
+            body,
+            "/",
+            "1.1.1.1",
+            Some("application/json")
+        )));
+    }
+
+    #[test]
+    fn binary_content_type_is_explicitly_unsupported_even_when_ascii() {
+        let inspection = inspect_body(
+            b"plain bytes",
+            "/",
+            "1.1.1.1",
+            Some("application/octet-stream"),
+        );
+        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+    }
+
+    #[test]
+    fn encoded_multipart_field_is_explicitly_unsupported() {
+        let body = b"--x\r\nContent-Disposition: form-data; name=payload\r\nContent-Transfer-Encoding: base64\r\n\r\nMSBVTklPTiBTRUxFQ1Q=\r\n--x--\r\n";
+        let inspection = inspect_body(
+            body,
+            "/",
+            "1.1.1.1",
+            Some("multipart/form-data; boundary=x"),
+        );
+        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
     }
 }

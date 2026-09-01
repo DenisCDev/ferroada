@@ -1,10 +1,8 @@
 import { Dashboard } from "@/components/Dashboard";
-import { getMetrics } from "@/lib/get-metrics";
+import { demoMetrics } from "@/lib/demo";
 
-export const dynamic = "force-dynamic";
-
-export default async function Page() {
-  const initial = await getMetrics();
+export default function Page() {
+  const initial = { ...demoMetrics(), demo: true as const, demo_reason: "unavailable" as const };
   return (
     <>
       <h1>Visão geral</h1>

@@ -6,10 +6,12 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /app
 COPY Cargo.toml ./
 COPY Cargo.lock* ./
-RUN mkdir src && echo 'fn main(){}' > src/main.rs && cargo build --release && rm -rf src
+COPY .cargo/audit.toml ./.cargo/audit.toml
+COPY fuzz/ ./fuzz/
+RUN mkdir src && echo 'fn main(){}' > src/main.rs && cargo build --release -p ferroada && rm -rf src
 COPY src/ src/
 RUN cargo install cargo-audit --quiet
-RUN touch src/main.rs && cargo audit && cargo build --release
+RUN touch src/main.rs && cargo audit --deny warnings && cargo build --release -p ferroada
 
 # Stage 2: Runtime
 FROM gcr.io/distroless/cc-debian12
