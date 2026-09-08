@@ -336,6 +336,14 @@ O binário é um processo Pingora. Não corre na Hostinger nem como função na 
 
 Comece pelo `CHECKLIST.md` do modo. TLS: o Ferroada termina se houver `fullchain.pem`; senão Caddy na frente. Os dois nunca publicam a 443 ao mesmo tempo. CIDRs do edge: `deploy/cidrs/` (snapshot datado, sem fetch no processo).
 
+```bash
+ferroada init --topology vps-api --origin http://127.0.0.1:8080 --public-host api.exemplo.com --non-interactive
+ferroada init --topology cdn-edge --origin http://127.0.0.1:8080 --public-host api.exemplo.com --trusted-proxies auto --non-interactive
+ferroada healthcheck   # GET 127.0.0.1:9000/healthz; exit 0/1. Distroless não tem curl.
+```
+
+`--trusted-proxies auto` copia o snapshot em `deploy/cidrs/` (embutido no binário). Zero HTTP. Para actualizar a lista, substitua `deploy/cidrs/*.txt` à mão e volte a correr `init`. `--listen-mode privileged` emite :80/:443 **e** `CAP_NET_BIND_SERVICE`; `proxied` deixa o processo em 127.0.0.1:3000 com Caddy na frente.
+
 ---
 
 ## Configuração
@@ -373,6 +381,8 @@ Toda a configuração é feita por variáveis de ambiente:
 | `GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `30` | Limite da fase final de shutdown gracioso |
 | `TLS_CERT_PATH` | *(opcional)* | Caminho para o certificado TLS (fullchain.pem) |
 | `TLS_KEY_PATH` | *(opcional)* | Caminho para a chave privada TLS |
+| `PROXY_LISTEN` | `0.0.0.0:3000` | Endereço do listener HTTP |
+| `TLS_LISTEN` | `0.0.0.0:3443` | Endereço do listener HTTPS (só se `TLS_CERT_PATH`/`TLS_KEY_PATH`) |
 | `DASHBOARD_PORT` | `9000` | Porta do dashboard de monitoramento |
 | `DASHBOARD_BIND` | `127.0.0.1` | IP do dashboard; bind não-loopback exige token |
 | `DASHBOARD_TOKEN` | *(vazio em loopback)* | Token Bearer; obrigatório fora de loopback e com `FERROADA_PRODUCTION=true` |

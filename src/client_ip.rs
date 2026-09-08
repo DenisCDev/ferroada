@@ -102,7 +102,7 @@ impl TrustedProxies {
         Self::parse(&value)
     }
 
-    fn parse(value: &str) -> Result<Self, String> {
+    pub fn parse(value: &str) -> Result<Self, String> {
         let networks = value
             .split(',')
             .map(str::trim)

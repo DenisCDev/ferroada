@@ -2,7 +2,7 @@
 
 O Ferroada **não** é uma serverless function. A VPS é o origin público; a Vercel fica upstream.
 
-Não é um modo `init` — copie esta pasta ou, quando o subcomando existir, `ferroada init --topology vercel-origin`.
+Copie esta pasta ou gere com `ferroada init --topology vercel-origin`.
 
 | Ficheiro | Função |
 | --- | --- |
@@ -11,7 +11,7 @@ Não é um modo `init` — copie esta pasta ou, quando o subcomando existir, `fe
 | `.env.caddy.example` | mesmo, com Caddy na frente |
 | `docker-compose.yml` | Ferroada publica 80/443 |
 | `docker-compose.caddy.yml` | Caddy publica 80/443 |
-| `ferroada.service` | systemd em 3000/3443 |
+| `ferroada.service` | systemd em 3000/3443; `ferroada.privileged.service` é :80+:443+cap |
 | `Caddyfile` / `nginx.conf.snippet` | TLS local na frente |
 | `ORIGIN_LOCK.md` | firewall e overlay |
 | `VISIBILIDADE.md` | o que o proxy vê |

@@ -10,6 +10,8 @@ User=ferroada
 Group=ferroada
 WorkingDirectory=/etc/ferroada
 EnvironmentFile=/etc/ferroada/env
+Environment=PROXY_LISTEN=0.0.0.0:3000
+Environment=TLS_LISTEN=0.0.0.0:3443
 ExecStart=/usr/local/bin/ferroada
 Restart=on-failure
 RestartSec=2
@@ -18,8 +20,9 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadOnlyPaths=/etc/ferroada
-# O binário 0.6.0 escuta 0.0.0.0:3000 e, com TLS_CERT_PATH/TLS_KEY_PATH, 0.0.0.0:3443.
-# Este unit não promete :80. Capability sozinha não muda a porta.
+# Default 3000/3443. Não promete :80. Capability sozinha não muda a porta.
+# :80/:443: ferroada.privileged.service (PROXY_LISTEN/TLS_LISTEN + CAP_NET_BIND_SERVICE).
+# Caddy na frente: ferroada init --listen-mode proxied (127.0.0.1:3000, sem cap).
 
 [Install]
 WantedBy=multi-user.target

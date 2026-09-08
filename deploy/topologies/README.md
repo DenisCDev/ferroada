@@ -16,3 +16,9 @@ Cada pasta é um modo de instalação fail-closed. Copie **uma**. `_skeleton/` n
 Hostinger e Vercel **não** correm o binário. A VPS é o origin público.
 
 Dashboard em loopback. Produção não mapeia a porta 9000. Token em `DASHBOARD_TOKEN`.
+
+```bash
+ferroada init --topology vps-site --origin http://127.0.0.1:8080 --public-host site.exemplo.com --non-interactive
+```
+
+`--trusted-proxies auto` só copia o snapshot em `deploy/cidrs/`. O proxy nunca busca CIDRs.

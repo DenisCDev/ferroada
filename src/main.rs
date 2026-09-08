@@ -14,6 +14,43 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("init") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            if let Err(error) = ferroada::init::run(&args) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("cidrs") => {
+            eprintln!(
+                "ferroada cidrs ainda não existe neste binário. Substitua deploy/cidrs/*.txt à mão e volte a correr init --trusted-proxies auto."
+            );
+            std::process::exit(1);
+        }
+        Some("healthcheck") => {
+            let extra: Vec<String> = std::env::args().skip(2).collect();
+            if extra.iter().any(|arg| arg == "--help" || arg == "-h") {
+                println!(
+                    "ferroada healthcheck — GET em DASHBOARD_BIND:DASHBOARD_PORT/healthz; sai 0 se 200, 1 se o dashboard não responde (limite 2s)."
+                );
+                return;
+            }
+            if !extra.is_empty() {
+                eprintln!("ferroada healthcheck não aceita argumentos");
+                std::process::exit(1);
+            }
+            let _ = dotenvy::dotenv();
+            if let Err(error) = ferroada::healthcheck::probe_from_env() {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        _ => {}
+    }
+
     // Load .env file (ignore if missing)
     let _ = dotenvy::dotenv();
 
@@ -67,20 +104,24 @@ fn main() {
         connection_filter.wrap(proxy_app),
     );
     svc.set_connection_filter(Arc::new(connection_filter));
-    svc.add_tcp("0.0.0.0:3000");
+    let proxy_listen = ferroada::listen::from_env("PROXY_LISTEN", ferroada::listen::DEFAULT_PROXY)
+        .unwrap_or_else(|error| panic!("{error}"));
+    svc.add_tcp(&proxy_listen);
 
     // Optional TLS listener
     if let (Ok(cert_path), Ok(key_path)) = (
         std::env::var("TLS_CERT_PATH"),
         std::env::var("TLS_KEY_PATH"),
     ) {
-        svc.add_tls("0.0.0.0:3443", &cert_path, &key_path)
+        let tls_listen = ferroada::listen::from_env("TLS_LISTEN", ferroada::listen::DEFAULT_TLS)
+            .unwrap_or_else(|error| panic!("{error}"));
+        svc.add_tls(&tls_listen, &cert_path, &key_path)
             .expect("Failed to load TLS certs");
-        info!(listen = "0.0.0.0:3443", "HTTPS listener ready");
+        info!(listen = %tls_listen, "HTTPS listener ready");
     }
 
     server.add_service(svc);
-    info!(listen = "0.0.0.0:3000", "Ferroada proxy ready");
+    info!(listen = %proxy_listen, "Ferroada proxy ready");
 
     // --- Dashboard service ---
     let dashboard_port = std::env::var("DASHBOARD_PORT").unwrap_or_else(|_| "9000".to_string());

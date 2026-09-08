@@ -12,7 +12,6 @@ FORBIDDEN_ANY = (
     "ORIGIN_SECRET",
     "FERROADA_PRODUCTION",
     "FERROADA_ALLOW_DEMO",
-    "PROXY_LISTEN",
     "location /supabase",
 )
 MODES = (
@@ -46,6 +45,8 @@ def main() -> None:
         if not d.is_dir():
             errors.append(f"falta modo {mode}")
             continue
+        if not (d / "ferroada.privileged.service").is_file():
+            errors.append(f"{mode}: falta ferroada.privileged.service")
         for path in d.rglob("*"):
             if not path.is_file():
                 continue
@@ -63,10 +64,24 @@ def main() -> None:
             if "PROXY_PROTOCOL" in text:
                 errors.append(f"{rel}: contém PROXY_PROTOCOL")
             if path.name == "ferroada.service":
-                if "Listen=80" in text or "Listen=:80" in text:
-                    errors.append(f"{rel}: unit promete :80")
+                if "PROXY_LISTEN=0.0.0.0:80" in text or "TLS_LISTEN=0.0.0.0:443" in text:
+                    errors.append(f"{rel}: unit default promete :80/:443")
                 if "AmbientCapabilities=CAP_NET_BIND_SERVICE" in text:
-                    errors.append(f"{rel}: cap sem knob de listen")
+                    errors.append(f"{rel}: cap no unit default (3000)")
+            if path.name == "ferroada.privileged.service":
+                if "Environment=PROXY_LISTEN=0.0.0.0:80" not in text:
+                    errors.append(f"{rel}: privileged sem PROXY_LISTEN=:80")
+                if "Environment=TLS_LISTEN=0.0.0.0:443" not in text:
+                    errors.append(f"{rel}: privileged sem TLS_LISTEN=:443")
+                if "AmbientCapabilities=CAP_NET_BIND_SERVICE" not in text:
+                    errors.append(f"{rel}: privileged sem AmbientCapabilities")
+                if "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" not in text:
+                    errors.append(f"{rel}: privileged sem CapabilityBoundingSet")
+            if path.name == "ferroada.proxied.service":
+                if "PROXY_LISTEN=127.0.0.1:3000" not in text:
+                    errors.append(f"{rel}: proxied sem 127.0.0.1:3000")
+                if "AmbientCapabilities" in text:
+                    errors.append(f"{rel}: proxied com cap")
 
     cdn_env = (TOPO / "cdn-edge" / ".env.example").read_text(encoding="utf-8")
     if "TRUSTED_PROXIES=" not in cdn_env:
@@ -111,6 +126,15 @@ def main() -> None:
     sk = TOPO / "_skeleton"
     if not sk.is_dir():
         errors.append("falta _skeleton")
+    proxied = sk / "ferroada.proxied.service"
+    if not proxied.is_file():
+        errors.append("falta _skeleton/ferroada.proxied.service")
+    else:
+        text = proxied.read_text(encoding="utf-8")
+        if "PROXY_LISTEN=127.0.0.1:3000" not in text:
+            errors.append("proxied unit sem 127.0.0.1:3000")
+        if "AmbientCapabilities" in text:
+            errors.append("proxied unit com cap")
 
     if errors:
         fail("\n".join(errors))

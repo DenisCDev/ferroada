@@ -15,7 +15,10 @@
 
 ## systemd
 
-O unit escuta 3000/3443, igual ao binário. Não promete :80. Coloque o binário em `/usr/local/bin/ferroada` antes. Se o Caddy corre no host, `reverse_proxy 127.0.0.1:3000` e `TRUSTED_PROXIES=127.0.0.1/32,::1/128`.
+O unit desta pasta (`ferroada.service`) escuta 0.0.0.0:3000/3443 via `PROXY_LISTEN`/`TLS_LISTEN`, sem cap. Não promete :80.
+`ferroada.privileged.service` publica :80/:443 **e** traz `AmbientCapabilities` + `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` — o binário não é setuid; knob sem cap falha o bind. Copie **um** dos dois para `/etc/systemd/system/ferroada.service`, nunca os dois.
+`ferroada init --listen-mode privileged` emite o unit :80+cap; `--listen-mode proxied` emite 127.0.0.1:3000 sem cap e o Caddy na frente.
+Coloque o binário em `/usr/local/bin/ferroada` antes. Se o Caddy corre no host, `reverse_proxy 127.0.0.1:3000` e `TRUSTED_PROXIES=127.0.0.1/32,::1/128` (mais o snapshot CDN, se houver).
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin ferroada
