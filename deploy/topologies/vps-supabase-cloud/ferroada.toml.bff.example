@@ -1,0 +1,8 @@
+# Opção 2: host dedicado para o projecto Cloud. Concatene ao ferroada.toml.
+# Host dedicado, não prefixo de URL. Substitua {{SUPABASE_HOST}} e PROJECT_REF.
+
+[[sites]]
+hosts = ["{{SUPABASE_HOST}}"]
+backend = "https://PROJECT_REF.supabase.co"
+waf_profile = "generic"
+require_complete_waf_inspection = ["/auth/v1/token", "/rest/v1/"]

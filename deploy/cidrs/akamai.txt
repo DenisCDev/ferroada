@@ -1,0 +1,15 @@
+# Snapshot 2026-09-08. Não buscar isto no processo nem no boot.
+# Fonte IPv4: https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv4_CIDRs.txt
+# Fonte IPv6: https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv6_CIDRs.txt
+# Supernets públicos Origin IP ACL. Site Shield (Control Center) é por cliente e deve substituir esta lista se existir. Não é o mapa de toda a borda Akamai.
+# Formato: um CIDR por linha. Cole no TRUSTED_PROXIES separado por vírgulas.
+
+2.16.0.0/13
+23.0.0.0/12
+23.192.0.0/11
+23.32.0.0/11
+95.100.0.0/15
+184.24.0.0/13
+2a02:26f0::/32
+2600:1400::/24
+2405:9600::/32

@@ -21,6 +21,7 @@ web/node_modules/
 
 # Environment
 .env
+.env.caddy
 *.local
 
 # IDE

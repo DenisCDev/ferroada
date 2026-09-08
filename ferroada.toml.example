@@ -1,5 +1,8 @@
 # Ferroada Multi-Site Configuration
 #
+# Packs de produção (dashboard em loopback, sem publicar a porta 9000):
+#   deploy/topologies/
+#
 # Quando este arquivo existe, o Ferroada roda em modo multi-site:
 # cada request e roteado para o backend correto pelo Host header.
 #

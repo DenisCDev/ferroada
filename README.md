@@ -258,6 +258,8 @@ segurança completa, o backend precisa de validação própria.
 
 ## Quick start
 
+Laboratório na sua máquina. Produção: copie um pack em [`deploy/topologies/`](deploy/topologies/) — o dashboard fica em loopback e **não** se publica na internet.
+
 ### 1. Build
 
 ```bash
@@ -270,15 +272,16 @@ docker build -t ferroada .
 docker run -d \
   -e TARGET_URL=http://host.docker.internal:8080 \
   -e RUST_LOG=info \
-  -e DASHBOARD_BIND=0.0.0.0 \
+  -e DASHBOARD_BIND=127.0.0.1 \
   -e DASHBOARD_TOKEN='troque-por-um-token-longo' \
   -e RATE_LIMIT_MAX=100 \
   -e RATE_LIMIT_WINDOW=60 \
   -p 3000:3000 \
-  -p 9000:9000 \
   --name ferroada \
   ferroada
 ```
+
+O dashboard escuta `127.0.0.1:9000` **dentro** do contêiner. No laboratório, entre com `docker exec` ou publique só no loopback do anfitrião. Em produção use o túnel `ssh -L 9000:127.0.0.1:9000`.
 
 ### 3. Testar
 
@@ -309,11 +312,29 @@ for i in $(seq 1 105); do
   curl -s -o /dev/null -w "%{http_code} " http://localhost:3000/
 done
 
-# Dashboard
+# Dashboard (só se publicou o loopback do anfitrião)
 curl -H 'Authorization: Bearer troque-por-um-token-longo' \
-  http://localhost:9000/api/metrics
-# Ou abra http://localhost:9000 no navegador
+  http://127.0.0.1:9000/api/metrics
 ```
+
+---
+
+## Modos de instalação
+
+O binário é um processo Pingora. Não corre na Hostinger nem como função na Vercel. Cada pasta em `deploy/topologies/` é um pack fail-closed: toml, env, Compose, unit systemd, origin-lock e um `VISIBILIDADE.md` honesto.
+
+| Modo | Quando usar |
+|------|-------------|
+| [`vps-site`](deploy/topologies/vps-site/) | VPS com o site (frontend + backend) |
+| [`vps-api`](deploy/topologies/vps-api/) | VPS só com a API |
+| [`vps-supabase-selfhost`](deploy/topologies/vps-supabase-selfhost/) | API + Supabase auto-hospedado (Kong) |
+| [`vps-supabase-cloud`](deploy/topologies/vps-supabase-cloud/) | API na VPS, Supabase Cloud |
+| [`vps-full`](deploy/topologies/vps-full/) | Tudo na VPS |
+| [`hostinger-origin`](deploy/topologies/hostinger-origin/) | Estático na Hostinger; Ferroada numa VPS à frente |
+| [`vercel-origin`](deploy/topologies/vercel-origin/) | App na Vercel; Ferroada numa VPS à frente |
+| [`cdn-edge`](deploy/topologies/cdn-edge/) | Internet → CDN → Ferroada → backend (recomendado) |
+
+Comece pelo `CHECKLIST.md` do modo. TLS: o Ferroada termina se houver `fullchain.pem`; senão Caddy na frente. Os dois nunca publicam a 443 ao mesmo tempo. CIDRs do edge: `deploy/cidrs/` (snapshot datado, sem fetch no processo).
 
 ---
 
@@ -415,13 +436,12 @@ configurados recebem `421 Misdirected Request`.
 - A env `ALLOWED_HOSTS` continua funcionando como restrição adicional
 
 ```bash
-# Multi-site com Docker
+# Multi-site com Docker (laboratório). Produção: deploy/topologies/
 docker run -d \
   -v ./ferroada.toml:/ferroada.toml:ro \
-  -e DASHBOARD_BIND=0.0.0.0 \
+  -e DASHBOARD_BIND=127.0.0.1 \
   -e DASHBOARD_TOKEN='troque-por-um-token-longo' \
   -p 3000:3000 \
-  -p 9000:9000 \
   ferroada
 ```
 
@@ -434,12 +454,11 @@ docker run -d \
   -e TARGET_URL=http://backend:8080 \
   -e TLS_CERT_PATH=/certs/fullchain.pem \
   -e TLS_KEY_PATH=/certs/privkey.pem \
-  -e DASHBOARD_BIND=0.0.0.0 \
+  -e DASHBOARD_BIND=127.0.0.1 \
   -e DASHBOARD_TOKEN='troque-por-um-token-longo' \
   -v /etc/letsencrypt/live/meudominio:/certs:ro \
   -p 443:3443 \
   -p 80:3000 \
-  -p 9000:9000 \
   ferroada
 ```
 
@@ -455,11 +474,10 @@ services:
     build: ./ferroada
     ports:
       - "80:3000"
-      - "9000:9000"
     environment:
       - TARGET_URL=http://app:8080
       - RATE_LIMIT_MAX=100
-      - DASHBOARD_BIND=0.0.0.0
+      - DASHBOARD_BIND=127.0.0.1
       - DASHBOARD_TOKEN=${FERROADA_DASHBOARD_TOKEN}
     depends_on:
       - app
@@ -470,6 +488,8 @@ services:
       - "8080"
 ```
 
+O dashboard não se publica na internet. Túnel: `ssh -L 9000:127.0.0.1:9000`. Nos packs Docker o mapa é só `127.0.0.1:9000` no anfitrião. Packs completos: `deploy/topologies/`.
+
 ### Docker Compose (multi-site)
 
 ```yaml
@@ -478,9 +498,8 @@ services:
     build: ./ferroada
     ports:
       - "80:3000"
-      - "9000:9000"
     environment:
-      - DASHBOARD_BIND=0.0.0.0
+      - DASHBOARD_BIND=127.0.0.1
       - DASHBOARD_TOKEN=${FERROADA_DASHBOARD_TOKEN}
     volumes:
       - ./ferroada.toml:/ferroada.toml:ro

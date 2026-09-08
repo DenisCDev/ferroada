@@ -1,0 +1,25 @@
+[Unit]
+Description=Ferroada origin gateway
+Documentation=https://github.com/DenisCDev/ferroada
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ferroada
+Group=ferroada
+WorkingDirectory=/etc/ferroada
+EnvironmentFile=/etc/ferroada/env
+ExecStart=/usr/local/bin/ferroada
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/ferroada
+# O binário 0.6.0 escuta 0.0.0.0:3000 e, com TLS_CERT_PATH/TLS_KEY_PATH, 0.0.0.0:3443.
+# Este unit não promete :80. Capability sozinha não muda a porta.
+
+[Install]
+WantedBy=multi-user.target

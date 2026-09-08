@@ -1,0 +1,14 @@
+# Caddy termina TLS na frente do Ferroada.
+# Não publique :443 no Ferroada ao mesmo tempo (nem 443:3443 no Compose).
+# Docker: reverse_proxy ferroada:3000. systemd no host: reverse_proxy 127.0.0.1:3000
+# e TRUSTED_PROXIES=127.0.0.1/32,::1/128.
+# Substitua {{PUBLIC_HOST}} antes de subir.
+
+{{PUBLIC_HOST}} {
+    encode gzip
+    reverse_proxy ferroada:3000 {
+        header_up Host {host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Real-IP {remote_host}
+    }
+}
