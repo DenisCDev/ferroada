@@ -1,8 +1,8 @@
 import { Dashboard } from "@/components/Dashboard";
-import { demoMetrics } from "@/lib/demo";
+import { unavailableMetrics } from "@/lib/get-metrics";
 
 export default function Page() {
-  const initial = { ...demoMetrics(), demo: true as const, demo_reason: "unavailable" as const };
+  const initial = unavailableMetrics();
   return (
     <>
       <h1>Visão geral</h1>

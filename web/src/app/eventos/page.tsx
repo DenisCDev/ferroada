@@ -1,8 +1,8 @@
 import { EventsPanel } from "@/components/Dashboard";
-import { demoMetrics } from "@/lib/demo";
+import { unavailableMetrics } from "@/lib/get-metrics";
 
 export default function EventosPage() {
-  const data = { ...demoMetrics(), demo: true as const, demo_reason: "unavailable" as const };
+  const data = unavailableMetrics();
   return (
     <>
       <h1>Eventos</h1>

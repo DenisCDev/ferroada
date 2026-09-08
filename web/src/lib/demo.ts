@@ -1,5 +1,7 @@
 import type { FerroadaMetrics, SecurityEvent } from "./types";
 
+/** Invented traffic for screenshots. Production may use this only when FERROADA_ALLOW_DEMO=true. */
+
 const URIS = [
   "/login?user=admin'--",
   "/.env",

@@ -47,6 +47,7 @@ export const ferroadaMetricsSchema = z.object({
 
 export const metricsResultSchema = ferroadaMetricsSchema.extend({
   demo: z.boolean(),
+  unavailable: z.boolean(),
   demo_reason: z.enum(["unauthorized", "unavailable", "invalid_response"]).optional(),
 });
 
