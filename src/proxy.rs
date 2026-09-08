@@ -65,6 +65,7 @@ use crate::config::Config;
 use crate::dlp;
 use crate::headers;
 use crate::metrics;
+use crate::protocol::{self, ProtocolVerdict, RequestFacts};
 use crate::rate_limit::RateLimiter;
 use crate::shield::{self, ShieldVerdict};
 use crate::waf::{self, WafVerdict};
@@ -288,6 +289,7 @@ pub struct FerroadaCtx {
     pub request_content_type: Option<String>,
     pub request_content_encoding: Option<String>,
     pub skip_dlp: bool,
+    pub skip_body_waf: bool,
     pub inspect_request_body: bool,
     pub request_https: bool,
     pub backend: Option<crate::config::Backend>,
@@ -352,6 +354,7 @@ impl ProxyHttp for FerroadaProxy {
             request_content_type: None,
             request_content_encoding: None,
             skip_dlp: false,
+            skip_body_waf: false,
             inspect_request_body: false,
             request_https: false,
             backend: None,
@@ -706,6 +709,45 @@ impl ProxyHttp for FerroadaProxy {
             }
         }
 
+        ctx.request_content_type = session
+            .req_header()
+            .headers
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        ctx.request_content_encoding = session
+            .req_header()
+            .headers
+            .get("Content-Encoding")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let upgrade = session
+            .req_header()
+            .headers
+            .get("Upgrade")
+            .and_then(|v| v.to_str().ok());
+        let require_complete = ctx
+            .backend
+            .as_ref()
+            .map(|backend| backend.requires_complete_waf_inspection(&uri))
+            .unwrap_or(false);
+        let protocol_verdict = self.config.protocols.evaluate(&RequestFacts {
+            version: session.req_header().version,
+            upgrade,
+            content_encoding: ctx.request_content_encoding.as_deref(),
+            content_type: ctx.request_content_type.as_deref(),
+            require_complete,
+        });
+        protocol::record(protocol_verdict, &client_addr, &uri);
+        if protocol_verdict.blocked_status().is_some() {
+            let reason = match protocol_verdict {
+                ProtocolVerdict::Unsupported { protocol, .. } => protocol.deny_reason(),
+                ProtocolVerdict::Inspect => "protocolo não suportado",
+            };
+            return self.send_403(session, reason).await;
+        }
+        ctx.skip_body_waf = protocol_verdict.skips_body_waf();
+
         // WAF inspection on URI + headers
         let header_values: Vec<String> = session
             .req_header()
@@ -729,18 +771,6 @@ impl ProxyHttp for FerroadaProxy {
         // Read and approve the complete body before Pingora opens the upstream.
         // Pingora's retry buffer replays the approved bytes afterwards.
         if !session.as_mut().is_body_empty() {
-            ctx.request_content_type = session
-                .req_header()
-                .headers
-                .get("Content-Type")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            ctx.request_content_encoding = session
-                .req_header()
-                .headers
-                .get("Content-Encoding")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
             session.set_read_timeout(Some(*BODY_READ_TIMEOUT));
 
             let reservation = request_inspection_reservation(
@@ -820,53 +850,57 @@ impl ProxyHttp for FerroadaProxy {
                 }
             }
 
-            let inspect_body = waf::inflate_for_inspect(
-                ctx.request_body.as_slice(),
-                ctx.request_content_encoding.as_deref(),
-            );
-            let inspection = waf::inspect_body(
-                &inspect_body.bytes,
-                &ctx.request_uri,
-                &ctx.client_addr,
-                ctx.request_content_type.as_deref(),
-            );
-            let inspection_status = inspect_body.status.combine(inspection.status);
-            metrics::record_waf_inspection(inspection_status.as_str());
-            match inspection.verdict {
-                WafVerdict::Allow => {
-                    let require_complete = ctx
-                        .backend
-                        .as_ref()
-                        .map(|backend| backend.requires_complete_waf_inspection(&ctx.request_uri))
-                        .unwrap_or(false);
-                    if require_complete && !inspection_status.is_complete() {
-                        metrics::record_block(
-                            "waf_incomplete",
-                            &ctx.client_addr,
-                            &ctx.request_uri,
-                            inspection_status.as_str(),
-                        );
+            if !ctx.skip_body_waf {
+                let inspect_body = waf::inflate_for_inspect(
+                    ctx.request_body.as_slice(),
+                    ctx.request_content_encoding.as_deref(),
+                );
+                let inspection = waf::inspect_body(
+                    &inspect_body.bytes,
+                    &ctx.request_uri,
+                    &ctx.client_addr,
+                    ctx.request_content_type.as_deref(),
+                );
+                let inspection_status = inspect_body.status.combine(inspection.status);
+                metrics::record_waf_inspection(inspection_status.as_str());
+                match inspection.verdict {
+                    WafVerdict::Allow => {
+                        let require_complete = ctx
+                            .backend
+                            .as_ref()
+                            .map(|backend| {
+                                backend.requires_complete_waf_inspection(&ctx.request_uri)
+                            })
+                            .unwrap_or(false);
+                        if require_complete && !inspection_status.is_complete() {
+                            metrics::record_block(
+                                "waf_incomplete",
+                                &ctx.client_addr,
+                                &ctx.request_uri,
+                                inspection_status.as_str(),
+                            );
+                            if let Some(identity) = ctx.risk_identity.as_ref() {
+                                behavioral::record_waf_block(identity);
+                            }
+                            return self
+                                .send_403(session, "Inspeção WAF completa obrigatória nesta rota")
+                                .await;
+                        }
+                        if !inspection_status.is_complete() {
+                            tracing::warn!(
+                                client = %ctx.client_addr,
+                                uri = %ctx.request_uri,
+                                inspection_status = inspection_status.as_str(),
+                                "Request body was not completely inspected"
+                            );
+                        }
+                    }
+                    WafVerdict::Block(reason) => {
                         if let Some(identity) = ctx.risk_identity.as_ref() {
                             behavioral::record_waf_block(identity);
                         }
-                        return self
-                            .send_403(session, "Inspeção WAF completa obrigatória nesta rota")
-                            .await;
+                        return self.send_403(session, &reason).await;
                     }
-                    if !inspection_status.is_complete() {
-                        tracing::warn!(
-                            client = %ctx.client_addr,
-                            uri = %ctx.request_uri,
-                            inspection_status = inspection_status.as_str(),
-                            "Request body was not completely inspected"
-                        );
-                    }
-                }
-                WafVerdict::Block(reason) => {
-                    if let Some(identity) = ctx.risk_identity.as_ref() {
-                        behavioral::record_waf_block(identity);
-                    }
-                    return self.send_403(session, &reason).await;
                 }
             }
 

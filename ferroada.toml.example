@@ -12,6 +12,25 @@
 # Se nao definido, requests com Host desconhecido recebem 421.
 # default_backend = "http://fallback:8080"
 
+# Matriz de protocolo. inspect = suportado (L0 faz o que já faz).
+# Não suportado: deny | monitor | bypass-explicit | route-to-quarantine
+# route-to-quarantine (v1) = 403 + evento quarantine; sem origin honeypot.
+# Linhas omitidas usam o default. multipart/brotli/unknown_encoding/
+# unknown_content_type omitidos = deny em require_complete, monitor no resto.
+# Não existe unknown = "deny" ambíguo.
+[protocols]
+http_1_0 = "deny"
+http_1_1 = "inspect"
+http_2 = "inspect"
+http_3 = "deny"
+websocket = "bypass-explicit"
+grpc = "deny"
+json = "inspect"
+gzip_deflate = "inspect"
+sse = "inspect"
+unknown_http_version = "deny"
+unknown_upgrade = "deny"
+
 [[sites]]
 hosts = ["meusite.com", "www.meusite.com"]
 backend = "http://backend-a:8080"

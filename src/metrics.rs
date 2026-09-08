@@ -1,6 +1,6 @@
 use once_cell::sync::Lazy;
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -40,6 +40,11 @@ pub struct Metrics {
     pub waf_monitored: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
+    pub protocol_deny: AtomicU64,
+    pub protocol_monitor: AtomicU64,
+    pub protocol_bypass: AtomicU64,
+    pub protocol_quarantine: AtomicU64,
+    protocol_by_id: Mutex<HashMap<(String, String), u64>>,
     pub recent_events: Mutex<VecDeque<SecurityEvent>>,
 }
 
@@ -86,6 +91,11 @@ impl Metrics {
             waf_monitored: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
+            protocol_deny: AtomicU64::new(0),
+            protocol_monitor: AtomicU64::new(0),
+            protocol_bypass: AtomicU64::new(0),
+            protocol_quarantine: AtomicU64::new(0),
+            protocol_by_id: Mutex::new(HashMap::new()),
             recent_events: Mutex::new(VecDeque::with_capacity(MAX_EVENTS)),
         }
     }
@@ -169,6 +179,38 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
     };
     counter.fetch_add(1, Ordering::Relaxed);
 
+    METRICS.push_event(SecurityEvent {
+        timestamp: now_iso(),
+        event_type: event_type.to_string(),
+        client_ip: client_ip.to_string(),
+        uri: uri.to_string(),
+        detail: detail.to_string(),
+    });
+}
+
+pub fn record_protocol(protocol_id: &str, action: &str, client_ip: &str, uri: &str, detail: &str) {
+    let counter = match action {
+        "deny" => &METRICS.protocol_deny,
+        "monitor" => &METRICS.protocol_monitor,
+        "bypass-explicit" => &METRICS.protocol_bypass,
+        "quarantine" => &METRICS.protocol_quarantine,
+        _ => return,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+
+    if let Ok(mut by_id) = METRICS.protocol_by_id.lock() {
+        *by_id
+            .entry((protocol_id.to_string(), action.to_string()))
+            .or_insert(0) += 1;
+    }
+
+    let event_type = match action {
+        "quarantine" => "quarantine",
+        "deny" => "protocol_deny",
+        "monitor" => "protocol_monitor",
+        "bypass-explicit" => "protocol_bypass",
+        _ => return,
+    };
     METRICS.push_event(SecurityEvent {
         timestamp: now_iso(),
         event_type: event_type.to_string(),
@@ -272,6 +314,12 @@ pub fn snapshot_json() -> String {
             "cpf_masked": m.dlp_cpf_masked.load(Ordering::Relaxed),
             "tokens_masked": m.dlp_tokens_masked.load(Ordering::Relaxed)
         },
+        "protocol": {
+            "deny": m.protocol_deny.load(Ordering::Relaxed),
+            "monitor": m.protocol_monitor.load(Ordering::Relaxed),
+            "bypass_explicit": m.protocol_bypass.load(Ordering::Relaxed),
+            "quarantine": m.protocol_quarantine.load(Ordering::Relaxed)
+        },
         "recent_events": events
     });
 
@@ -335,6 +383,27 @@ pub fn snapshot_prometheus() -> String {
             counter.load(Ordering::Relaxed)
         ));
     }
+    output.push_str("# TYPE ferroada_protocol_total counter\n");
+    for (action, counter) in [
+        ("deny", &metrics.protocol_deny),
+        ("monitor", &metrics.protocol_monitor),
+        ("bypass-explicit", &metrics.protocol_bypass),
+        ("quarantine", &metrics.protocol_quarantine),
+    ] {
+        output.push_str(&format!(
+            "ferroada_protocol_total{{action=\"{action}\"}} {}\n",
+            counter.load(Ordering::Relaxed)
+        ));
+    }
+    if let Ok(by_id) = metrics.protocol_by_id.lock() {
+        let mut rows: Vec<_> = by_id.iter().collect();
+        rows.sort_by(|left, right| left.0.cmp(right.0));
+        for ((id, action), count) in rows {
+            output.push_str(&format!(
+                "ferroada_protocol_total{{id=\"{id}\",action=\"{action}\"}} {count}\n"
+            ));
+        }
+    }
     output
 }
 
@@ -347,5 +416,6 @@ mod tests {
         let snapshot = snapshot_prometheus();
         assert!(snapshot.contains("ferroada_requests_total"));
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"truncated\"}"));
+        assert!(snapshot.contains("ferroada_protocol_total{action=\"quarantine\"}"));
     }
 }

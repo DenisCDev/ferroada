@@ -6,6 +6,7 @@ use std::io::Read;
 use tracing::warn;
 
 use crate::metrics;
+use crate::protocol;
 
 /// Bytes of inflated body the WAF will look at. Caps zip bombs.
 const MAX_INFLATE_FOR_INSPECT: u64 = 256 * 1024;
@@ -454,7 +455,7 @@ pub fn inspect_request_with_profile(
 }
 
 /// Inspect request body (POST/PUT/PATCH) for SQLi, XSS, CRLF and JNDI payloads.
-/// `content_type` is used to skip CRLF checks on multipart/form-data (legitimate \r\n in uploads).
+/// Multipart is not inspectable in v1 (protocol matrix); this returns UnsupportedContentType.
 pub fn inspect_body(
     body: &[u8],
     uri: &str,
@@ -462,18 +463,6 @@ pub fn inspect_body(
     content_type: Option<&str>,
 ) -> WafInspection {
     if !is_inspectable_content_type(content_type) {
-        return WafInspection {
-            verdict: WafVerdict::Allow,
-            status: InspectionStatus::UnsupportedContentType,
-        };
-    }
-    let is_multipart = content_type
-        .map(|ct| ct.to_ascii_lowercase().contains("multipart/form-data"))
-        .unwrap_or(false);
-    if is_multipart
-        && body.len() <= INSPECT_TEXT_LIMIT
-        && multipart_has_unsupported_transfer_encoding(body)
-    {
         return WafInspection {
             verdict: WafVerdict::Allow,
             status: InspectionStatus::UnsupportedContentType,
@@ -528,8 +517,7 @@ pub fn inspect_body(
         recursive_urldecode(&inspection_text)
     };
 
-    // CRLF check — skip for multipart/form-data (legitimate \r\n in uploads)
-    if !is_multipart && BODY_CRLF_INJECTION_RE.is_match(&decoded) {
+    if BODY_CRLF_INJECTION_RE.is_match(&decoded) {
         warn!(
             client = client_addr,
             uri = uri,
@@ -600,28 +588,8 @@ pub fn inspect_body(
     }
 }
 
-fn multipart_has_unsupported_transfer_encoding(body: &[u8]) -> bool {
-    String::from_utf8_lossy(body).lines().any(|line| {
-        let line = line.trim().to_ascii_lowercase();
-        line.strip_prefix("content-transfer-encoding:")
-            .map(str::trim)
-            .is_some_and(|encoding| !matches!(encoding, "7bit" | "8bit" | "binary" | "identity"))
-    })
-}
-
 fn is_inspectable_content_type(content_type: Option<&str>) -> bool {
-    let Some(content_type) = content_type else {
-        return true;
-    };
-    let content_type = content_type.to_ascii_lowercase();
-    content_type.starts_with("text/")
-        || content_type.contains("application/json")
-        || content_type.contains("+json")
-        || content_type.contains("application/xml")
-        || content_type.contains("+xml")
-        || content_type.contains("application/x-www-form-urlencoded")
-        || content_type.contains("multipart/form-data")
-        || content_type.contains("application/graphql")
+    protocol::is_l0_inspectable_content_type(content_type)
 }
 
 fn json_strings(value: &serde_json::Value) -> String {
@@ -1072,5 +1040,19 @@ mod tests {
             Some("multipart/form-data; boundary=x"),
         );
         assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+    }
+
+    #[test]
+    fn multipart_is_never_inspect_complete() {
+        let body = b"--x\r\nContent-Disposition: form-data; name=q\r\n\r\nhello\r\n--x--\r\n";
+        let inspection = inspect_body(
+            body,
+            "/api/payment",
+            "1.1.1.1",
+            Some("multipart/form-data; boundary=x"),
+        );
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+        assert!(!inspection.status.is_complete());
     }
 }

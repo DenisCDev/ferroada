@@ -9,6 +9,7 @@ pub mod healthcheck;
 pub mod init;
 pub mod listen;
 pub mod metrics;
+pub mod protocol;
 pub mod proxy;
 pub mod rate_limit;
 pub mod shield;

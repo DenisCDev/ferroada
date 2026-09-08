@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use tracing::info;
 
+use crate::protocol::{ProtocolMatrix, ProtocolsSection};
 use crate::waf::{self, WafProfile};
 
 #[derive(Deserialize)]
@@ -15,6 +16,8 @@ struct ConfigFile {
     default_require_complete_waf_inspection: Vec<String>,
     #[serde(default)]
     default_waf_profile: Option<String>,
+    #[serde(default)]
+    protocols: ProtocolsSection,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +59,7 @@ pub struct Config {
     backends: Vec<Backend>,
     /// Default backend for requests that don't match any site
     default_idx: Option<usize>,
+    pub protocols: ProtocolMatrix,
 }
 
 impl Config {
@@ -81,11 +85,14 @@ impl Config {
             route_table: HashMap::new(),
             backends: vec![backend],
             default_idx: Some(0),
+            protocols: ProtocolMatrix::default(),
         }
     }
 
     fn from_toml(contents: &str) -> Self {
         let file: ConfigFile = toml::from_str(contents).expect("Invalid ferroada.toml");
+        let protocols =
+            ProtocolMatrix::from_section(file.protocols).unwrap_or_else(|error| panic!("{error}"));
 
         let mut backends = Vec::new();
         let mut route_table = HashMap::new();
@@ -155,6 +162,7 @@ impl Config {
             route_table,
             backends,
             default_idx,
+            protocols,
         }
     }
 
@@ -376,5 +384,37 @@ backend = "http://127.0.0.1:8081"
             config.resolve("known.example").unwrap().site_scope,
             "known.example"
         );
+    }
+
+    #[test]
+    fn protocols_section_loads_route_to_quarantine() {
+        let config = Config::from_toml(
+            r#"
+[protocols]
+grpc = "route-to-quarantine"
+websocket = "deny"
+
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+"#,
+        );
+        let grpc = config.protocols.evaluate(&crate::protocol::RequestFacts {
+            version: http::Version::HTTP_11,
+            upgrade: None,
+            content_encoding: None,
+            content_type: Some("application/grpc"),
+            require_complete: false,
+        });
+        assert_eq!(grpc.event_type(), Some("quarantine"));
+        assert_eq!(grpc.blocked_status(), Some(403));
+        let websocket = config.protocols.evaluate(&crate::protocol::RequestFacts {
+            version: http::Version::HTTP_11,
+            upgrade: Some("websocket"),
+            content_encoding: None,
+            content_type: None,
+            require_complete: false,
+        });
+        assert_eq!(websocket.blocked_status(), Some(403));
     }
 }
