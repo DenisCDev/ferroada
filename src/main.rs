@@ -1,7 +1,7 @@
 use ferroada::client_ip::TrustedProxies;
 use ferroada::config::Config;
 use ferroada::connection::ConnectionRateFilter;
-use ferroada::dashboard::{validate_exposure, DashboardService};
+use ferroada::dashboard::{production_enabled, validate_exposure, DashboardService};
 use ferroada::proxy::FerroadaProxy;
 use ferroada::rate_limit::RateLimiter;
 use ferroada::waf;
@@ -92,7 +92,12 @@ fn main() {
     let dashboard_token = std::env::var("DASHBOARD_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());
-    validate_exposure(dashboard_ip, dashboard_token.as_deref()).expect("Dashboard inseguro");
+    validate_exposure(
+        dashboard_ip,
+        dashboard_token.as_deref(),
+        production_enabled(),
+    )
+    .expect("Dashboard inseguro");
     let dashboard_addr = std::net::SocketAddr::new(
         dashboard_ip,
         dashboard_port

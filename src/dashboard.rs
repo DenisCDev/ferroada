@@ -9,16 +9,55 @@ use std::time::{Duration, Instant};
 
 use crate::metrics;
 
-pub fn validate_exposure(bind: std::net::IpAddr, token: Option<&str>) -> Result<(), &'static str> {
-    if !bind.is_loopback()
-        && token
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-    {
+/// `FERROADA_PRODUCTION=true` (exact match, same as `FORCE_HTTPS`). Unset is off.
+pub fn production_enabled() -> bool {
+    std::env::var("FERROADA_PRODUCTION")
+        .map(|value| value == "true")
+        .unwrap_or(false)
+}
+
+pub fn validate_exposure(
+    bind: std::net::IpAddr,
+    token: Option<&str>,
+    production: bool,
+) -> Result<(), &'static str> {
+    let has_token = token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    if has_token {
+        return Ok(());
+    }
+    if production {
+        return Err("DASHBOARD_TOKEN é obrigatório quando FERROADA_PRODUCTION=true");
+    }
+    if !bind.is_loopback() {
         return Err("DASHBOARD_TOKEN é obrigatório quando DASHBOARD_BIND não é loopback");
     }
     Ok(())
+}
+
+/// GET/HEAD after method checks. HTML, `/healthz` and `/readyz` stay public so
+/// the token form in the document remains reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardGet {
+    Health,
+    Ready,
+    Unauthorized,
+    MetricsJson,
+    MetricsPrometheus,
+    Html,
+}
+
+fn classify_dashboard_get(path: &str, authorized: bool) -> DashboardGet {
+    match path {
+        "/healthz" => DashboardGet::Health,
+        "/readyz" => DashboardGet::Ready,
+        "/api/metrics" if authorized => DashboardGet::MetricsJson,
+        "/metrics" if authorized => DashboardGet::MetricsPrometheus,
+        "/api/metrics" | "/metrics" => DashboardGet::Unauthorized,
+        _ => DashboardGet::Html,
+    }
 }
 
 pub struct DashboardService {
@@ -81,22 +120,6 @@ impl ProxyHttp for DashboardService {
             return Ok(true);
         }
 
-        if path == "/healthz" {
-            respond(session, 200, "text/plain; charset=utf-8", "ok\n").await?;
-            return Ok(true);
-        }
-
-        if path == "/readyz" {
-            let (status, body) = if self.upstreams_ready().await {
-                (200, "pronto\n")
-            } else {
-                (503, "backend indisponível\n")
-            };
-            respond(session, status, "text/plain; charset=utf-8", body).await?;
-            return Ok(true);
-        }
-
-        let protected = matches!(path, "/api/metrics" | "/metrics");
         let provided_token = session
             .req_header()
             .headers
@@ -107,19 +130,25 @@ impl ProxyHttp for DashboardService {
             provided_token
                 .is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
         });
-        if protected && !authorized {
-            respond(session, 401, "text/plain", "401 Não autorizado\n").await?;
-            return Ok(true);
-        }
 
-        let (status, content_type, body) = match path {
-            "/api/metrics" => (200, "application/json", metrics::snapshot_json()),
-            "/metrics" => (
+        let (status, content_type, body) = match classify_dashboard_get(path, authorized) {
+            DashboardGet::Health => (200, "text/plain; charset=utf-8", "ok\n".to_string()),
+            DashboardGet::Ready => {
+                let (status, body) = if self.upstreams_ready().await {
+                    (200, "pronto\n")
+                } else {
+                    (503, "backend indisponível\n")
+                };
+                (status, "text/plain; charset=utf-8", body.to_string())
+            }
+            DashboardGet::Unauthorized => (401, "text/plain", "401 Não autorizado\n".to_string()),
+            DashboardGet::MetricsJson => (200, "application/json", metrics::snapshot_json()),
+            DashboardGet::MetricsPrometheus => (
                 200,
                 "text/plain; version=0.0.4; charset=utf-8",
                 metrics::snapshot_prometheus(),
             ),
-            _ => (200, "text/html; charset=utf-8", dashboard_html()),
+            DashboardGet::Html => (200, "text/html; charset=utf-8", dashboard_html()),
         };
 
         respond(session, status, content_type, &body).await?;
@@ -330,8 +359,58 @@ mod tests {
 
     #[test]
     fn external_dashboard_requires_authentication() {
-        assert!(validate_exposure("127.0.0.1".parse().unwrap(), None).is_ok());
-        assert!(validate_exposure("0.0.0.0".parse().unwrap(), None).is_err());
-        assert!(validate_exposure("0.0.0.0".parse().unwrap(), Some("token")).is_ok());
+        let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let unspecified: std::net::IpAddr = "0.0.0.0".parse().unwrap();
+        assert_eq!(validate_exposure(loopback, None, false), Ok(()));
+        assert!(validate_exposure(unspecified, None, false).is_err());
+        assert_eq!(validate_exposure(unspecified, Some("token"), false), Ok(()));
+    }
+
+    #[test]
+    fn production_requires_dashboard_token_on_loopback() {
+        let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let v6: std::net::IpAddr = "::1".parse().unwrap();
+        assert!(validate_exposure(loopback, None, true).is_err());
+        assert!(validate_exposure(loopback, Some("   "), true).is_err());
+        assert!(validate_exposure(v6, None, true).is_err());
+        assert_eq!(validate_exposure(loopback, Some("token"), true), Ok(()));
+        assert_eq!(
+            validate_exposure(loopback, None, true),
+            Err("DASHBOARD_TOKEN é obrigatório quando FERROADA_PRODUCTION=true")
+        );
+    }
+
+    #[test]
+    fn dashboard_document_stays_public_without_bearer() {
+        assert_eq!(classify_dashboard_get("/", false), DashboardGet::Html);
+        assert_eq!(classify_dashboard_get("/index", false), DashboardGet::Html);
+        assert_eq!(
+            classify_dashboard_get("/healthz", false),
+            DashboardGet::Health
+        );
+        let html = dashboard_html();
+        assert!(html.contains("Token do dashboard"));
+        assert!(html.contains("id=\"auth\""));
+    }
+
+    #[test]
+    fn metrics_without_bearer_stay_unauthorized_when_token_exists() {
+        assert_eq!(
+            classify_dashboard_get("/api/metrics", false),
+            DashboardGet::Unauthorized
+        );
+        assert_eq!(
+            classify_dashboard_get("/metrics", false),
+            DashboardGet::Unauthorized
+        );
+        assert_eq!(
+            classify_dashboard_get("/api/metrics", true),
+            DashboardGet::MetricsJson
+        );
+        assert_eq!(
+            classify_dashboard_get("/metrics", true),
+            DashboardGet::MetricsPrometheus
+        );
+        assert_eq!(classify_dashboard_get("/", true), DashboardGet::Html);
     }
 }

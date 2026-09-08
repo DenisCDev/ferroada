@@ -375,7 +375,8 @@ Toda a configuração é feita por variáveis de ambiente:
 | `TLS_KEY_PATH` | *(opcional)* | Caminho para a chave privada TLS |
 | `DASHBOARD_PORT` | `9000` | Porta do dashboard de monitoramento |
 | `DASHBOARD_BIND` | `127.0.0.1` | IP do dashboard; bind não-loopback exige token |
-| `DASHBOARD_TOKEN` | *(vazio em loopback)* | Token Bearer; obrigatório quando exposto fora de loopback |
+| `DASHBOARD_TOKEN` | *(vazio em loopback)* | Token Bearer; obrigatório fora de loopback e com `FERROADA_PRODUCTION=true` |
+| `FERROADA_PRODUCTION` | *(unset)* | Se `true`, o token é obrigatório mesmo em 127.0.0.1. O HTML continua público (formulário); `/api/metrics` e `/metrics` exigem Bearer |
 | `TRUSTED_PROXIES` | *(vazio)* | CIDRs autorizados a enviar XFF/X-Forwarded-Proto |
 | `SECURITY_HEADERS` | `true` | Injetar headers seguros nas respostas (nosniff, X-Frame, Referrer) |
 | `FRAME_OPTIONS` | `SAMEORIGIN` | Valor de X-Frame-Options; `off` preserva o upstream |
