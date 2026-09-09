@@ -342,7 +342,7 @@ ferroada init --topology cdn-edge --origin http://127.0.0.1:8080 --public-host a
 ferroada healthcheck   # GET 127.0.0.1:9000/healthz; exit 0/1. Distroless não tem curl.
 ```
 
-`--trusted-proxies auto` copia o snapshot em `deploy/cidrs/` (embutido no binário). Zero HTTP. Para actualizar a lista, substitua `deploy/cidrs/*.txt` à mão e volte a correr `init`. `--listen-mode privileged` emite :80/:443 **e** `CAP_NET_BIND_SERVICE`; `proxied` deixa o processo em 127.0.0.1:3000 com Caddy na frente.
+`--trusted-proxies auto` copia o snapshot em `deploy/cidrs/` (embutido no binário). Zero HTTP. Para actualizar a lista: `ferroada cidrs update` (HTTP só neste comando; `--cidrs-from-network` não existe no `init`). `--listen-mode privileged` emite :80/:443 **e** `CAP_NET_BIND_SERVICE`; `proxied` deixa o processo em 127.0.0.1:3000 com Caddy na frente.
 
 ---
 

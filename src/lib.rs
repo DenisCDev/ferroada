@@ -1,4 +1,5 @@
 pub mod behavioral;
+pub mod cidrs;
 pub mod client_ip;
 pub mod config;
 pub mod connection;

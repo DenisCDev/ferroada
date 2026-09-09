@@ -165,6 +165,12 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             }
             "--supabase-host" => take(&mut flags.supabase_host, "--supabase-host", inline)?,
             "--listen-mode" => take(&mut flags.listen_mode, "--listen-mode", inline)?,
+            "--cidrs-from-network" => {
+                return Err(
+                    "--cidrs-from-network só existe em `ferroada cidrs update`, nunca no init. `--trusted-proxies auto` copia o snapshot local."
+                        .into(),
+                );
+            }
             other if other.starts_with('-') => {
                 return Err(format!("flag desconhecida: {other}"));
             }
@@ -1318,5 +1324,21 @@ mod tests {
             csv,
             templates::cidrs_from_snapshot(templates::CLOUDFLARE_CIDRS)
         );
+    }
+
+    #[test]
+    fn cidrs_from_network_is_rejected_on_init() {
+        let err = run(&[
+            "--cidrs-from-network".into(),
+            "--topology".into(),
+            "cdn-edge".into(),
+            "--non-interactive".into(),
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("cidrs update") && err.contains("nunca no init"),
+            "{err}"
+        );
+        assert!(!err.contains("flag desconhecida"), "{err}");
     }
 }

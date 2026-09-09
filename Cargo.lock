@@ -552,6 +552,8 @@ dependencies = [
  "flate2",
  "http",
  "once_cell",
+ "openssl",
+ "openssl-probe",
  "pingora",
  "regex",
  "serde",

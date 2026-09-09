@@ -24,3 +24,5 @@ serde_json = "1"
 toml = "0.8"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tokio = { version = "1", features = ["net", "time"] }
+openssl = "0.10"
+openssl-probe = "0.1"

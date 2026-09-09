@@ -10,4 +10,4 @@ Data deste snapshot: **2026-09-08**.
 
 O processo Ferroada **não** descarrega estas listas. Cole-as em `TRUSTED_PROXIES` (vírgula) ou, no pack `cdn-edge`, use o valor já preenchido no `.env.example`.
 
-Actualizar: no futuro, `ferroada cidrs update`. Até lá, substitua o ficheiro e o `.env` à mão e faça commit do snapshot novo.
+Actualizar: `ferroada cidrs update` (opcionalmente `--edge cloudflare|fastly|akamai`, `--yes`, `--cidrs-from-network`). Mostra o diff, só escreve com confirmação ou `--yes`. Se o HTTP falhar, o ficheiro em disco não é tocado. O `init --trusted-proxies auto` continua a copiar só o snapshot local.

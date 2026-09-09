@@ -24,10 +24,12 @@ fn main() {
             return;
         }
         Some("cidrs") => {
-            eprintln!(
-                "ferroada cidrs ainda não existe neste binário. Substitua deploy/cidrs/*.txt à mão e volte a correr init --trusted-proxies auto."
-            );
-            std::process::exit(1);
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            if let Err(error) = ferroada::cidrs::run(&args) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
         }
         Some("healthcheck") => {
             let extra: Vec<String> = std::env::args().skip(2).collect();
