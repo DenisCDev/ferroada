@@ -69,6 +69,64 @@ require_complete_waf_inspection = ["/api/payment"]
     ))
 }
 
+fn shadow_pl4_config(origin: SocketAddr) -> Config {
+    Config::from_toml(&format!(
+        r#"
+[waf.l1]
+blocking_paranoia = 4
+executing_paranoia = 4
+shadow = true
+anomaly_score_threshold = 5
+
+[[sites]]
+hosts = ["waf.test"]
+backend = "http://{origin}"
+require_complete_waf_inspection = ["/api/payment"]
+"#
+    ))
+}
+
+fn exclusion_config(origin: SocketAddr) -> Config {
+    Config::from_toml(&format!(
+        r#"
+[waf.l1]
+blocking_paranoia = 1
+executing_paranoia = 4
+shadow = false
+anomaly_score_threshold = 5
+
+[[sites]]
+hosts = ["waf.test"]
+backend = "http://{origin}"
+require_complete_waf_inspection = ["/api"]
+
+[[sites.l1.exclusions]]
+prefix = "/login"
+"#
+    ))
+}
+
+fn deny_sidecar_body() -> &'static [u8] {
+    let json = r#"{"action":"deny","rule_ids":[942100],"msg":"SQL Injection Attack","score":15}"#;
+    let deny = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+        json.len()
+    );
+    Box::leak(deny.into_boxed_str()).as_bytes()
+}
+
+fn events_for(uri: &str) -> Vec<serde_json::Value> {
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&metrics::snapshot_json()).expect("metrics JSON");
+    snapshot["recent_events"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|event| event["uri"].as_str() == Some(uri))
+        .collect()
+}
+
 fn open_config(origin: SocketAddr) -> Config {
     Config::from_toml(&format!(
         r#"
@@ -258,6 +316,142 @@ fn sidecar_deny_puts_rule_id_in_event_detail() {
         snapshot.contains("waf_l1") || snapshot.contains("CRS"),
         "{snapshot}"
     );
+}
+
+#[test]
+fn paranoia_4_shadow_clean_traffic_is_200_with_rule_id() {
+    let _guard = live_lock();
+    let stub = spawn_stub();
+    let listen = free_bind();
+    let socket = temp_sock();
+    serve_sidecar(socket.clone(), deny_sidecar_body());
+    let engine = WafEngine::coraza(&socket, Duration::from_millis(500));
+    spawn_proxy(listen, shadow_pl4_config(stub.addr), engine);
+
+    let uri = "/api/payment/shadow-clean";
+    let response = send_until_http(listen, &get(uri));
+    let _ = std::fs::remove_file(&socket);
+    assert!(
+        response.starts_with(b"HTTP/1.1 200"),
+        "shadow must not block, got {}",
+        String::from_utf8_lossy(&response[..response.len().min(240)])
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        stub.hits.lock().unwrap().len(),
+        1,
+        "origin must see shadow traffic"
+    );
+    let events = events_for(uri);
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"].as_str() == Some("waf_l1_shadow")
+                && event["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("942100"))
+        }),
+        "shadow event must keep the CRS rule id, got {events:?}"
+    );
+}
+
+#[test]
+fn same_rule_in_blocking_is_403() {
+    let _guard = live_lock();
+    let stub = spawn_stub();
+    let listen = free_bind();
+    let socket = temp_sock();
+    serve_sidecar(socket.clone(), deny_sidecar_body());
+    let engine = WafEngine::coraza(&socket, Duration::from_millis(500));
+    spawn_proxy(listen, fail_closed_config(stub.addr), engine);
+
+    let uri = "/api/payment/blocking";
+    let response = send_until_http(listen, &get(uri));
+    let _ = std::fs::remove_file(&socket);
+    assert!(
+        response.starts_with(b"HTTP/1.1 403"),
+        "blocking L1 must be 403, got {}",
+        String::from_utf8_lossy(&response[..response.len().min(240)])
+    );
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.contains("942100"), "{text}");
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(stub.hits.lock().unwrap().len(), 0);
+    let events = events_for(uri);
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"].as_str() == Some("waf_l1")
+                && event["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("942100"))
+        }),
+        "blocking event must keep the CRS rule id, got {events:?}"
+    );
+}
+
+#[test]
+fn exclusion_login_does_not_fire_api_does() {
+    let _guard = live_lock();
+    let stub = spawn_stub();
+    let listen = free_bind();
+    let socket = temp_sock();
+    serve_sidecar(socket.clone(), deny_sidecar_body());
+    let engine = WafEngine::coraza(&socket, Duration::from_millis(500));
+    spawn_proxy(listen, exclusion_config(stub.addr), engine);
+
+    let login = send_until_http(listen, &get("/login"));
+    assert!(
+        login.starts_with(b"HTTP/1.1 200"),
+        "excluded /login must not run L1, got {}",
+        String::from_utf8_lossy(&login[..login.len().min(240)])
+    );
+    let api = send_until_http(listen, &get("/api"));
+    let _ = std::fs::remove_file(&socket);
+    assert!(
+        api.starts_with(b"HTTP/1.1 403"),
+        "/api must still run L1, got {}",
+        String::from_utf8_lossy(&api[..api.len().min(240)])
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let login_events = events_for("/login");
+    assert!(
+        login_events.iter().all(|event| {
+            event["event_type"].as_str() != Some("waf_l1")
+                && event["event_type"].as_str() != Some("waf_l1_shadow")
+        }),
+        "/login must not emit L1 events, got {login_events:?}"
+    );
+    let api_events = events_for("/api");
+    assert!(
+        api_events.iter().any(|event| {
+            event["event_type"].as_str() == Some("waf_l1")
+                && event["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("942100"))
+        }),
+        "/api must emit L1 with rule id, got {api_events:?}"
+    );
+}
+
+#[test]
+fn sidecar_down_on_shadow_fail_closed_is_still_403() {
+    let _guard = live_lock();
+    let stub = spawn_stub();
+    let listen = free_bind();
+    let socket = temp_sock();
+    let _ = std::fs::remove_file(&socket);
+    let engine = WafEngine::coraza(&socket, Duration::from_millis(80));
+    spawn_proxy(listen, shadow_pl4_config(stub.addr), engine);
+
+    let response = send_until_http(listen, &get("/api/payment/shadow-down"));
+    assert!(
+        response.starts_with(b"HTTP/1.1 403"),
+        "shadow must not open TimedOut, got {}",
+        String::from_utf8_lossy(&response[..response.len().min(240)])
+    );
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(stub.hits.lock().unwrap().len(), 0);
+    let snapshot = metrics::snapshot_json();
+    assert!(snapshot.contains("waf_engine_unavailable"), "{snapshot}");
 }
 
 #[test]

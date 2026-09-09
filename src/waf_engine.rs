@@ -11,6 +11,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::metrics;
+use crate::waf_l1::L1Settings;
 
 /// CRS 4.25 on a cold or fat request does not fit in 20 ms. That default
 /// plus fail-closed would 403 clean traffic at start. 500 ms is the floor.
@@ -35,8 +36,15 @@ pub struct WafEngine {
 #[derive(Debug, PartialEq, Eq)]
 pub enum L1Verdict {
     Skipped,
-    Allow,
-    Block { rule_ids: Vec<u32>, message: String },
+    Allow {
+        rule_ids: Vec<u32>,
+        score: u32,
+    },
+    Block {
+        rule_ids: Vec<u32>,
+        message: String,
+        score: u32,
+    },
     Unavailable,
 }
 
@@ -47,6 +55,8 @@ pub struct InspectRequest<'a> {
     pub headers: &'a [(String, String)],
     pub body: &'a [u8],
     pub client_ip: &'a str,
+    pub policy: L1Settings,
+    pub exclude_parameters: &'a [String],
 }
 
 #[derive(Serialize)]
@@ -57,6 +67,15 @@ struct InspectWire<'a> {
     headers: &'a [(String, String)],
     body_b64: String,
     client_ip: &'a str,
+    policy: InspectWirePolicy<'a>,
+}
+
+#[derive(Serialize)]
+struct InspectWirePolicy<'a> {
+    blocking_paranoia: u8,
+    executing_paranoia: u8,
+    anomaly_score_threshold: u32,
+    exclude_parameters: &'a [String],
 }
 
 #[derive(Deserialize)]
@@ -66,6 +85,8 @@ struct InspectWireResponse {
     rule_ids: Vec<u32>,
     #[serde(default)]
     msg: String,
+    #[serde(default)]
+    score: u32,
 }
 
 impl WafEngine {
@@ -169,7 +190,7 @@ impl WafEngine {
     }
 }
 
-pub fn l1_detail(rule_ids: &[u32], message: &str) -> String {
+pub fn l1_detail(rule_ids: &[u32], message: &str, score: u32) -> String {
     let ids = if rule_ids.is_empty() {
         "unknown".to_string()
     } else {
@@ -180,9 +201,9 @@ pub fn l1_detail(rule_ids: &[u32], message: &str) -> String {
             .join(",")
     };
     if message.is_empty() {
-        format!("CRS {ids}")
+        format!("CRS {ids} score={score}")
     } else {
-        format!("CRS {ids}: {message}")
+        format!("CRS {ids} score={score}: {message}")
     }
 }
 
@@ -233,6 +254,12 @@ fn encode_inspect_json(request: &InspectRequest<'_>) -> Result<Vec<u8>, EngineEr
         headers: request.headers,
         body_b64: b64_encode(request.body),
         client_ip: request.client_ip,
+        policy: InspectWirePolicy {
+            blocking_paranoia: request.policy.blocking_paranoia,
+            executing_paranoia: request.policy.executing_paranoia,
+            anomaly_score_threshold: request.policy.anomaly_score_threshold,
+            exclude_parameters: request.exclude_parameters,
+        },
     };
     serde_json::to_vec(&wire).map_err(|error| EngineError(error.to_string()))
 }
@@ -316,10 +343,14 @@ fn parse_inspect_body(status: u16, body: &[u8]) -> Result<L1Verdict, EngineError
     let parsed: InspectWireResponse = serde_json::from_slice(body)
         .map_err(|error| EngineError(format!("JSON do sidecar: {error}")))?;
     match parsed.action.to_ascii_lowercase().as_str() {
-        "allow" => Ok(L1Verdict::Allow),
+        "allow" => Ok(L1Verdict::Allow {
+            rule_ids: parsed.rule_ids,
+            score: parsed.score,
+        }),
         "deny" => Ok(L1Verdict::Block {
             rule_ids: parsed.rule_ids,
             message: parsed.msg,
+            score: parsed.score,
         }),
         other => Err(EngineError(format!("ação L1 desconhecida: {other}"))),
     }
@@ -499,6 +530,8 @@ mod tests {
             headers: &headers,
             body: b"",
             client_ip: "192.0.2.1",
+            policy: L1Settings::default_crs(),
+            exclude_parameters: &[],
         };
         let verdict = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -547,25 +580,46 @@ mod tests {
             headers: &headers,
             body: b"",
             client_ip: "192.0.2.8",
+            policy: L1Settings {
+                blocking_paranoia: 1,
+                executing_paranoia: 4,
+                shadow: true,
+                anomaly_score_threshold: 5,
+                exclude: false,
+            },
+            exclude_parameters: &[],
         };
         let json = encode_inspect_json(&request).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(value["method"], "GET");
         assert_eq!(value["uri"], "/search?q=1'+OR+1=1");
         assert_eq!(value["body_b64"], "");
+        assert_eq!(value["policy"]["blocking_paranoia"], 1);
+        assert_eq!(value["policy"]["executing_paranoia"], 4);
+        assert_ne!(
+            value["policy"]["executing_paranoia"],
+            value["policy"]["blocking_paranoia"]
+        );
+        assert_eq!(value["policy"]["anomaly_score_threshold"], 5);
 
         let deny = parse_inspect_body(
             200,
-            br#"{"action":"deny","rule_ids":[942100,942110],"msg":"SQLi"}"#,
+            br#"{"action":"deny","rule_ids":[942100,942110],"msg":"SQLi","score":15}"#,
         )
         .unwrap();
         match deny {
-            L1Verdict::Block { rule_ids, message } => {
+            L1Verdict::Block {
+                rule_ids,
+                message,
+                score,
+            } => {
                 assert_eq!(rule_ids, vec![942100, 942110]);
                 assert_eq!(message, "SQLi");
-                let detail = l1_detail(&rule_ids, &message);
+                assert_eq!(score, 15);
+                let detail = l1_detail(&rule_ids, &message, score);
                 assert!(detail.contains("942100"), "{detail}");
                 assert!(detail.contains("942110"), "{detail}");
+                assert!(detail.contains("score=15"), "{detail}");
             }
             other => panic!("expected deny, got {other:?}"),
         }
@@ -659,6 +713,8 @@ mod unix_tests {
             headers: &headers,
             body: b"",
             client_ip: "192.0.2.1",
+            policy: L1Settings::default_crs(),
+            exclude_parameters: &[],
         };
         let verdict = runtime().block_on(engine.inspect(&request));
         assert_eq!(verdict, L1Verdict::Unavailable);
@@ -687,6 +743,8 @@ mod unix_tests {
             headers: &headers,
             body: b"",
             client_ip: "192.0.2.1",
+            policy: L1Settings::default_crs(),
+            exclude_parameters: &[],
         };
         let verdict = runtime().block_on(engine.inspect(&request));
         let _ = std::fs::remove_file(&socket);
@@ -714,11 +772,17 @@ mod unix_tests {
             headers: &headers,
             body: b"",
             client_ip: "192.0.2.9",
+            policy: L1Settings::default_crs(),
+            exclude_parameters: &[],
         };
         let verdict = runtime().block_on(engine.inspect(&request));
         let _ = std::fs::remove_file(&socket);
         match verdict {
-            L1Verdict::Block { rule_ids, message } => {
+            L1Verdict::Block {
+                rule_ids,
+                message,
+                score: _,
+            } => {
                 assert_eq!(rule_ids, vec![942100]);
                 assert!(message.to_ascii_lowercase().contains("sql"), "{message}");
             }

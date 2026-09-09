@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,19 +26,36 @@ import (
 const defaultSocket = "/run/coraza/waf.sock"
 
 type inspectRequest struct {
-	Method   string     `json:"method"`
-	URI      string     `json:"uri"`
-	Protocol string     `json:"protocol"`
-	Headers  [][]string `json:"headers"`
-	BodyB64  string     `json:"body_b64"`
-	ClientIP string     `json:"client_ip"`
+	Method   string         `json:"method"`
+	URI      string         `json:"uri"`
+	Protocol string         `json:"protocol"`
+	Headers  [][]string     `json:"headers"`
+	BodyB64  string         `json:"body_b64"`
+	ClientIP string         `json:"client_ip"`
+	Policy   *inspectPolicy `json:"policy,omitempty"`
+}
+
+type inspectPolicy struct {
+	BlockingParanoia      int      `json:"blocking_paranoia"`
+	ExecutingParanoia     int      `json:"executing_paranoia"`
+	AnomalyScoreThreshold int      `json:"anomaly_score_threshold"`
+	ExcludeParameters     []string `json:"exclude_parameters"`
 }
 
 type inspectResponse struct {
 	Action  string `json:"action"`
 	RuleIDs []uint `json:"rule_ids,omitempty"`
+	Score   int    `json:"score,omitempty"`
 	Msg     string `json:"msg,omitempty"`
 }
+
+const (
+	hdrBlocking   = "x-ferroada-l1-blocking-paranoia"
+	hdrExecuting  = "x-ferroada-l1-executing-paranoia"
+	hdrThreshold  = "x-ferroada-l1-anomaly-threshold"
+	policyRuleMin = 10009
+	policyRuleMax = 10020
+)
 
 func main() {
 	check := flag.Bool("check", false, "probe /readyz on the socket and exit")
@@ -106,14 +124,57 @@ func main() {
 }
 
 func newWAF() (coraza.WAF, error) {
-	// DetectionOnly in @coraza.conf-recommended would never interrupt.
-	// SecRuleEngine On is enforcement, not PR 12 paranoia/shadow knobs.
+	// CRS 4.25 @coraza.conf-recommended uses SecRequestBodyJsonDepthLimit,
+	// which Coraza 3.3.3 does not implement. Keep the body-access subset
+	// that 3.3.3 accepts. SecRuleEngine On: CRS 949 denies when the blocking
+	// score crosses the threshold. Executing (detection) paranoia is a
+	// separate TX var — rules above blocking_paranoia still run, they just
+	// do not add to the blocking score. Per-request values arrive as
+	// X-Ferroada-L1-* headers (stripped from the client, set from JSON).
 	directives := `
-Include @coraza.conf-recommended
 SecRuleEngine On
+SecRequestBodyAccess On
 SecResponseBodyAccess Off
+SecRequestBodyLimit 13107200
+SecRequestBodyInMemoryLimit 131072
+SecRequestBodyLimitAction Reject
+SecRule REQUEST_HEADERS:Content-Type "@rx (?:application/(?:soap\+|)|text/)xml" "id:200000,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=XML"
+SecRule REQUEST_HEADERS:Content-Type "^application/json" "id:200001,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=JSON"
+SecRule REQUEST_HEADERS:Content-Type "^application/[a-z0-9.-]+[+]json" "id:200006,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=JSON"
+SecRule REQUEST_HEADERS:Content-Type "^application/x-www-form-urlencoded" "id:200007,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=URLENCODED"
 Include @crs-setup.conf.example
-Include @owasp_crs/*.conf
+SecAction "id:10009,phase:1,pass,nolog,t:none,ctl:ruleRemoveTargetByTag=OWASP_CRS;REQUEST_HEADERS:x-ferroada-l1-blocking-paranoia,ctl:ruleRemoveTargetByTag=OWASP_CRS;REQUEST_HEADERS:x-ferroada-l1-executing-paranoia,ctl:ruleRemoveTargetByTag=OWASP_CRS;REQUEST_HEADERS:x-ferroada-l1-anomaly-threshold"
+SecRule REQUEST_HEADERS:x-ferroada-l1-blocking-paranoia "@rx ^([1-4])$" "id:10010,phase:1,pass,nolog,t:none,capture,setvar:tx.blocking_paranoia_level=%{TX.1}"
+SecRule REQUEST_HEADERS:x-ferroada-l1-executing-paranoia "@rx ^([1-4])$" "id:10011,phase:1,pass,nolog,t:none,capture,setvar:tx.detection_paranoia_level=%{TX.1}"
+SecRule REQUEST_HEADERS:x-ferroada-l1-anomaly-threshold "@rx ^([1-9][0-9]{0,4})$" "id:10012,phase:1,pass,nolog,t:none,capture,setvar:tx.inbound_anomaly_score_threshold=%{TX.1}"
+Include @owasp_crs/REQUEST-901-INITIALIZATION.conf
+Include @owasp_crs/REQUEST-905-COMMON-EXCEPTIONS.conf
+Include @owasp_crs/REQUEST-911-METHOD-ENFORCEMENT.conf
+Include @owasp_crs/REQUEST-913-SCANNER-DETECTION.conf
+Include @owasp_crs/REQUEST-920-PROTOCOL-ENFORCEMENT.conf
+Include @owasp_crs/REQUEST-921-PROTOCOL-ATTACK.conf
+Include @owasp_crs/REQUEST-922-MULTIPART-ATTACK.conf
+Include @owasp_crs/REQUEST-930-APPLICATION-ATTACK-LFI.conf
+Include @owasp_crs/REQUEST-931-APPLICATION-ATTACK-RFI.conf
+Include @owasp_crs/REQUEST-932-APPLICATION-ATTACK-RCE.conf
+Include @owasp_crs/REQUEST-933-APPLICATION-ATTACK-PHP.conf
+Include @owasp_crs/REQUEST-934-APPLICATION-ATTACK-GENERIC.conf
+Include @owasp_crs/REQUEST-941-APPLICATION-ATTACK-XSS.conf
+Include @owasp_crs/REQUEST-942-APPLICATION-ATTACK-SQLI.conf
+Include @owasp_crs/REQUEST-943-APPLICATION-ATTACK-SESSION-FIXATION.conf
+Include @owasp_crs/REQUEST-944-APPLICATION-ATTACK-JAVA.conf
+Include @owasp_crs/REQUEST-949-BLOCKING-EVALUATION.conf
+Include @owasp_crs/REQUEST-999-COMMON-EXCEPTIONS-AFTER.conf
+Include @owasp_crs/RESPONSE-950-DATA-LEAKAGES.conf
+Include @owasp_crs/RESPONSE-951-DATA-LEAKAGES-SQL.conf
+Include @owasp_crs/RESPONSE-952-DATA-LEAKAGES-JAVA.conf
+Include @owasp_crs/RESPONSE-953-DATA-LEAKAGES-PHP.conf
+Include @owasp_crs/RESPONSE-954-DATA-LEAKAGES-IIS.conf
+Include @owasp_crs/RESPONSE-955-WEB-SHELLS.conf
+Include @owasp_crs/RESPONSE-956-DATA-LEAKAGES-RUBY.conf
+Include @owasp_crs/RESPONSE-959-BLOCKING-EVALUATION.conf
+Include @owasp_crs/RESPONSE-980-CORRELATION.conf
+SecRule TX:DETECTION_INBOUND_ANOMALY_SCORE "@ge 0" "id:10020,phase:2,pass,log,t:none,msg:'ferroada_score blocking=%{tx.blocking_inbound_anomaly_score} detection=%{tx.detection_inbound_anomaly_score}'"
 `
 	return coraza.NewWAF(
 		coraza.NewWAFConfig().
@@ -150,6 +211,9 @@ func handleInspect(w http.ResponseWriter, r *http.Request, waf coraza.WAF) {
 	if req.Protocol == "" {
 		req.Protocol = "HTTP/1.1"
 	}
+	policy := resolvePolicy(req.Policy)
+	req.URI = stripQueryParams(req.URI, policy.ExcludeParameters)
+	rawBody := stripBody(decodeBody(req.BodyB64), req.Headers, policy.ExcludeParameters)
 
 	tx := waf.NewTransaction()
 	defer func() {
@@ -164,19 +228,24 @@ func handleInspect(w http.ResponseWriter, r *http.Request, waf coraza.WAF) {
 		if len(header) < 2 || header[0] == "" {
 			continue
 		}
+		if isPolicyHeader(header[0]) {
+			continue
+		}
 		tx.AddRequestHeader(header[0], header[1])
 	}
+	tx.AddRequestHeader(hdrBlocking, fmt.Sprintf("%d", policy.BlockingParanoia))
+	tx.AddRequestHeader(hdrExecuting, fmt.Sprintf("%d", policy.ExecutingParanoia))
+	tx.AddRequestHeader(hdrThreshold, fmt.Sprintf("%d", policy.AnomalyScoreThreshold))
 	if it := tx.ProcessRequestHeaders(); it != nil {
-		writeDeny(w, tx, it)
+		writeInspect(w, tx, it)
 		return
 	}
-	rawBody := decodeBody(req.BodyB64)
 	if len(rawBody) > 0 {
 		if it, _, err := tx.WriteRequestBody(rawBody); err != nil {
 			writeJSON(w, http.StatusOK, inspectResponse{Action: "deny", Msg: "body write"})
 			return
 		} else if it != nil {
-			writeDeny(w, tx, it)
+			writeInspect(w, tx, it)
 			return
 		}
 	}
@@ -184,22 +253,32 @@ func handleInspect(w http.ResponseWriter, r *http.Request, waf coraza.WAF) {
 		writeJSON(w, http.StatusOK, inspectResponse{Action: "deny", Msg: "body process"})
 		return
 	} else if it != nil {
-		writeDeny(w, tx, it)
+		writeInspect(w, tx, it)
 		return
 	}
-	writeJSON(w, http.StatusOK, inspectResponse{Action: "allow"})
+	writeInspect(w, tx, nil)
 }
 
-func writeDeny(w http.ResponseWriter, tx types.Transaction, it *types.Interruption) {
+func writeInspect(w http.ResponseWriter, tx types.Transaction, it *types.Interruption) {
 	ids := uniqueRuleIDs(tx, it)
-	msg := it.Data
-	if msg == "" {
-		msg = it.Action
+	score := anomalyScore(tx, it)
+	if it != nil {
+		msg := it.Data
+		if msg == "" {
+			msg = it.Action
+		}
+		writeJSON(w, http.StatusOK, inspectResponse{
+			Action:  "deny",
+			RuleIDs: ids,
+			Score:   score,
+			Msg:     msg,
+		})
+		return
 	}
 	writeJSON(w, http.StatusOK, inspectResponse{
-		Action:  "deny",
+		Action:  "allow",
 		RuleIDs: ids,
-		Msg:     msg,
+		Score:   score,
 	})
 }
 
@@ -207,7 +286,7 @@ func uniqueRuleIDs(tx types.Transaction, it *types.Interruption) []uint {
 	seen := map[int]struct{}{}
 	var ids []uint
 	add := func(id int) {
-		if id <= 0 {
+		if !reportableRuleID(id) {
 			return
 		}
 		if _, ok := seen[id]; ok {
@@ -223,6 +302,210 @@ func uniqueRuleIDs(tx types.Transaction, it *types.Interruption) []uint {
 		add(matched.Rule().ID())
 	}
 	return ids
+}
+
+func isPolicyHeader(name string) bool {
+	n := strings.ToLower(name)
+	return n == hdrBlocking || n == hdrExecuting || n == hdrThreshold
+}
+
+func clampParanoia(value, fallback int) int {
+	if value < 1 || value > 4 {
+		return fallback
+	}
+	return value
+}
+
+func clampThreshold(value, fallback int) int {
+	if value < 1 || value > 10000 {
+		return fallback
+	}
+	return value
+}
+
+func envInt(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	n := 0
+	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil {
+		return fallback
+	}
+	return n
+}
+
+func resolvePolicy(raw *inspectPolicy) inspectPolicy {
+	blocking := clampParanoia(envInt("CRS_BLOCKING_PARANOIA", 1), 1)
+	executing := envInt("CRS_EXECUTING_PARANOIA", 0)
+	threshold := clampThreshold(envInt("CRS_ANOMALY_INBOUND", 5), 5)
+	var params []string
+	if raw != nil {
+		blocking = clampParanoia(raw.BlockingParanoia, blocking)
+		if raw.ExecutingParanoia != 0 {
+			executing = clampParanoia(raw.ExecutingParanoia, executing)
+		}
+		threshold = clampThreshold(raw.AnomalyScoreThreshold, threshold)
+		params = raw.ExcludeParameters
+	}
+	if executing < blocking {
+		executing = blocking
+	}
+	executing = clampParanoia(executing, blocking)
+	return inspectPolicy{
+		BlockingParanoia:      blocking,
+		ExecutingParanoia:     executing,
+		AnomalyScoreThreshold: threshold,
+		ExcludeParameters:     params,
+	}
+}
+
+func paramExcluded(key string, names []string) bool {
+	for _, name := range names {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func reportableRuleID(id int) bool {
+	if id <= 0 {
+		return false
+	}
+	if id >= policyRuleMin && id <= policyRuleMax {
+		return false
+	}
+	if id >= 200000 && id < 201000 {
+		return false
+	}
+	if id >= 900000 && id < 910000 {
+		return false
+	}
+	if id >= 949000 && id != 949110 && id != 949111 {
+		return false
+	}
+	if id >= 959000 {
+		return false
+	}
+	return true
+}
+
+func stripQueryParams(uri string, names []string) string {
+	if len(names) == 0 {
+		return uri
+	}
+	path, query, ok := strings.Cut(uri, "?")
+	if !ok {
+		return uri
+	}
+	var kept []string
+	for _, pair := range strings.Split(query, "&") {
+		if pair == "" {
+			continue
+		}
+		key, _, _ := strings.Cut(pair, "=")
+		if paramExcluded(key, names) {
+			continue
+		}
+		kept = append(kept, pair)
+	}
+	if len(kept) == 0 {
+		return path
+	}
+	return path + "?" + strings.Join(kept, "&")
+}
+
+func headerMediaType(headers [][]string) string {
+	for _, header := range headers {
+		if len(header) < 2 {
+			continue
+		}
+		if strings.EqualFold(header[0], "content-type") {
+			media, _, _ := strings.Cut(header[1], ";")
+			return strings.ToLower(strings.TrimSpace(media))
+		}
+	}
+	return ""
+}
+
+func stripBody(body []byte, headers [][]string, names []string) []byte {
+	if len(names) == 0 || len(body) == 0 {
+		return body
+	}
+	media := headerMediaType(headers)
+	switch {
+	case media == "application/x-www-form-urlencoded":
+		var kept []string
+		for _, pair := range strings.Split(string(body), "&") {
+			if pair == "" {
+				continue
+			}
+			key, _, _ := strings.Cut(pair, "=")
+			if paramExcluded(key, names) {
+				continue
+			}
+			kept = append(kept, pair)
+		}
+		return []byte(strings.Join(kept, "&"))
+	case media == "application/json" || strings.HasSuffix(media, "+json"):
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(body, &object); err != nil {
+			return body
+		}
+		for key := range object {
+			if paramExcluded(key, names) {
+				delete(object, key)
+			}
+		}
+		encoded, err := json.Marshal(object)
+		if err != nil {
+			return body
+		}
+		return encoded
+	default:
+		return body
+	}
+}
+
+func parseScoreToken(text, prefix string) (int, bool) {
+	i := strings.Index(text, prefix)
+	if i < 0 {
+		return 0, false
+	}
+	rest := text[i+len(prefix):]
+	n := 0
+	if _, err := fmt.Sscanf(rest, "%d", &n); err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func anomalyScore(tx types.Transaction, it *types.Interruption) int {
+	blocking, detection := 0, 0
+	if it != nil {
+		if n, ok := parseScoreToken(it.Data, "Total Score: "); ok {
+			blocking = n
+		}
+	}
+	for _, matched := range tx.MatchedRules() {
+		msg := matched.Message()
+		if n, ok := parseScoreToken(msg, "Total Score: "); ok {
+			blocking = n
+		}
+		if strings.Contains(msg, "ferroada_score") {
+			if n, ok := parseScoreToken(msg, "blocking="); ok {
+				blocking = n
+			}
+			if n, ok := parseScoreToken(msg, "detection="); ok {
+				detection = n
+			}
+		}
+	}
+	if blocking > 0 {
+		return blocking
+	}
+	return detection
 }
 
 func decodeBody(b64 string) []byte {

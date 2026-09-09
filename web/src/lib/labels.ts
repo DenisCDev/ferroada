@@ -28,6 +28,7 @@ export const EVENT_LABELS: Record<string, string> = {
   range_removed: "range removido para inspeção DLP",
   waf_monitor: "monitoramento WAF",
   waf_l1: "WAF L1 (CRS)",
+  waf_l1_shadow: "WAF L1 (sombra)",
   waf_engine_unavailable: "motor WAF L1 indisponível",
   dlp_skip: "DLP não aplicado",
   dlp: "DLP",

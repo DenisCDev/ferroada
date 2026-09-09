@@ -71,6 +71,7 @@ use crate::shield::{self, ShieldVerdict};
 use crate::spool::{SpoolError, SpoolHandle, SpoolRuntime};
 use crate::waf::{self, InspectionOutcome, WafVerdict};
 use crate::waf_engine::{self, InspectRequest, L1Verdict, WafEngine};
+use crate::waf_l1;
 use std::io::{Read, Write};
 
 fn parse_ip(addr: &str) -> Option<IpAddr> {
@@ -2092,22 +2093,52 @@ impl FerroadaProxy {
         if ctx.skip_body_waf || !self.waf_engine.is_coraza() {
             return Ok(false);
         }
-        let headers = l1_header_pairs(session, body, body_is_decoded);
+        let Some(backend) = ctx.backend.as_ref() else {
+            return Ok(false);
+        };
+        let l1 = backend.l1_for(uri, ctx.request_content_type.as_deref());
+        if l1.skip {
+            return Ok(false);
+        }
+        let inspect_uri = waf_l1::strip_query_params(uri, &l1.exclude_parameters);
+        let inspect_body = waf_l1::strip_excluded_body(
+            body,
+            ctx.request_content_type.as_deref(),
+            &l1.exclude_parameters,
+        );
+        let headers = l1_header_pairs(session, &inspect_body, body_is_decoded);
         let verdict = self
             .waf_engine
             .inspect(&InspectRequest {
                 method,
-                uri,
+                uri: &inspect_uri,
                 protocol: http_version_token(session.req_header().version),
                 headers: &headers,
-                body,
+                body: &inspect_body,
                 client_ip: &ctx.client_addr,
+                policy: l1.settings,
+                exclude_parameters: &l1.exclude_parameters,
             })
             .await;
         match verdict {
-            L1Verdict::Skipped | L1Verdict::Allow => Ok(false),
-            L1Verdict::Block { rule_ids, message } => {
-                let detail = waf_engine::l1_detail(&rule_ids, &message);
+            L1Verdict::Skipped => Ok(false),
+            L1Verdict::Allow { rule_ids, score } => {
+                if l1.settings.shadow && !rule_ids.is_empty() {
+                    let detail = waf_engine::l1_detail(&rule_ids, "", score);
+                    metrics::record_l1_shadow(&ctx.site_scope, &ctx.client_addr, uri, &detail);
+                }
+                Ok(false)
+            }
+            L1Verdict::Block {
+                rule_ids,
+                message,
+                score,
+            } => {
+                let detail = waf_engine::l1_detail(&rule_ids, &message, score);
+                if l1.settings.shadow {
+                    metrics::record_l1_shadow(&ctx.site_scope, &ctx.client_addr, uri, &detail);
+                    return Ok(false);
+                }
                 metrics::record_block_in(&ctx.site_scope, "waf_l1", &ctx.client_addr, uri, &detail);
                 if let Some(identity) = ctx.risk_identity.as_ref() {
                     behavioral::record_waf_block(identity);

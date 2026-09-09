@@ -12,6 +12,19 @@
 # Se nao definido, requests com Host desconhecido recebem 421.
 # default_backend = "http://fallback:8080"
 
+# L1 CRS (sidecar Coraza). L0 regex continua sempre ligado.
+# executing_paranoia pode ser maior que blocking_paranoia: as regras extras
+# correm e pontuam em observação, mas só o blocking decide o 403.
+# shadow = true avalia L1, grava rule ID + score, e NÃO bloqueia.
+# Exclusão por site (l1.exclude), rota (prefix), parâmetro e content-type.
+# [waf.l1]
+# blocking_paranoia = 1
+# executing_paranoia = 4
+# shadow = true
+# anomaly_score_threshold = 5
+# [[waf.l1.exclusions]]
+# content_types = ["application/octet-stream"]
+
 # Matriz de protocolo. inspect = suportado (L0 faz o que já faz).
 # Não suportado: deny | monitor | bypass-explicit | route-to-quarantine
 # route-to-quarantine (v1) = 403 + evento quarantine; sem origin honeypot.
@@ -36,6 +49,13 @@ hosts = ["meusite.com", "www.meusite.com"]
 backend = "http://backend-a:8080"
 waf_profile = "wordpress"
 require_complete_waf_inspection = ["/api/payment", "/api/admin/"]
+# l1.shadow = true
+# l1.blocking_paranoia = 1
+# l1.executing_paranoia = 4
+# [[sites.l1.exclusions]]
+# prefix = "/login"
+# [[sites.l1.exclusions]]
+# parameters = ["password", "token"]
 
 # on_truncated / on_parse_error por prefixo. require_complete_waf_inspection
 # acima já significa on_truncated=deny e on_parse_error=deny nesses paths.

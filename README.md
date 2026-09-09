@@ -109,8 +109,13 @@ Unix socket, opt-in (`WAF_ENGINE=coraza`). O binário do Ferroada não liga
 Coraza: um crash no ruleset não derruba o proxy. Timeout default 500 ms;
 o processo só marca o engine `coraza` depois do ready probe. Sidecar
 ausente numa rota `require_complete` responde 403 e conta
-`waf_engine_unavailable` — não desliga o WAF em silêncio. Ver
-`deploy/coraza/`.
+`waf_engine_unavailable` — não desliga o WAF em silêncio.
+
+Paranoia CRS separa `blocking` de `executing`: regras do nível executing
+correm sem necessariamente bloquear. Shadow avalia L1, grava rule ID e
+anomaly score no evento, e não devolve 403. Exclusões por site, rota,
+parâmetro e content-type ficam no TOML (`[waf.l1]`, `[[sites.l1.exclusions]]`).
+Ver `deploy/coraza/`.
 
 #### Inspeção de body
 
