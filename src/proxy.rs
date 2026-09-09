@@ -60,7 +60,7 @@ static HTTPS_REDIRECT_HOST: Lazy<Option<String>> = Lazy::new(|| {
 });
 
 use crate::behavioral::{self, BehavioralVerdict};
-use crate::client_ip::{RiskIdentity, TrustedProxies};
+use crate::client_ip::{ClientIpConfig, RiskIdentity, TrustedProxies};
 use crate::config::{Config, InspectionDisposition, InspectionPolicy};
 use crate::dlp;
 use crate::headers;
@@ -124,10 +124,13 @@ fn request_inspection_reservation(
     Some(bytes)
 }
 
+#[derive(Clone)]
 pub struct FerroadaProxy {
     pub config: Arc<Config>,
     pub rate_limiter: Arc<RateLimiter>,
     pub trusted_proxies: TrustedProxies,
+    client_ip: ClientIpConfig,
+    proxy_protocol: bool,
     concurrency: Arc<ConcurrencyState>,
     dlp_budget: Arc<ByteBudget>,
     request_budget: Arc<ByteBudget>,
@@ -249,11 +252,15 @@ impl FerroadaProxy {
         config: Arc<Config>,
         rate_limiter: Arc<RateLimiter>,
         trusted_proxies: TrustedProxies,
+        client_ip: ClientIpConfig,
+        proxy_protocol: bool,
     ) -> Self {
         Self {
             config,
             rate_limiter,
             trusted_proxies,
+            client_ip,
+            proxy_protocol,
             concurrency: Arc::new(ConcurrencyState::from_env()),
             dlp_budget: Arc::new(ByteBudget::from_env(
                 "DLP_MAX_IN_FLIGHT_BYTES",
@@ -382,17 +389,34 @@ impl ProxyHttp for FerroadaProxy {
             .map(|a| a.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         let socket_ip = parse_ip(&socket_addr);
-        let peer_is_trusted = socket_ip
-            .map(|ip| self.trusted_proxies.is_trusted(ip))
-            .unwrap_or(false);
-        let forwarded_for = session
-            .req_header()
-            .headers
+        // PROXY v2 already rewrote SocketDigest; the hop that spoke v2 is trusted
+        // for proto/header walks even when the rewritten client IP is not in
+        // TRUSTED_PROXIES (Caddy/HAProxy terminated TLS in front).
+        let peer_is_trusted = self.proxy_protocol
+            || socket_ip
+                .map(|ip| self.trusted_proxies.is_trusted(ip))
+                .unwrap_or(false);
+        let header_map = &session.req_header().headers;
+        let forwarded_for = header_map
             .get("X-Forwarded-For")
             .and_then(|value| value.to_str().ok());
+        let forwarded = header_map
+            .get("Forwarded")
+            .and_then(|value| value.to_str().ok());
+        let extra_header = self.client_ip.extra_header.as_ref().and_then(|name| {
+            header_map
+                .get(name.as_str())
+                .and_then(|value| value.to_str().ok())
+        });
         let client_addr = self
             .trusted_proxies
-            .resolve(socket_ip, forwarded_for)
+            .resolve_sources(
+                socket_ip,
+                forwarded_for,
+                forwarded,
+                extra_header,
+                &self.client_ip,
+            )
             .map(|ip| ip.to_string())
             .unwrap_or(socket_addr);
 

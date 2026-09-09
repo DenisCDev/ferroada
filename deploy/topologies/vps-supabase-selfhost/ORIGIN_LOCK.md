@@ -20,7 +20,7 @@ ufw allow 443/tcp
 ufw enable
 ```
 
-Caddy no host: `reverse_proxy 127.0.0.1:3000` e `TRUSTED_PROXIES=127.0.0.1/32,::1/128`. Sem isso todos os clientes viram loopback. Feche 3000/3443 no filtro público.
+Caddy no host: use o `Caddyfile` desta pasta, não um `reverse_proxy` nu. Se o Caddyfile tem `proxy_protocol v2`, o env precisa de `PROXY_PROTOCOL=true` (`.env.caddy.example`). Sem o prefixo o Ferroada recusa a conexão. `TRUSTED_PROXIES=127.0.0.1/32,::1/128`. Feche 3000/3443 no filtro público.
 
 ## Docker
 

@@ -1,14 +1,17 @@
-use ferroada::client_ip::TrustedProxies;
+use ferroada::client_ip::{ClientIpConfig, TrustedProxies};
 use ferroada::config::Config;
 use ferroada::connection::ConnectionRateFilter;
 use ferroada::dashboard::{production_enabled, validate_exposure, DashboardService};
 use ferroada::proxy::FerroadaProxy;
+use ferroada::proxy_protocol;
 use ferroada::rate_limit::RateLimiter;
 use ferroada::waf;
+use pingora::listeners::ConnectionFilter;
 use pingora::prelude::*;
 use pingora::proxy::{http_proxy, http_proxy_service};
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora::services::listening::Service;
+use pingora::tls::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -75,6 +78,12 @@ fn main() {
     if trusted_proxies.is_empty() {
         info!("Nenhum proxy confiável configurado; headers de IP encaminhado serão ignorados");
     }
+    let client_ip =
+        ClientIpConfig::from_env().expect("CLIENT_IP_ORDER / FORWARDED_HEADER inválido");
+    let proxy_protocol = proxy_protocol::enabled();
+    if proxy_protocol {
+        info!("PROXY protocol v2 obrigatório neste listener; prefixo inválido recusa a conexão");
+    }
 
     let server_conf = ServerConf {
         max_retries: total_upstream_attempts(std::env::var("MAX_UPSTREAM_RETRIES").ok().as_deref()),
@@ -97,29 +106,58 @@ fn main() {
     server.bootstrap();
 
     // --- Proxy service ---
-    let proxy = FerroadaProxy::new(Arc::clone(&config), rate_limiter, trusted_proxies);
+    let proxy = FerroadaProxy::new(
+        Arc::clone(&config),
+        rate_limiter,
+        trusted_proxies,
+        client_ip,
+        proxy_protocol,
+    );
 
-    let proxy_app = http_proxy(&server.configuration, proxy);
+    let proxy_app = http_proxy(&server.configuration, proxy.clone());
     let connection_filter = ConnectionRateFilter::from_env();
     let mut svc = Service::new(
         "Ferroada proxy".to_string(),
-        connection_filter.wrap(proxy_app),
+        connection_filter.wrap(proxy_app, proxy_protocol, None),
     );
-    svc.set_connection_filter(Arc::new(connection_filter));
     let proxy_listen = ferroada::listen::from_env("PROXY_LISTEN", ferroada::listen::DEFAULT_PROXY)
         .unwrap_or_else(|error| panic!("{error}"));
     svc.add_tcp(&proxy_listen);
 
-    // Optional TLS listener
-    if let (Ok(cert_path), Ok(key_path)) = (
+    let tls_paths = match (
         std::env::var("TLS_CERT_PATH"),
         std::env::var("TLS_KEY_PATH"),
     ) {
+        (Ok(cert_path), Ok(key_path)) => Some((cert_path, key_path)),
+        _ => None,
+    };
+    if let Some((cert_path, key_path)) = tls_paths {
         let tls_listen = ferroada::listen::from_env("TLS_LISTEN", ferroada::listen::DEFAULT_TLS)
             .unwrap_or_else(|error| panic!("{error}"));
-        svc.add_tls(&tls_listen, &cert_path, &key_path)
-            .expect("Failed to load TLS certs");
-        info!(listen = %tls_listen, "HTTPS listener ready");
+        if proxy_protocol {
+            // Pingora 0.8.1 handshakes before process_new. PreTlsProcess = our
+            // parser on add_tcp, then handshake, so PROXY v2 is consumed first.
+            let acceptor =
+                tls_acceptor(&cert_path, &key_path).unwrap_or_else(|error| panic!("{error}"));
+            let tls_app = http_proxy(&server.configuration, proxy);
+            let mut tls_svc = Service::new(
+                "Ferroada proxy tls".to_string(),
+                connection_filter.wrap(tls_app, proxy_protocol, Some(acceptor)),
+            );
+            let filter: Arc<dyn ConnectionFilter> = Arc::new(connection_filter);
+            svc.set_connection_filter(Arc::clone(&filter));
+            tls_svc.set_connection_filter(filter);
+            tls_svc.add_tcp(&tls_listen);
+            server.add_service(tls_svc);
+            info!(listen = %tls_listen, "HTTPS listener ready (PROXY v2 antes do handshake)");
+        } else {
+            svc.set_connection_filter(Arc::new(connection_filter));
+            svc.add_tls(&tls_listen, &cert_path, &key_path)
+                .expect("Failed to load TLS certs");
+            info!(listen = %tls_listen, "HTTPS listener ready");
+        }
+    } else {
+        svc.set_connection_filter(Arc::new(connection_filter));
     }
 
     server.add_service(svc);
@@ -158,6 +196,18 @@ fn main() {
     info!(listen = %dashboard_addr, "Dashboard ready");
 
     server.run_forever();
+}
+
+fn tls_acceptor(cert_path: &str, key_path: &str) -> Result<SslAcceptor, String> {
+    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())
+        .map_err(|error| format!("falha a criar o aceitador TLS: {error}"))?;
+    builder
+        .set_private_key_file(key_path, SslFiletype::PEM)
+        .map_err(|error| format!("falha a ler a chave TLS {key_path}: {error}"))?;
+    builder
+        .set_certificate_chain_file(cert_path)
+        .map_err(|error| format!("falha a ler o certificado TLS {cert_path}: {error}"))?;
+    Ok(builder.build())
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

@@ -48,19 +48,29 @@ macro_rules! define_topo {
     };
 }
 
-define_topo!(VPS_SITE, "vps-site");
-define_topo!(VPS_API, "vps-api");
-define_topo!(VPS_SUPABASE_SELFHOST, "vps-supabase-selfhost");
+define_topo!(VPS_SITE, "vps-site", "haproxy.cfg.snippet");
+define_topo!(VPS_API, "vps-api", "haproxy.cfg.snippet");
+define_topo!(
+    VPS_SUPABASE_SELFHOST,
+    "vps-supabase-selfhost",
+    "haproxy.cfg.snippet"
+);
 define_topo!(
     VPS_SUPABASE_CLOUD,
     "vps-supabase-cloud",
-    "ferroada.toml.bff.example"
+    "ferroada.toml.bff.example",
+    "haproxy.cfg.snippet"
 );
-define_topo!(VPS_FULL, "vps-full");
-define_topo!(HOSTINGER_ORIGIN, "hostinger-origin");
-define_topo!(VERCEL_ORIGIN, "vercel-origin");
+define_topo!(VPS_FULL, "vps-full", "haproxy.cfg.snippet");
+define_topo!(HOSTINGER_ORIGIN, "hostinger-origin", "haproxy.cfg.snippet");
+define_topo!(VERCEL_ORIGIN, "vercel-origin", "haproxy.cfg.snippet");
 define_topo!(CDN_EDGE, "cdn-edge");
-define_topo!(SKELETON, "_skeleton", "ferroada.proxied.service");
+define_topo!(
+    SKELETON,
+    "_skeleton",
+    "ferroada.proxied.service",
+    "haproxy.cfg.snippet"
+);
 
 pub const PROXIED_UNIT: &str =
     include_str!("../../deploy/topologies/_skeleton/ferroada.proxied.service");

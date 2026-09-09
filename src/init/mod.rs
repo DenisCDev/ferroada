@@ -563,6 +563,9 @@ fn overlay_env(content: &str, plan: &Plan, token: Option<&str>) -> String {
     if let Some(token) = token {
         out = set_env_line(&out, "DASHBOARD_TOKEN", token);
     }
+    if plan.listen == ListenMode::Proxied && plan.topology != Topology::CdnEdge {
+        out = set_env_line(&out, "PROXY_PROTOCOL", "true");
+    }
     out
 }
 
@@ -624,7 +627,7 @@ fn rewrite_compose_for_standalone(content: &str, listen: ListenMode) -> String {
 
 const TLS_CHOICE: &str = "4. Escolha **um** caminho de TLS — nunca os dois na :443:\n   - Há `fullchain.pem` e chave: copie `.env.example` → `.env`, descomente `TLS_CERT_PATH` / `TLS_KEY_PATH`, use `docker-compose.yml`.\n   - Não há: copie `.env.caddy.example` → `.env.caddy` e use `docker-compose.caddy.yml` (Caddy publica 80 e 443; Ferroada só na overlay).";
 
-const SYSTEMD_GIT: &str = "O unit desta pasta (`ferroada.service`) escuta 0.0.0.0:3000/3443 via `PROXY_LISTEN`/`TLS_LISTEN`, sem cap. Não promete :80.\n`ferroada.privileged.service` publica :80/:443 **e** traz `AmbientCapabilities` + `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` — o binário não é setuid; knob sem cap falha o bind. Copie **um** dos dois para `/etc/systemd/system/ferroada.service`, nunca os dois.\n`ferroada init --listen-mode privileged` emite o unit :80+cap; `--listen-mode proxied` emite 127.0.0.1:3000 sem cap e o Caddy na frente.\nColoque o binário em `/usr/local/bin/ferroada` antes. Se o Caddy corre no host, `reverse_proxy 127.0.0.1:3000` e `TRUSTED_PROXIES=127.0.0.1/32,::1/128` (mais o snapshot CDN, se houver).";
+const SYSTEMD_GIT: &str = "O unit desta pasta (`ferroada.service`) escuta 0.0.0.0:3000/3443 via `PROXY_LISTEN`/`TLS_LISTEN`, sem cap. Não promete :80.\n`ferroada.privileged.service` publica :80/:443 **e** traz `AmbientCapabilities` + `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` — o binário não é setuid; knob sem cap falha o bind. Copie **um** dos dois para `/etc/systemd/system/ferroada.service`, nunca os dois.\n`ferroada init --listen-mode privileged` emite o unit :80+cap; `--listen-mode proxied` emite 127.0.0.1:3000 sem cap e o Caddy na frente.\nColoque o binário em `/usr/local/bin/ferroada` antes. Se o Caddy corre no host, use o `Caddyfile` desta pasta — não um `reverse_proxy` nu. Se esse Caddyfile tem `proxy_protocol v2`, o env tem de ligar `PROXY_PROTOCOL` (`.env.caddy.example`, nunca `.env.example`); senão o Ferroada recusa a conexão. `TRUSTED_PROXIES=127.0.0.1/32,::1/128` (mais o snapshot CDN, se houver).";
 
 fn pack_banner(plan: &Plan) -> String {
     match plan.listen {
@@ -633,8 +636,13 @@ fn pack_banner(plan: &Plan) -> String {
             plan.topology.as_str()
         ),
         ListenMode::Proxied => format!(
-            "Gerado por `ferroada init --topology {} --listen-mode proxied`.\nO `.env` já tem token e origin. Unit: 127.0.0.1:3000, Caddy na frente.\nCompose: `docker compose --env-file .env up -d` neste diretório.\n\n",
-            plan.topology.as_str()
+            "Gerado por `ferroada init --topology {} --listen-mode proxied`.\nO `.env` já tem token e origin. Unit: 127.0.0.1:3000, Caddy na frente.\nCompose: `docker compose --env-file .env up -d` neste diretório.\n{}\n",
+            plan.topology.as_str(),
+            if plan.topology == Topology::CdnEdge {
+                "Este pack NÃO liga PROXY_PROTOCOL (Cloudflare não prefixa v2; identidade = CIDR + X-Forwarded-For)."
+            } else {
+                "PROXY_PROTOCOL=true: Caddy/nginx/HAProxy/NLB TCP têm de prefixar v2. GET cru é recusado."
+            }
         ),
     }
 }
@@ -692,8 +700,11 @@ fn adapt_checklist(body: &str, plan: &Plan) -> String {
         ListenMode::Privileged => {
             "O `ferroada.service` deste pack já é o caminho privileged: `PROXY_LISTEN=0.0.0.0:80`, `TLS_LISTEN=0.0.0.0:443`, `AmbientCapabilities` e `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`. Copie-o para `/etc/systemd/system/ferroada.service`. Não use Caddy a publicar 80/443 no mesmo host.\nColoque o binário em `/usr/local/bin/ferroada` antes."
         }
+        ListenMode::Proxied if plan.topology == Topology::CdnEdge => {
+            "O `ferroada.service` deste pack já é o caminho proxied: `PROXY_LISTEN=127.0.0.1:3000` sem cap. Caddy na frente em :80/:443. Use o `Caddyfile` desta pasta (sem PROXY protocol). Não ligue `PROXY_PROTOCOL`. `TRUSTED_PROXIES=127.0.0.1/32,::1/128` (mais o snapshot CDN).\nColoque o binário em `/usr/local/bin/ferroada` antes."
+        }
         ListenMode::Proxied => {
-            "O `ferroada.service` deste pack já é o caminho proxied: `PROXY_LISTEN=127.0.0.1:3000` sem cap. Caddy na frente em :80/:443. Se o Caddy corre no host, `reverse_proxy 127.0.0.1:3000` e `TRUSTED_PROXIES=127.0.0.1/32,::1/128` (mais o snapshot CDN, se houver).\nColoque o binário em `/usr/local/bin/ferroada` antes."
+            "O `ferroada.service` deste pack já é o caminho proxied: `PROXY_LISTEN=127.0.0.1:3000` sem cap. Caddy na frente em :80/:443. Use o `Caddyfile` desta pasta (já manda PROXY v2); `PROXY_PROTOCOL=true` já está no `.env`. Um `reverse_proxy` nu recusa a conexão. `TRUSTED_PROXIES=127.0.0.1/32,::1/128` (mais o snapshot CDN, se houver).\nColoque o binário em `/usr/local/bin/ferroada` antes."
         }
     };
     body = body.replace(SYSTEMD_GIT, systemd);
@@ -705,7 +716,11 @@ fn adapt_readme(body: &str, plan: &Plan) -> String {
     match plan.listen {
         ListenMode::Privileged => {
             body = body.replace(
-                "| `.env.caddy.example` | mesmo, com Caddy na frente |\n",
+                "| `.env.caddy.example` | Caddy na frente, com `PROXY_PROTOCOL=true` |\n",
+                "",
+            );
+            body = body.replace(
+                "| `.env.caddy.example` | Caddy na frente; sem PROXY protocol (Cloudflare não prefixa v2) |\n",
                 "",
             );
             body = body.replace(
@@ -723,7 +738,11 @@ fn adapt_readme(body: &str, plan: &Plan) -> String {
         }
         ListenMode::Proxied => {
             body = body.replace(
-                "| `.env.caddy.example` | mesmo, com Caddy na frente |\n",
+                "| `.env.caddy.example` | Caddy na frente, com `PROXY_PROTOCOL=true` |\n",
+                "",
+            );
+            body = body.replace(
+                "| `.env.caddy.example` | Caddy na frente; sem PROXY protocol (Cloudflare não prefixa v2) |\n",
                 "",
             );
             body = body.replace("| `docker-compose.yml` | Ferroada publica 80/443 |\n", "");
@@ -1178,6 +1197,51 @@ mod tests {
         assert!(!checklist.contains("openssl rand"));
         let trusted = env_line(&dir, "TRUSTED_PROXIES");
         assert_eq!(trusted, format!("TRUSTED_PROXIES={CADDY_DOCKER_PEER}"));
+        assert_eq!(env_line(&dir, "PROXY_PROTOCOL"), "PROXY_PROTOCOL=true");
+        assert!(dir.join("haproxy.cfg.snippet").exists());
+        assert!(
+            checklist.contains("já manda PROXY v2"),
+            "checklist proxied tem de mandar usar o Caddyfile com v2: {checklist}"
+        );
+        assert!(
+            !checklist.contains("`reverse_proxy 127.0.0.1:3000` e `TRUSTED_PROXIES"),
+            "checklist proxied ainda ensina reverse_proxy nu: {checklist}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cdn_edge_does_not_enable_proxy_protocol() {
+        let dir = run_init(&[
+            "--topology",
+            "cdn-edge",
+            "--origin",
+            "http://127.0.0.1:8080",
+            "--public-host",
+            "api.exemplo.com",
+            "--listen-mode",
+            "proxied",
+            "--trusted-proxies",
+            "auto",
+            "--edge",
+            "cloudflare",
+            "--dashboard-token",
+            "tok",
+        ])
+        .unwrap();
+        let env = fs::read_to_string(dir.join(".env")).unwrap();
+        assert!(
+            !env.contains("PROXY_PROTOCOL=true"),
+            "cdn-edge não pode ligar PROXY_PROTOCOL: {env}"
+        );
+        let checklist = fs::read_to_string(dir.join("CHECKLIST.md")).unwrap();
+        assert!(
+            checklist.contains("NÃO liga PROXY_PROTOCOL")
+                || checklist.contains("Não ligue `PROXY_PROTOCOL`")
+                || checklist.contains("não liga nenhum protocolo PROXY"),
+            "{checklist}"
+        );
+        assert!(!dir.join("haproxy.cfg.snippet").exists());
         let _ = fs::remove_dir_all(dir);
     }
 

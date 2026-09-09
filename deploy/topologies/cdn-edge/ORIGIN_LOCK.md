@@ -22,7 +22,7 @@ ufw allow 22/tcp
 ufw enable
 ```
 
-Caddy no host: `reverse_proxy 127.0.0.1:3000` e `TRUSTED_PROXIES=127.0.0.1/32,::1/128`. Sem isso todos os clientes viram loopback. Feche 3000/3443 no filtro público.
+Caddy no host: use o `Caddyfile` desta pasta, não um `reverse_proxy` nu. Este pack Cloudflare **não** prefixa PROXY v2. `TRUSTED_PROXIES=127.0.0.1/32,::1/128` mais o snapshot. Feche 3000/3443 no filtro público.
 
 ## Docker
 

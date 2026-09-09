@@ -196,11 +196,15 @@ impl Config {
 
         // Fallback: single TARGET_URL (backward compatible)
         let target_url = std::env::var("TARGET_URL").expect("TARGET_URL or ferroada.toml required");
+        Self::from_target_url(&target_url)
+    }
+
+    pub fn from_target_url(target_url: &str) -> Self {
         let complete_waf_paths = std::env::var("WAF_REQUIRE_COMPLETE_PATHS")
             .ok()
             .map(|value| parse_path_prefixes(value.split(',')))
             .unwrap_or_default();
-        let backend = resolve_url(&target_url, complete_waf_paths, waf::default_profile());
+        let backend = resolve_url(target_url, complete_waf_paths, waf::default_profile());
         info!(
             backend = %target_url,
             "Single-site mode (TARGET_URL)"

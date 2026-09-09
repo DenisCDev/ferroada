@@ -23,6 +23,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-tokio = { version = "1", features = ["net", "time"] }
+tokio = { version = "1", features = ["net", "time", "io-util"] }
 openssl = "0.10"
 openssl-probe = "0.1"

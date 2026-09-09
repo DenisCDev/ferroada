@@ -61,8 +61,22 @@ def main() -> None:
                 errors.append(f"{rel}: Caddy reescreve XFF com o valor do cliente")
             if "internal: true" in text:
                 errors.append(f"{rel}: overlay origin sem egresso")
-            if "PROXY_PROTOCOL" in text:
-                errors.append(f"{rel}: contém PROXY_PROTOCOL")
+            rel_posix = str(rel).replace("\\", "/")
+            if "cdn-edge" in rel_posix and "PROXY_PROTOCOL=true" in text:
+                errors.append(f"{rel}: pack Cloudflare não pode ligar PROXY_PROTOCOL")
+            if path.name == ".env.caddy.example" and "cdn-edge" not in rel_posix:
+                if "PROXY_PROTOCOL=true" not in text:
+                    errors.append(f"{rel}: caminho Caddy/nginx sem PROXY_PROTOCOL=true")
+            if path.name == ".env.example" and "PROXY_PROTOCOL=true" in text:
+                errors.append(f"{rel}: pack privilegiado liga PROXY_PROTOCOL")
+            if path.name == "Caddyfile" and "cdn-edge" not in rel_posix:
+                if "proxy_protocol v2" not in text:
+                    errors.append(f"{rel}: Caddyfile sem PROXY v2 para o Ferroada")
+            if path.name == "nginx.conf.snippet" and "cdn-edge" not in rel_posix:
+                if "proxy_protocol on" not in text:
+                    errors.append(f"{rel}: nginx sem PROXY protocol para o Ferroada")
+            if path.name == "haproxy.cfg.snippet" and "cdn-edge" in rel_posix:
+                errors.append(f"{rel}: pack Cloudflare não deve ter snippet HAProxy PROXY")
             if path.name == "ferroada.service":
                 if "PROXY_LISTEN=0.0.0.0:80" in text or "TLS_LISTEN=0.0.0.0:443" in text:
                     errors.append(f"{rel}: unit default promete :80/:443")
