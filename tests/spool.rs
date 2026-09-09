@@ -59,6 +59,9 @@ fn free_bind() -> SocketAddr {
 }
 
 fn spawn_proxy(listen: SocketAddr, config: Config) {
+    // Process-global behavioral score would 429 later tests (no User-Agent is +8
+    // per request; WAF 403 is +20). This suite asserts spool/WAF outcomes, not the scorer.
+    std::env::set_var("BEHAVIORAL_ENABLED", "false");
     std::thread::spawn(move || {
         spool::boot(&config).expect("spool boot");
         let proxy = FerroadaProxy::new(
@@ -194,7 +197,7 @@ fn send_until_http(addr: SocketAddr, payload: &[u8]) -> Vec<u8> {
 
 fn post(path: &str, body: &[u8], extra_headers: &[(&str, &str)]) -> Vec<u8> {
     let mut req = format!(
-        "POST {path} HTTP/1.1\r\nHost: spool.test\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "POST {path} HTTP/1.1\r\nHost: spool.test\r\nUser-Agent: ferroada-spool-test\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
     for (name, value) in extra_headers {
