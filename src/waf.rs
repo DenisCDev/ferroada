@@ -11,6 +11,8 @@ use crate::protocol;
 /// Bytes of inflated body the WAF will look at. Caps zip bombs.
 const MAX_INFLATE_FOR_INSPECT: u64 = 256 * 1024;
 const INSPECT_TEXT_LIMIT: usize = 65_536;
+/// Nesting budget for JSON inspection. Deeper than this is ParseError.
+pub const MAX_JSON_DEPTH: usize = 32;
 
 pub fn default_inspect_text_limit() -> usize {
     INSPECT_TEXT_LIMIT
@@ -310,7 +312,13 @@ const WORDPRESS_OPERATIONAL_PATHS: &[&str] =
 
 /// Inspect URI, headers, and optionally request body
 pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -> WafVerdict {
-    inspect_request_with_profile(uri, header_values, client_addr, default_profile())
+    inspect_request_with_profile(
+        uri,
+        header_values,
+        client_addr,
+        default_profile(),
+        metrics::UNSCOPED_SITE,
+    )
 }
 
 pub fn inspect_request_with_profile(
@@ -318,6 +326,7 @@ pub fn inspect_request_with_profile(
     header_values: &[String],
     client_addr: &str,
     profile: WafProfile,
+    site_scope: &str,
 ) -> WafVerdict {
     let decoded_uri = decode_uri(uri);
 
@@ -331,7 +340,8 @@ pub fn inspect_request_with_profile(
     if wordpress_operational_path {
         match profile {
             WafProfile::Strict => {
-                metrics::record_block(
+                metrics::record_block_in(
+                    site_scope,
                     "sensitive_path",
                     client_addr,
                     uri,
@@ -340,7 +350,8 @@ pub fn inspect_request_with_profile(
                 return WafVerdict::Block("Access denied by strict WAF profile".to_string());
             }
             WafProfile::Wordpress => {
-                metrics::record_observation(
+                metrics::record_observation_in(
+                    site_scope,
                     "waf_monitor",
                     client_addr,
                     uri,
@@ -360,7 +371,8 @@ pub fn inspect_request_with_profile(
                 path = *blocked,
                 "WAF blocked: sensitive path access"
             );
-            metrics::record_block(
+            metrics::record_block_in(
+                site_scope,
                 "sensitive_path",
                 client_addr,
                 uri,
@@ -378,7 +390,8 @@ pub fn inspect_request_with_profile(
                 prefix = *prefix,
                 "WAF blocked: sensitive path prefix"
             );
-            metrics::record_block(
+            metrics::record_block_in(
+                site_scope,
                 "sensitive_path",
                 client_addr,
                 uri,
@@ -395,7 +408,13 @@ pub fn inspect_request_with_profile(
             uri = uri,
             "WAF blocked: CRLF injection in URI"
         );
-        metrics::record_block("crlf", client_addr, uri, "CRLF injection in URI");
+        metrics::record_block_in(
+            site_scope,
+            "crlf",
+            client_addr,
+            uri,
+            "CRLF injection in URI",
+        );
         return WafVerdict::Block("CRLF injection detected".to_string());
     }
 
@@ -406,7 +425,13 @@ pub fn inspect_request_with_profile(
             uri = uri,
             "WAF blocked: JNDI/Log4Shell in URI"
         );
-        metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in URI");
+        metrics::record_block_in(
+            site_scope,
+            "jndi",
+            client_addr,
+            uri,
+            "JNDI/Log4Shell in URI",
+        );
         return WafVerdict::Block("JNDI injection detected".to_string());
     }
 
@@ -418,7 +443,13 @@ pub fn inspect_request_with_profile(
             category = category,
             "WAF blocked: SQL injection in URI"
         );
-        metrics::record_block("sqli", client_addr, uri, &format!("SQLi ({})", category));
+        metrics::record_block_in(
+            site_scope,
+            "sqli",
+            client_addr,
+            uri,
+            &format!("SQLi ({})", category),
+        );
         return WafVerdict::Block(format!("SQL injection detected ({})", category));
     }
 
@@ -430,7 +461,8 @@ pub fn inspect_request_with_profile(
             pattern = m.as_str(),
             "WAF blocked: path traversal in URI"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "path_traversal",
             client_addr,
             uri,
@@ -447,7 +479,13 @@ pub fn inspect_request_with_profile(
             pattern = m.as_str(),
             "WAF blocked: XSS in URI"
         );
-        metrics::record_block("xss", client_addr, uri, &format!("XSS: {}", m.as_str()));
+        metrics::record_block_in(
+            site_scope,
+            "xss",
+            client_addr,
+            uri,
+            &format!("XSS: {}", m.as_str()),
+        );
         return WafVerdict::Block(format!("XSS detected: {}", m.as_str()));
     }
 
@@ -462,7 +500,13 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: CRLF injection in header"
                 );
-                metrics::record_block("crlf", client_addr, uri, "CRLF injection in header");
+                metrics::record_block_in(
+                    site_scope,
+                    "crlf",
+                    client_addr,
+                    uri,
+                    "CRLF injection in header",
+                );
                 return WafVerdict::Block("CRLF injection detected in header".to_string());
             }
             if contains_jndi(inspected) {
@@ -471,7 +515,13 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: JNDI/Log4Shell in header"
                 );
-                metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in header");
+                metrics::record_block_in(
+                    site_scope,
+                    "jndi",
+                    client_addr,
+                    uri,
+                    "JNDI/Log4Shell in header",
+                );
                 return WafVerdict::Block("JNDI injection detected in header".to_string());
             }
             if let Some(category) = check_sqli(inspected) {
@@ -480,7 +530,8 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: SQL injection in header"
                 );
-                metrics::record_block(
+                metrics::record_block_in(
+                    site_scope,
                     "sqli",
                     client_addr,
                     uri,
@@ -497,7 +548,8 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: path traversal in header"
                 );
-                metrics::record_block(
+                metrics::record_block_in(
+                    site_scope,
                     "path_traversal",
                     client_addr,
                     uri,
@@ -514,7 +566,8 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: XSS in header"
                 );
-                metrics::record_block(
+                metrics::record_block_in(
+                    site_scope,
                     "xss",
                     client_addr,
                     uri,
@@ -542,6 +595,7 @@ pub fn inspect_body(
         client_addr,
         content_type,
         INSPECT_TEXT_LIMIT,
+        metrics::UNSCOPED_SITE,
     )
 }
 
@@ -551,6 +605,7 @@ pub fn inspect_body_limited(
     client_addr: &str,
     content_type: Option<&str>,
     text_limit: usize,
+    site_scope: &str,
 ) -> WafInspection {
     if !is_inspectable_content_type(content_type) {
         return WafInspection {
@@ -591,6 +646,10 @@ pub fn inspect_body_limited(
         && (content_type_lower.contains("application/json") || content_type_lower.contains("+json"))
     {
         match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) if json_nesting_depth(&value) > MAX_JSON_DEPTH => {
+                status = InspectionOutcome::ParseError;
+                None
+            }
             Ok(value) => Some(json_strings(&value, text_limit)),
             Err(_) => {
                 status = InspectionOutcome::ParseError;
@@ -623,7 +682,13 @@ pub fn inspect_body_limited(
             uri = uri,
             "WAF blocked: CRLF injection in request body"
         );
-        metrics::record_block("crlf", client_addr, uri, "CRLF injection in body");
+        metrics::record_block_in(
+            site_scope,
+            "crlf",
+            client_addr,
+            uri,
+            "CRLF injection in body",
+        );
         return WafInspection {
             verdict: WafVerdict::Block("CRLF injection detected in body".to_string()),
             status,
@@ -637,7 +702,13 @@ pub fn inspect_body_limited(
             uri = uri,
             "WAF blocked: JNDI/Log4Shell in request body"
         );
-        metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in body");
+        metrics::record_block_in(
+            site_scope,
+            "jndi",
+            client_addr,
+            uri,
+            "JNDI/Log4Shell in body",
+        );
         return WafInspection {
             verdict: WafVerdict::Block("JNDI injection detected in body".to_string()),
             status,
@@ -651,7 +722,8 @@ pub fn inspect_body_limited(
             category = category,
             "WAF blocked: SQL injection in request body"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "body_sqli",
             client_addr,
             uri,
@@ -670,7 +742,8 @@ pub fn inspect_body_limited(
             pattern = m.as_str(),
             "WAF blocked: XSS in request body"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "body_xss",
             client_addr,
             uri,
@@ -690,6 +763,18 @@ pub fn inspect_body_limited(
 
 fn is_inspectable_content_type(content_type: Option<&str>) -> bool {
     protocol::is_l0_inspectable_content_type(content_type)
+}
+
+fn json_nesting_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(items) => {
+            items.iter().map(json_nesting_depth).max().unwrap_or(0) + 1
+        }
+        serde_json::Value::Object(map) => {
+            map.values().map(json_nesting_depth).max().unwrap_or(0) + 1
+        }
+        _ => 0,
+    }
 }
 
 fn json_strings(value: &serde_json::Value, text_limit: usize) -> String {
@@ -1112,13 +1197,17 @@ mod tests {
         body.extend_from_slice(b" UNION SELECT password FROM users");
         let truncated = inspect_body(&body, "/", "1.1.1.1", Some("text/plain"));
         assert_eq!(truncated.verdict, WafVerdict::Allow);
-        assert!(matches!(truncated.status, InspectionOutcome::Truncated { .. }));
+        assert!(matches!(
+            truncated.status,
+            InspectionOutcome::Truncated { .. }
+        ));
         let full = inspect_body_limited(
             &body,
             "/",
             "1.1.1.1",
             Some("text/plain"),
             body.len(),
+            metrics::UNSCOPED_SITE,
         );
         assert!(
             matches!(full.verdict, WafVerdict::Block(_)),
@@ -1229,6 +1318,58 @@ mod tests {
         let inspection = inspect_body(br#"{"ok":true}"#, "/", "1.1.1.1", Some("application/json"));
         assert_eq!(inspection.verdict, WafVerdict::Allow);
         assert_eq!(inspection.status, InspectionOutcome::Complete);
+    }
+
+    fn nested_json_objects(depth: usize) -> Vec<u8> {
+        let mut json = String::from("null");
+        for _ in 0..depth {
+            json = format!("{{\"n\":{json}}}");
+        }
+        json.into_bytes()
+    }
+
+    fn nested_json_arrays(depth: usize) -> Vec<u8> {
+        let mut json = String::from("null");
+        for _ in 0..depth {
+            json = format!("[{json}]");
+        }
+        json.into_bytes()
+    }
+
+    #[test]
+    fn json_at_depth_budget_stays_complete() {
+        let inspection = inspect_body(
+            &nested_json_objects(MAX_JSON_DEPTH),
+            "/",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionOutcome::Complete);
+    }
+
+    #[test]
+    fn json_deeper_than_budget_is_parse_error() {
+        let inspection = inspect_body(
+            &nested_json_objects(40),
+            "/api/payment",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+        assert_eq!(inspection.status.denied_status(), 403);
+    }
+
+    #[test]
+    fn json_array_deeper_than_budget_is_parse_error() {
+        let inspection = inspect_body(
+            &nested_json_arrays(MAX_JSON_DEPTH + 1),
+            "/",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
     }
 
     #[test]

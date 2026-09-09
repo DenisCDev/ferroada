@@ -4,7 +4,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-const MAX_EVENTS: usize = 100;
+/// Events kept per `site_scope`. One tenant filling its ring must not
+/// erase another tenant's events (was a single global ring of 100).
+pub const MAX_EVENTS_PER_SITE: usize = 50;
+pub const UNSCOPED_SITE: &str = "__unscoped__";
 
 pub static METRICS: Lazy<Metrics> = Lazy::new(Metrics::new);
 
@@ -50,7 +53,14 @@ pub struct Metrics {
     pub protocol_bypass: AtomicU64,
     pub protocol_quarantine: AtomicU64,
     protocol_by_id: Mutex<HashMap<(String, String), u64>>,
-    pub recent_events: Mutex<VecDeque<SecurityEvent>>,
+    events_by_site: Mutex<HashMap<String, VecDeque<StoredEvent>>>,
+    event_seq: AtomicU64,
+}
+
+#[derive(Clone)]
+struct StoredEvent {
+    seq: u64,
+    event: SecurityEvent,
 }
 
 #[derive(Serialize, Clone)]
@@ -60,6 +70,7 @@ pub struct SecurityEvent {
     pub client_ip: String,
     pub uri: String,
     pub detail: String,
+    pub site_scope: String,
 }
 
 impl Metrics {
@@ -106,17 +117,45 @@ impl Metrics {
             protocol_bypass: AtomicU64::new(0),
             protocol_quarantine: AtomicU64::new(0),
             protocol_by_id: Mutex::new(HashMap::new()),
-            recent_events: Mutex::new(VecDeque::with_capacity(MAX_EVENTS)),
+            events_by_site: Mutex::new(HashMap::new()),
+            event_seq: AtomicU64::new(0),
         }
     }
 
-    fn push_event(&self, event: SecurityEvent) {
-        if let Ok(mut events) = self.recent_events.lock() {
-            if events.len() >= MAX_EVENTS {
-                events.pop_front();
+    fn push_event(&self, site_scope: &str, mut event: SecurityEvent) {
+        let site = normalize_site(site_scope);
+        event.site_scope = site.clone();
+        let seq = self.event_seq.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut by_site) = self.events_by_site.lock() {
+            let ring = by_site
+                .entry(site)
+                .or_insert_with(|| VecDeque::with_capacity(MAX_EVENTS_PER_SITE));
+            if ring.len() >= MAX_EVENTS_PER_SITE {
+                ring.pop_front();
             }
-            events.push_back(event);
+            ring.push_back(StoredEvent { seq, event });
         }
+    }
+
+    fn snapshot_events(&self) -> Vec<SecurityEvent> {
+        let Ok(by_site) = self.events_by_site.lock() else {
+            return Vec::new();
+        };
+        let mut collected: Vec<(u64, SecurityEvent)> = by_site
+            .values()
+            .flat_map(|ring| ring.iter().map(|stored| (stored.seq, stored.event.clone())))
+            .collect();
+        collected.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq));
+        collected.into_iter().map(|(_, event)| event).collect()
+    }
+}
+
+fn normalize_site(site_scope: &str) -> String {
+    let trimmed = site_scope.trim();
+    if trimmed.is_empty() {
+        UNSCOPED_SITE.to_string()
+    } else {
+        trimmed.to_ascii_lowercase()
     }
 }
 
@@ -161,6 +200,16 @@ pub fn increment_requests() {
 }
 
 pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) {
+    record_block_in(UNSCOPED_SITE, event_type, client_ip, uri, detail);
+}
+
+pub fn record_block_in(
+    site_scope: &str,
+    event_type: &str,
+    client_ip: &str,
+    uri: &str,
+    detail: &str,
+) {
     let counter = match event_type {
         "sqli" => &METRICS.blocked_sqli,
         "xss" => &METRICS.blocked_xss,
@@ -191,16 +240,31 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
     };
     counter.fetch_add(1, Ordering::Relaxed);
 
-    METRICS.push_event(SecurityEvent {
-        timestamp: now_iso(),
-        event_type: event_type.to_string(),
-        client_ip: client_ip.to_string(),
-        uri: uri.to_string(),
-        detail: detail.to_string(),
-    });
+    METRICS.push_event(
+        site_scope,
+        SecurityEvent {
+            timestamp: now_iso(),
+            event_type: event_type.to_string(),
+            client_ip: client_ip.to_string(),
+            uri: uri.to_string(),
+            detail: detail.to_string(),
+            site_scope: String::new(),
+        },
+    );
 }
 
 pub fn record_protocol(protocol_id: &str, action: &str, client_ip: &str, uri: &str, detail: &str) {
+    record_protocol_in(UNSCOPED_SITE, protocol_id, action, client_ip, uri, detail);
+}
+
+pub fn record_protocol_in(
+    site_scope: &str,
+    protocol_id: &str,
+    action: &str,
+    client_ip: &str,
+    uri: &str,
+    detail: &str,
+) {
     let counter = match action {
         "deny" => &METRICS.protocol_deny,
         "monitor" => &METRICS.protocol_monitor,
@@ -223,13 +287,17 @@ pub fn record_protocol(protocol_id: &str, action: &str, client_ip: &str, uri: &s
         "bypass-explicit" => "protocol_bypass",
         _ => return,
     };
-    METRICS.push_event(SecurityEvent {
-        timestamp: now_iso(),
-        event_type: event_type.to_string(),
-        client_ip: client_ip.to_string(),
-        uri: uri.to_string(),
-        detail: detail.to_string(),
-    });
+    METRICS.push_event(
+        site_scope,
+        SecurityEvent {
+            timestamp: now_iso(),
+            event_type: event_type.to_string(),
+            client_ip: client_ip.to_string(),
+            uri: uri.to_string(),
+            detail: detail.to_string(),
+            site_scope: String::new(),
+        },
+    );
 }
 
 pub fn record_waf_inspection(status: &str) {
@@ -247,6 +315,16 @@ pub fn record_waf_inspection(status: &str) {
 }
 
 pub fn record_observation(event_type: &str, client_ip: &str, uri: &str, detail: &str) {
+    record_observation_in(UNSCOPED_SITE, event_type, client_ip, uri, detail);
+}
+
+pub fn record_observation_in(
+    site_scope: &str,
+    event_type: &str,
+    client_ip: &str,
+    uri: &str,
+    detail: &str,
+) {
     if event_type == "waf_monitor" {
         METRICS.waf_monitored.fetch_add(1, Ordering::Relaxed);
     } else if !matches!(
@@ -260,13 +338,17 @@ pub fn record_observation(event_type: &str, client_ip: &str, uri: &str, detail: 
     ) {
         return;
     }
-    METRICS.push_event(SecurityEvent {
-        timestamp: now_iso(),
-        event_type: event_type.to_string(),
-        client_ip: client_ip.to_string(),
-        uri: uri.to_string(),
-        detail: detail.to_string(),
-    });
+    METRICS.push_event(
+        site_scope,
+        SecurityEvent {
+            timestamp: now_iso(),
+            event_type: event_type.to_string(),
+            client_ip: client_ip.to_string(),
+            uri: uri.to_string(),
+            detail: detail.to_string(),
+            site_scope: String::new(),
+        },
+    );
 }
 
 pub fn record_dlp(cpf_count: u64, token_count: u64) {
@@ -281,23 +363,23 @@ pub fn record_dlp(cpf_count: u64, token_count: u64) {
             .fetch_add(token_count, Ordering::Relaxed);
     }
     if cpf_count > 0 || token_count > 0 {
-        METRICS.push_event(SecurityEvent {
-            timestamp: now_iso(),
-            event_type: "dlp".to_string(),
-            client_ip: "-".to_string(),
-            uri: "-".to_string(),
-            detail: format!("Masked {} CPFs, {} tokens", cpf_count, token_count),
-        });
+        METRICS.push_event(
+            UNSCOPED_SITE,
+            SecurityEvent {
+                timestamp: now_iso(),
+                event_type: "dlp".to_string(),
+                client_ip: "-".to_string(),
+                uri: "-".to_string(),
+                detail: format!("Masked {} CPFs, {} tokens", cpf_count, token_count),
+                site_scope: String::new(),
+            },
+        );
     }
 }
 
 pub fn snapshot_json() -> String {
     let m = &*METRICS;
-    let events: Vec<SecurityEvent> = m
-        .recent_events
-        .lock()
-        .map(|e| e.iter().rev().cloned().collect())
-        .unwrap_or_default();
+    let events = m.snapshot_events();
 
     let json = serde_json::json!({
         "requests_total": m.requests_total.load(Ordering::Relaxed),
@@ -455,5 +537,80 @@ mod tests {
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"parse_error\"}"));
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"timed_out\"}"));
         assert!(snapshot.contains("ferroada_protocol_total{action=\"quarantine\"}"));
+    }
+
+    fn unique_sites() -> (String, String) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        (
+            format!("quota-a-{n}.example"),
+            format!("quota-b-{n}.example"),
+        )
+    }
+
+    fn event_uris(snapshot: &str) -> Vec<String> {
+        let value: serde_json::Value =
+            serde_json::from_str(snapshot).expect("metrics snapshot is JSON");
+        value["recent_events"]
+            .as_array()
+            .expect("recent_events")
+            .iter()
+            .map(|event| event["uri"].as_str().expect("event uri").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn noisy_site_does_not_evict_another_site_events() {
+        let (site_a, site_b) = unique_sites();
+        for i in 0..(MAX_EVENTS_PER_SITE + 10) {
+            record_block_in(
+                &site_a,
+                "sqli",
+                "192.0.2.1",
+                &format!("/flood-a/{i}"),
+                "flood",
+            );
+        }
+        record_block_in(&site_b, "xss", "192.0.2.2", "/kept-from-b", "keep");
+
+        let snapshot = snapshot_json();
+        let uris = event_uris(&snapshot);
+        assert!(
+            uris.iter().any(|uri| uri == "/kept-from-b"),
+            "site B event must survive site A filling its ring: {uris:?}"
+        );
+        let a_count = uris
+            .iter()
+            .filter(|uri| uri.starts_with("/flood-a/"))
+            .count();
+        assert_eq!(
+            a_count, MAX_EVENTS_PER_SITE,
+            "site A must keep only its own cap, got {a_count}"
+        );
+        assert!(
+            !uris.iter().any(|uri| uri == "/flood-a/0"),
+            "site A oldest event must be evicted from its own ring"
+        );
+        assert!(snapshot.contains(&site_a), "{snapshot}");
+        assert!(snapshot.contains(&site_b), "{snapshot}");
+    }
+
+    #[test]
+    fn unscoped_flood_does_not_evict_scoped_events() {
+        let (_, site_b) = unique_sites();
+        for i in 0..(MAX_EVENTS_PER_SITE + 10) {
+            record_block(
+                "sqli",
+                "192.0.2.3",
+                &format!("/flood-unscoped/{i}"),
+                "flood",
+            );
+        }
+        record_block_in(&site_b, "xss", "192.0.2.4", "/kept-scoped", "keep");
+        let uris = event_uris(&snapshot_json());
+        assert!(
+            uris.iter().any(|uri| uri == "/kept-scoped"),
+            "scoped event must survive an unscoped flood: {uris:?}"
+        );
     }
 }

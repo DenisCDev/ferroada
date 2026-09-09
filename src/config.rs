@@ -746,6 +746,41 @@ require_complete_waf_inspection = ["/api/payment"]
         assert_eq!(inspection.status.denied_status(), 403);
     }
 
+    fn nested_json_objects(depth: usize) -> Vec<u8> {
+        let mut json = String::from("null");
+        for _ in 0..depth {
+            json = format!("{{\"n\":{json}}}");
+        }
+        json.into_bytes()
+    }
+
+    #[test]
+    fn json_depth_40_on_fail_closed_route_is_403() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+require_complete_waf_inspection = ["/api/payment"]
+"#,
+        );
+        let backend = config.resolve("api.example").unwrap();
+        let policy = backend.inspection_policy("/api/payment");
+        assert_eq!(policy, InspectionPolicy::fail_closed());
+        let inspection = waf::inspect_body(
+            &nested_json_objects(40),
+            "/api/payment",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+        assert_eq!(
+            policy.disposition(inspection.status),
+            InspectionDisposition::Deny
+        );
+        assert_eq!(inspection.status.denied_status(), 403);
+    }
+
     #[test]
     fn on_truncated_and_on_parse_error_are_per_prefix() {
         let config = Config::from_toml(

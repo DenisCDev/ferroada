@@ -340,11 +340,12 @@ impl ProtocolMatrix {
     }
 }
 
-pub fn record(verdict: ProtocolVerdict, client_ip: &str, uri: &str) {
+pub fn record(verdict: ProtocolVerdict, client_ip: &str, uri: &str, site_scope: &str) {
     let ProtocolVerdict::Unsupported { protocol, action } = verdict else {
         return;
     };
-    metrics::record_protocol(
+    metrics::record_protocol_in(
+        site_scope,
         protocol.as_str(),
         action.metric_action(),
         client_ip,
@@ -892,7 +893,7 @@ mod tests {
         );
 
         let uri = "/protocol-matrix/quarantine-grpc";
-        record(verdict, "203.0.113.9", uri);
+        record(verdict, "203.0.113.9", uri, "api.example");
         let snapshot = metrics::snapshot_json();
         assert!(snapshot.contains("\"event_type\": \"quarantine\""));
         assert!(snapshot.contains(uri));
@@ -905,7 +906,7 @@ mod tests {
     fn deny_records_protocol_id_metric_and_event() {
         let verdict = default_eval(Version::HTTP_10, None, None, None, false);
         let uri = "/protocol-matrix/http10-deny";
-        record(verdict, "198.51.100.4", uri);
+        record(verdict, "198.51.100.4", uri, "api.example");
         let snapshot = metrics::snapshot_json();
         assert!(snapshot.contains("\"event_type\": \"protocol_deny\""));
         assert!(snapshot.contains(uri));
@@ -918,7 +919,7 @@ mod tests {
     fn bypass_records_protocol_bypass_event() {
         let verdict = default_eval(Version::HTTP_11, Some("websocket"), None, None, false);
         let uri = "/protocol-matrix/websocket-bypass";
-        record(verdict, "192.0.2.8", uri);
+        record(verdict, "192.0.2.8", uri, "api.example");
         let snapshot = metrics::snapshot_json();
         assert!(snapshot.contains("\"event_type\": \"protocol_bypass\""));
         assert!(snapshot.contains(uri));

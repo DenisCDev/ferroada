@@ -587,7 +587,8 @@ impl ProxyHttp for FerroadaProxy {
                 .and_then(|backend| backend.redirect_host.as_deref())
                 .or(HTTPS_REDIRECT_HOST.as_deref());
             let Some(host) = host else {
-                metrics::record_block(
+                metrics::record_block_in(
+                    &ctx.site_scope,
                     "host",
                     &client_addr,
                     &uri,
@@ -617,7 +618,8 @@ impl ProxyHttp for FerroadaProxy {
             session
                 .write_response_body(Some(Bytes::from(body)), true)
                 .await?;
-            metrics::record_block(
+            metrics::record_block_in(
+                &ctx.site_scope,
                 "https_redirect",
                 &client_addr,
                 &uri,
@@ -672,7 +674,15 @@ impl ProxyHttp for FerroadaProxy {
             .get("Transfer-Encoding")
             .and_then(|v| v.to_str().ok());
         if matches!(
-            shield::check_smuggling(has_cl, cl_count, te_count, te, &uri, &client_addr),
+            shield::check_smuggling(
+                has_cl,
+                cl_count,
+                te_count,
+                te,
+                &uri,
+                &client_addr,
+                &ctx.site_scope,
+            ),
             ShieldVerdict::BlockSmuggling
         ) {
             return self
@@ -691,7 +701,7 @@ impl ProxyHttp for FerroadaProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if matches!(
-            shield::check_user_agent(ua, &uri, &client_addr),
+            shield::check_user_agent(ua, &uri, &client_addr, &ctx.site_scope),
             ShieldVerdict::BlockBadBot
         ) {
             return self
@@ -702,7 +712,7 @@ impl ProxyHttp for FerroadaProxy {
         // Method restriction check
         let method = session.req_header().method.as_str().to_string();
         if matches!(
-            shield::check_method(&method, &uri, &client_addr),
+            shield::check_method(&method, &uri, &client_addr, &ctx.site_scope),
             ShieldVerdict::BlockMethod
         ) {
             let body = "405 Método não permitido\n";
@@ -720,7 +730,7 @@ impl ProxyHttp for FerroadaProxy {
 
         // URI length check
         if matches!(
-            shield::check_uri_length(&uri, &client_addr),
+            shield::check_uri_length(&uri, &client_addr, &ctx.site_scope),
             ShieldVerdict::BlockUriLength
         ) {
             let body = "414 URI muito longa\n";
@@ -751,7 +761,13 @@ impl ProxyHttp for FerroadaProxy {
         if let Some(cl) = content_length {
             if cl > route_body_limit {
                 return self
-                    .send_413(session, &uri, &client_addr, route_body_limit)
+                    .send_413(
+                        session,
+                        &uri,
+                        &client_addr,
+                        route_body_limit,
+                        &ctx.site_scope,
+                    )
                     .await;
             }
         }
@@ -799,7 +815,7 @@ impl ProxyHttp for FerroadaProxy {
             content_type: ctx.request_content_type.as_deref(),
             require_complete: inspection_policy.require_complete,
         });
-        protocol::record(protocol_verdict, &client_addr, &uri);
+        protocol::record(protocol_verdict, &client_addr, &uri, &ctx.site_scope);
         if protocol_verdict.blocked_status().is_some() {
             let reason = match protocol_verdict {
                 ProtocolVerdict::Unsupported { protocol, .. } => protocol.deny_reason(),
@@ -819,7 +835,13 @@ impl ProxyHttp for FerroadaProxy {
             .collect();
 
         let waf_profile = ctx.backend.as_ref().expect("backend resolved").waf_profile;
-        match waf::inspect_request_with_profile(&uri, &header_values, &client_addr, waf_profile) {
+        match waf::inspect_request_with_profile(
+            &uri,
+            &header_values,
+            &client_addr,
+            waf_profile,
+            &ctx.site_scope,
+        ) {
             WafVerdict::Allow => {}
             WafVerdict::Block(reason) => {
                 if let Some(identity) = ctx.risk_identity.as_ref() {
@@ -857,8 +879,10 @@ impl ProxyHttp for FerroadaProxy {
                     &ctx.client_addr,
                     &ctx.request_uri,
                     true,
+                    &ctx.site_scope,
                 );
-                metrics::record_block(
+                metrics::record_block_in(
+                    &ctx.site_scope,
                     "request_buffer_limit",
                     &ctx.client_addr,
                     &ctx.request_uri,
@@ -910,7 +934,13 @@ impl ProxyHttp for FerroadaProxy {
                         Ok(()) => {}
                         Err(SpoolError::Overflow) => {
                             return self
-                                .send_413(session, &ctx.request_uri, &ctx.client_addr, max_body)
+                                .send_413(
+                                    session,
+                                    &ctx.request_uri,
+                                    &ctx.client_addr,
+                                    max_body,
+                                    &ctx.site_scope,
+                                )
                                 .await;
                         }
                         Err(_) => {
@@ -930,6 +960,7 @@ impl ProxyHttp for FerroadaProxy {
                             &ctx.request_uri,
                             &ctx.client_addr,
                             shield::max_body_size(),
+                            &ctx.site_scope,
                         )
                         .await;
                 }
@@ -951,7 +982,8 @@ impl ProxyHttp for FerroadaProxy {
                     .get_retry_buffer()
                     .is_some_and(|buffer| buffer.as_ref() == ctx.request_body.as_slice());
                 if !replay_matches {
-                    metrics::record_block(
+                    metrics::record_block_in(
+                        &ctx.site_scope,
                         "request_buffer_limit",
                         &ctx.client_addr,
                         &ctx.request_uri,
@@ -1002,6 +1034,7 @@ impl ProxyHttp for FerroadaProxy {
                     &ctx.client_addr,
                     ctx.request_content_type.as_deref(),
                     text_limit,
+                    &ctx.site_scope,
                 );
                 let inspection_status = inspect_body.status.combine(inspection.status);
                 match inspection.verdict {
@@ -1012,6 +1045,7 @@ impl ProxyHttp for FerroadaProxy {
                                 &ctx.client_addr,
                                 &ctx.request_uri,
                                 false,
+                                &ctx.site_scope,
                             );
                         }
                         InspectionDisposition::Monitor => {
@@ -1020,6 +1054,7 @@ impl ProxyHttp for FerroadaProxy {
                                 &ctx.client_addr,
                                 &ctx.request_uri,
                                 false,
+                                &ctx.site_scope,
                             );
                             tracing::warn!(
                                 client = %ctx.client_addr,
@@ -1034,6 +1069,7 @@ impl ProxyHttp for FerroadaProxy {
                                 &ctx.client_addr,
                                 &ctx.request_uri,
                                 true,
+                                &ctx.site_scope,
                             );
                             if let Some(identity) = ctx.risk_identity.as_ref() {
                                 behavioral::record_waf_block(identity);
@@ -1049,6 +1085,7 @@ impl ProxyHttp for FerroadaProxy {
                             &ctx.client_addr,
                             &ctx.request_uri,
                             false,
+                            &ctx.site_scope,
                         );
                         if let Some(identity) = ctx.risk_identity.as_ref() {
                             behavioral::record_waf_block(identity);
@@ -1251,9 +1288,9 @@ fn outcome_detail(outcome: InspectionOutcome) -> &'static str {
     }
 }
 
-fn on_body_read_timeout(client_addr: &str, uri: &str) -> InspectionOutcome {
+fn on_body_read_timeout(client_addr: &str, uri: &str, site_scope: &str) -> InspectionOutcome {
     let outcome = InspectionOutcome::TimedOut;
-    record_inspection_outcome(outcome, client_addr, uri, true);
+    record_inspection_outcome(outcome, client_addr, uri, true, site_scope);
     outcome
 }
 
@@ -1262,6 +1299,7 @@ fn record_inspection_outcome(
     client_addr: &str,
     uri: &str,
     denied: bool,
+    site_scope: &str,
 ) {
     metrics::record_waf_inspection(outcome.as_str());
     if outcome.is_complete() {
@@ -1271,10 +1309,22 @@ fn record_inspection_outcome(
     if denied {
         match outcome {
             InspectionOutcome::TimedOut | InspectionOutcome::BudgetExceeded => {
-                metrics::record_observation(outcome.event_type(), client_addr, uri, detail);
+                metrics::record_observation_in(
+                    site_scope,
+                    outcome.event_type(),
+                    client_addr,
+                    uri,
+                    detail,
+                );
             }
             _ => {
-                metrics::record_block(outcome.event_type(), client_addr, uri, detail);
+                metrics::record_block_in(
+                    site_scope,
+                    outcome.event_type(),
+                    client_addr,
+                    uri,
+                    detail,
+                );
             }
         }
         return;
@@ -1282,7 +1332,7 @@ fn record_inspection_outcome(
     // Truncated/unsupported on an open route already warn; do not fill the
     // event ring with every upload that merely exceeds the inspect window.
     if matches!(outcome, InspectionOutcome::ParseError) {
-        metrics::record_observation(outcome.event_type(), client_addr, uri, detail);
+        metrics::record_observation_in(site_scope, outcome.event_type(), client_addr, uri, detail);
     }
 }
 
@@ -1590,12 +1640,8 @@ impl FerroadaProxy {
             result.bytes
         };
         resp.insert_header("Content-Length", out_bytes.len().to_string())?;
-        session
-            .write_response_header(Box::new(resp), false)
-            .await?;
-        session
-            .write_response_body(Some(out_bytes), true)
-            .await?;
+        session.write_response_header(Box::new(resp), false).await?;
+        session.write_response_body(Some(out_bytes), true).await?;
         Ok(true)
     }
 
@@ -1709,8 +1755,10 @@ impl FerroadaProxy {
         uri: &str,
         client_addr: &str,
         max_body: usize,
+        site_scope: &str,
     ) -> Result<bool> {
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "size_limit",
             client_addr,
             uri,
@@ -1730,7 +1778,7 @@ impl FerroadaProxy {
     }
 
     async fn send_body_timeout(&self, session: &mut Session, ctx: &FerroadaCtx) -> Result<bool> {
-        let outcome = on_body_read_timeout(&ctx.client_addr, &ctx.request_uri);
+        let outcome = on_body_read_timeout(&ctx.client_addr, &ctx.request_uri, &ctx.site_scope);
         self.send_408(session, outcome.denied_status()).await
     }
 
@@ -1798,7 +1846,7 @@ mod tests {
 
     #[test]
     fn body_timeout_records_timed_out_and_is_408() {
-        let outcome = on_body_read_timeout("192.0.2.9", "/slow");
+        let outcome = on_body_read_timeout("192.0.2.9", "/slow", "timeout.example");
         assert_eq!(outcome, InspectionOutcome::TimedOut);
         assert_eq!(outcome.denied_status(), 408);
         assert_ne!(outcome.denied_status(), 403);
@@ -1821,6 +1869,7 @@ mod tests {
             "192.0.2.10",
             "/api/payment",
             true,
+            "api.example",
         );
         let snapshot = metrics::snapshot_json();
         assert!(snapshot.contains("\"event_type\": \"inspection_parse_error\""));

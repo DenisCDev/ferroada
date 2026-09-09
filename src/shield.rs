@@ -106,7 +106,7 @@ pub fn check_headers(
 }
 
 /// Check if the HTTP method is allowed.
-pub fn check_method(method: &str, uri: &str, client_addr: &str) -> ShieldVerdict {
+pub fn check_method(method: &str, uri: &str, client_addr: &str, site_scope: &str) -> ShieldVerdict {
     if !ALLOWED_METHODS.contains(&method.to_uppercase()) {
         warn!(
             client = client_addr,
@@ -114,7 +114,8 @@ pub fn check_method(method: &str, uri: &str, client_addr: &str) -> ShieldVerdict
             uri = uri,
             "Blocked disallowed HTTP method"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "method",
             client_addr,
             uri,
@@ -126,7 +127,7 @@ pub fn check_method(method: &str, uri: &str, client_addr: &str) -> ShieldVerdict
 }
 
 /// Check if the URI length exceeds the configured maximum.
-pub fn check_uri_length(uri: &str, client_addr: &str) -> ShieldVerdict {
+pub fn check_uri_length(uri: &str, client_addr: &str, site_scope: &str) -> ShieldVerdict {
     if uri.len() > *MAX_URI_LENGTH {
         warn!(
             client = client_addr,
@@ -134,7 +135,8 @@ pub fn check_uri_length(uri: &str, client_addr: &str) -> ShieldVerdict {
             max = *MAX_URI_LENGTH,
             "Blocked: URI too long"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "size_limit",
             client_addr,
             &uri[..128.min(uri.len())],
@@ -348,7 +350,7 @@ const BAD_BOT_SIGNATURES: &[&str] = &[
 ];
 
 /// Check if the User-Agent matches known attack tool signatures.
-pub fn check_user_agent(ua: &str, uri: &str, client_addr: &str) -> ShieldVerdict {
+pub fn check_user_agent(ua: &str, uri: &str, client_addr: &str, site_scope: &str) -> ShieldVerdict {
     if !*BAD_BOT_ENABLED {
         return ShieldVerdict::Allow;
     }
@@ -362,7 +364,13 @@ pub fn check_user_agent(ua: &str, uri: &str, client_addr: &str) -> ShieldVerdict
                 signature = *sig,
                 "Blocked: bad bot user-agent"
             );
-            metrics::record_block("bad_bot", client_addr, uri, &format!("Bad bot UA: {}", sig));
+            metrics::record_block_in(
+                site_scope,
+                "bad_bot",
+                client_addr,
+                uri,
+                &format!("Bad bot UA: {}", sig),
+            );
             return ShieldVerdict::BlockBadBot;
         }
     }
@@ -379,6 +387,7 @@ pub fn check_smuggling(
     transfer_encoding: Option<&str>,
     uri: &str,
     client_addr: &str,
+    site_scope: &str,
 ) -> ShieldVerdict {
     // Multiple Content-Length headers
     if content_length_count > 1 {
@@ -388,7 +397,8 @@ pub fn check_smuggling(
             cl_count = content_length_count,
             "Blocked: multiple Content-Length headers (smuggling)"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "smuggling",
             client_addr,
             uri,
@@ -404,7 +414,8 @@ pub fn check_smuggling(
             te_count = transfer_encoding_count,
             "Blocked: multiple Transfer-Encoding headers (smuggling)"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "smuggling",
             client_addr,
             uri,
@@ -419,7 +430,13 @@ pub fn check_smuggling(
             uri = uri,
             "Blocked: Content-Length + Transfer-Encoding (smuggling)"
         );
-        metrics::record_block("smuggling", client_addr, uri, "CL + TE conflict");
+        metrics::record_block_in(
+            site_scope,
+            "smuggling",
+            client_addr,
+            uri,
+            "CL + TE conflict",
+        );
         return ShieldVerdict::BlockSmuggling;
     }
 
@@ -431,7 +448,13 @@ pub fn check_smuggling(
                 uri = uri,
                 "Blocked: Content-Length + Transfer-Encoding (smuggling)"
             );
-            metrics::record_block("smuggling", client_addr, uri, "CL + TE conflict");
+            metrics::record_block_in(
+                site_scope,
+                "smuggling",
+                client_addr,
+                uri,
+                "CL + TE conflict",
+            );
             return ShieldVerdict::BlockSmuggling;
         }
 
@@ -444,7 +467,13 @@ pub fn check_smuggling(
                 te = te,
                 "Blocked: suspicious Transfer-Encoding value (smuggling)"
             );
-            metrics::record_block("smuggling", client_addr, uri, &format!("Bad TE: {}", te));
+            metrics::record_block_in(
+                site_scope,
+                "smuggling",
+                client_addr,
+                uri,
+                &format!("Bad TE: {}", te),
+            );
             return ShieldVerdict::BlockSmuggling;
         }
     }
@@ -467,7 +496,7 @@ mod tests {
     #[test]
     fn duplicate_transfer_encoding_is_rejected() {
         assert!(matches!(
-            check_smuggling(false, 0, 2, Some("chunked"), "/", "127.0.0.1"),
+            check_smuggling(false, 0, 2, Some("chunked"), "/", "127.0.0.1", "",),
             ShieldVerdict::BlockSmuggling
         ));
     }
