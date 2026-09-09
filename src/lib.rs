@@ -17,4 +17,5 @@ pub mod proxy_protocol;
 mod proxy_protocol_socket;
 pub mod rate_limit;
 pub mod shield;
+pub mod spool;
 pub mod waf;

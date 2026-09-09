@@ -71,6 +71,7 @@ fn main() {
 
     // Load config: ferroada.toml (multi-site) or TARGET_URL (single-site)
     let config = Arc::new(Config::load());
+    ferroada::spool::boot(&config).unwrap_or_else(|error| panic!("{error}"));
 
     // Initialize rate limiter
     let rate_limiter = Arc::new(RateLimiter::from_env());

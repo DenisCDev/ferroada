@@ -35,6 +35,7 @@ services:
       FORCE_HTTPS: "false"
     volumes:
       - ./ferroada.toml:/ferroada.toml:ro
+      - ferroada_spool:/var/lib/ferroada/spool
     working_dir: /
     ports:
       - "127.0.0.1:9000:9000"
@@ -51,5 +52,6 @@ networks:
         - subnet: 172.28.0.0/24
 
 volumes:
+  ferroada_spool:
   caddy_data:
   caddy_config:

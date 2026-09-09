@@ -11,6 +11,14 @@ use crate::protocol;
 /// Bytes of inflated body the WAF will look at. Caps zip bombs.
 const MAX_INFLATE_FOR_INSPECT: u64 = 256 * 1024;
 const INSPECT_TEXT_LIMIT: usize = 65_536;
+
+pub fn default_inspect_text_limit() -> usize {
+    INSPECT_TEXT_LIMIT
+}
+
+pub fn default_inflate_limit() -> u64 {
+    MAX_INFLATE_FOR_INSPECT
+}
 /// Percent-decode passes. 3 was shallow: `%2525252e` (4 layers) survived.
 const MAX_DECODE_PASSES: usize = 8;
 
@@ -156,7 +164,11 @@ pub struct InspectionBody<'a> {
 }
 
 pub fn max_inflate_buffer_bytes() -> usize {
-    MAX_INFLATE_FOR_INSPECT as usize + 1
+    inflate_buffer_bytes(MAX_INFLATE_FOR_INSPECT)
+}
+
+pub fn inflate_buffer_bytes(limit: u64) -> usize {
+    (limit as usize).saturating_add(1)
 }
 
 // --- SQLi detection: 5 categories for robust coverage ---
@@ -524,6 +536,22 @@ pub fn inspect_body(
     client_addr: &str,
     content_type: Option<&str>,
 ) -> WafInspection {
+    inspect_body_limited(
+        body,
+        uri,
+        client_addr,
+        content_type,
+        INSPECT_TEXT_LIMIT,
+    )
+}
+
+pub fn inspect_body_limited(
+    body: &[u8],
+    uri: &str,
+    client_addr: &str,
+    content_type: Option<&str>,
+    text_limit: usize,
+) -> WafInspection {
     if !is_inspectable_content_type(content_type) {
         return WafInspection {
             verdict: WafVerdict::Allow,
@@ -540,11 +568,10 @@ pub fn inspect_body(
         }
     };
 
-    // Limit inspection to first 64KB to avoid DoS on large uploads.
-    // Cut on a char boundary so a multibyte UTF-8 scalar at 64KB cannot panic.
+    // Cut on a char boundary so a multibyte UTF-8 scalar at the limit cannot panic.
     let total_len = text.len();
-    let (text, mut status) = if total_len > INSPECT_TEXT_LIMIT {
-        let mut end = INSPECT_TEXT_LIMIT;
+    let (text, mut status) = if total_len > text_limit {
+        let mut end = text_limit;
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -564,7 +591,7 @@ pub fn inspect_body(
         && (content_type_lower.contains("application/json") || content_type_lower.contains("+json"))
     {
         match serde_json::from_str::<serde_json::Value>(text) {
-            Ok(value) => Some(json_strings(&value)),
+            Ok(value) => Some(json_strings(&value, text_limit)),
             Err(_) => {
                 status = InspectionOutcome::ParseError;
                 None
@@ -665,9 +692,9 @@ fn is_inspectable_content_type(content_type: Option<&str>) -> bool {
     protocol::is_l0_inspectable_content_type(content_type)
 }
 
-fn json_strings(value: &serde_json::Value) -> String {
-    fn visit(value: &serde_json::Value, output: &mut String) {
-        if output.len() >= INSPECT_TEXT_LIMIT {
+fn json_strings(value: &serde_json::Value, text_limit: usize) -> String {
+    fn visit(value: &serde_json::Value, output: &mut String, text_limit: usize) {
+        if output.len() >= text_limit {
             return;
         }
         match value {
@@ -677,20 +704,20 @@ fn json_strings(value: &serde_json::Value) -> String {
             }
             serde_json::Value::Array(values) => {
                 for value in values {
-                    visit(value, output);
+                    visit(value, output, text_limit);
                 }
             }
             serde_json::Value::Object(values) => {
                 for (key, value) in values {
                     output.push_str(key);
                     output.push('\n');
-                    visit(value, output);
+                    visit(value, output, text_limit);
                 }
             }
             _ => {}
         }
-        if output.len() > INSPECT_TEXT_LIMIT {
-            let mut end = INSPECT_TEXT_LIMIT;
+        if output.len() > text_limit {
+            let mut end = text_limit;
             while end > 0 && !output.is_char_boundary(end) {
                 end -= 1;
             }
@@ -699,7 +726,7 @@ fn json_strings(value: &serde_json::Value) -> String {
     }
 
     let mut output = String::new();
-    visit(value, &mut output);
+    visit(value, &mut output, text_limit);
     output
 }
 
@@ -739,6 +766,14 @@ pub fn inflate_for_inspect<'a>(
     body: &'a [u8],
     content_encoding: Option<&str>,
 ) -> InspectionBody<'a> {
+    inflate_for_inspect_limited(body, content_encoding, MAX_INFLATE_FOR_INSPECT)
+}
+
+pub fn inflate_for_inspect_limited<'a>(
+    body: &'a [u8],
+    content_encoding: Option<&str>,
+    inflate_limit: u64,
+) -> InspectionBody<'a> {
     let enc = content_encoding.unwrap_or("").to_ascii_lowercase();
     if enc.is_empty() || enc == "identity" {
         return InspectionBody {
@@ -751,8 +786,8 @@ pub fn inflate_for_inspect<'a>(
         return unsupported_encoding(body);
     }
     match tokens[0] {
-        "gzip" | "x-gzip" => inflate_with(MultiGzDecoder::new(body), body),
-        "deflate" => inflate_with(DeflateDecoder::new(body), body),
+        "gzip" | "x-gzip" => inflate_with(MultiGzDecoder::new(body), body, inflate_limit),
+        "deflate" => inflate_with(DeflateDecoder::new(body), body, inflate_limit),
         _ => unsupported_encoding(body),
     }
 }
@@ -764,11 +799,15 @@ fn unsupported_encoding(body: &[u8]) -> InspectionBody<'_> {
     }
 }
 
-fn inflate_with<'a, R: Read>(decoder: R, fallback: &'a [u8]) -> InspectionBody<'a> {
-    match read_capped_inflate(decoder) {
+fn inflate_with<'a, R: Read>(
+    decoder: R,
+    fallback: &'a [u8],
+    inflate_limit: u64,
+) -> InspectionBody<'a> {
+    match read_capped_inflate(decoder, inflate_limit) {
         Ok(mut out) if !out.is_empty() => {
-            let status = if out.len() as u64 > MAX_INFLATE_FOR_INSPECT {
-                out.truncate(MAX_INFLATE_FOR_INSPECT as usize);
+            let status = if out.len() as u64 > inflate_limit {
+                out.truncate(inflate_limit as usize);
                 InspectionOutcome::Truncated {
                     inspected: out.len(),
                     total_hint: None,
@@ -785,10 +824,10 @@ fn inflate_with<'a, R: Read>(decoder: R, fallback: &'a [u8]) -> InspectionBody<'
     }
 }
 
-fn read_capped_inflate<R: Read>(mut decoder: R) -> std::io::Result<Vec<u8>> {
+fn read_capped_inflate<R: Read>(mut decoder: R, inflate_limit: u64) -> std::io::Result<Vec<u8>> {
     // A fixed boxed slice makes the heap allocation match the budget exactly;
     // the final byte is only a sentinel to distinguish complete from truncated.
-    let mut buffer = vec![0_u8; max_inflate_buffer_bytes()].into_boxed_slice();
+    let mut buffer = vec![0_u8; inflate_buffer_bytes(inflate_limit)].into_boxed_slice();
     let mut filled = 0;
     while filled < buffer.len() {
         match decoder.read(&mut buffer[filled..]) {
@@ -1065,6 +1104,27 @@ mod tests {
             Cow::Borrowed(b) => assert_eq!(b, body),
             Cow::Owned(_) => panic!("identity must not copy"),
         }
+    }
+
+    #[test]
+    fn raised_text_limit_sees_sqli_past_default_window() {
+        let mut body = vec![b'a'; INSPECT_TEXT_LIMIT];
+        body.extend_from_slice(b" UNION SELECT password FROM users");
+        let truncated = inspect_body(&body, "/", "1.1.1.1", Some("text/plain"));
+        assert_eq!(truncated.verdict, WafVerdict::Allow);
+        assert!(matches!(truncated.status, InspectionOutcome::Truncated { .. }));
+        let full = inspect_body_limited(
+            &body,
+            "/",
+            "1.1.1.1",
+            Some("text/plain"),
+            body.len(),
+        );
+        assert!(
+            matches!(full.verdict, WafVerdict::Block(_)),
+            "matching window must see SQLi in the last bytes"
+        );
+        assert_eq!(full.status, InspectionOutcome::Complete);
     }
 
     #[test]

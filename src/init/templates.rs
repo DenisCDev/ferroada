@@ -25,6 +25,7 @@ macro_rules! define_topo {
             pack_file!($topo, "nginx.conf.snippet"),
             pack_file!($topo, "ORIGIN_LOCK.md"),
             pack_file!($topo, "README.md"),
+            pack_file!($topo, "tmpfiles.d/ferroada.conf"),
             pack_file!($topo, "VISIBILIDADE.md"),
         ];
     };
@@ -42,6 +43,7 @@ macro_rules! define_topo {
             pack_file!($topo, "nginx.conf.snippet"),
             pack_file!($topo, "ORIGIN_LOCK.md"),
             pack_file!($topo, "README.md"),
+            pack_file!($topo, "tmpfiles.d/ferroada.conf"),
             pack_file!($topo, "VISIBILIDADE.md"),
             $(pack_file!($topo, $extra),)+
         ];

@@ -23,6 +23,7 @@ export const EVENT_LABELS: Record<string, string> = {
   concurrency_limit: "limite de concorrência",
   connection_limit: "limite de conexões",
   request_buffer_limit: "memória de inspeção de entrada",
+  spool_limit: "limite de spool",
   dlp_partial_block: "resposta parcial bloqueada pelo DLP",
   range_removed: "range removido para inspeção DLP",
   waf_monitor: "monitoramento WAF",

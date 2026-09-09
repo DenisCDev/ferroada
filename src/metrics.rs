@@ -32,6 +32,7 @@ pub struct Metrics {
     pub blocked_concurrency_limit: AtomicU64,
     pub blocked_connection_limit: AtomicU64,
     pub blocked_request_buffer_limit: AtomicU64,
+    pub blocked_spool_limit: AtomicU64,
     pub blocked_dlp_partial: AtomicU64,
     pub https_redirect: AtomicU64,
     pub waf_inspection_complete: AtomicU64,
@@ -87,6 +88,7 @@ impl Metrics {
             blocked_concurrency_limit: AtomicU64::new(0),
             blocked_connection_limit: AtomicU64::new(0),
             blocked_request_buffer_limit: AtomicU64::new(0),
+            blocked_spool_limit: AtomicU64::new(0),
             blocked_dlp_partial: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
             waf_inspection_complete: AtomicU64::new(0),
@@ -182,6 +184,7 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
         "concurrency_limit" => &METRICS.blocked_concurrency_limit,
         "connection_limit" => &METRICS.blocked_connection_limit,
         "request_buffer_limit" => &METRICS.blocked_request_buffer_limit,
+        "spool_limit" => &METRICS.blocked_spool_limit,
         "dlp_partial_block" => &METRICS.blocked_dlp_partial,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
@@ -321,6 +324,7 @@ pub fn snapshot_json() -> String {
             "concurrency_limit": m.blocked_concurrency_limit.load(Ordering::Relaxed),
             "connection_limit": m.blocked_connection_limit.load(Ordering::Relaxed),
             "request_buffer_limit": m.blocked_request_buffer_limit.load(Ordering::Relaxed),
+            "spool_limit": m.blocked_spool_limit.load(Ordering::Relaxed),
             "dlp_partial_block": m.blocked_dlp_partial.load(Ordering::Relaxed)
         },
         "waf_inspection": {
@@ -381,6 +385,7 @@ pub fn snapshot_prometheus() -> String {
             "request_buffer_limit",
             &metrics.blocked_request_buffer_limit,
         ),
+        ("spool_limit", &metrics.blocked_spool_limit),
         ("dlp_partial_block", &metrics.blocked_dlp_partial),
     ];
     let mut output = format!(

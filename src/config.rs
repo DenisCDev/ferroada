@@ -51,6 +51,8 @@ struct InspectionPolicyFile {
     on_truncated: Option<String>,
     #[serde(default)]
     on_parse_error: Option<String>,
+    #[serde(default)]
+    max_decoded_body: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +83,7 @@ pub struct InspectionPolicy {
     pub require_complete: bool,
     pub on_truncated: InspectionAction,
     pub on_parse_error: InspectionAction,
+    pub max_decoded_body: Option<usize>,
 }
 
 impl InspectionPolicy {
@@ -89,6 +92,7 @@ impl InspectionPolicy {
             require_complete: true,
             on_truncated: InspectionAction::Deny,
             on_parse_error: InspectionAction::Deny,
+            max_decoded_body: None,
         }
     }
 
@@ -97,7 +101,12 @@ impl InspectionPolicy {
             require_complete: false,
             on_truncated: InspectionAction::Monitor,
             on_parse_error: InspectionAction::Monitor,
+            max_decoded_body: None,
         }
+    }
+
+    pub fn uses_spool(self) -> bool {
+        self.max_decoded_body.is_some()
     }
 
     pub fn disposition(self, outcome: InspectionOutcome) -> InspectionDisposition {
@@ -175,6 +184,14 @@ impl Backend {
     pub fn requires_complete_waf_inspection(&self, uri: &str) -> bool {
         self.inspection_policy(uri).require_complete
     }
+
+    pub fn uses_spool(&self) -> bool {
+        self.routes.iter().any(|route| {
+            self.inspection_policy(&route.prefix)
+                .max_decoded_body
+                .is_some()
+        })
+    }
 }
 
 pub struct Config {
@@ -217,7 +234,7 @@ impl Config {
         }
     }
 
-    fn from_toml(contents: &str) -> Self {
+    pub fn from_toml(contents: &str) -> Self {
         let file: ConfigFile = toml::from_str(contents)
             .unwrap_or_else(|error| panic!("Invalid ferroada.toml: {error}"));
         let protocols =
@@ -250,6 +267,7 @@ impl Config {
                 backend = %site.backend,
                 "Site configured"
             );
+            validate_spool_routes(&backend);
             backends.push(backend);
 
             for host in &site.hosts {
@@ -272,6 +290,7 @@ impl Config {
             backend.site_scope = "__default__".to_string();
             let idx = backends.len();
             info!(backend = %url, "Default backend configured");
+            validate_spool_routes(&backend);
             backends.push(backend);
             idx
         });
@@ -325,6 +344,10 @@ impl Config {
 
     pub fn backend_addresses(&self) -> Vec<SocketAddr> {
         self.backends.iter().map(|backend| backend.addr).collect()
+    }
+
+    pub fn has_spool_routes(&self) -> bool {
+        self.backends.iter().any(Backend::uses_spool)
     }
 }
 
@@ -387,6 +410,7 @@ fn fail_closed_patch() -> InspectionPolicyFile {
         require_complete: Some(true),
         on_truncated: Some("deny".into()),
         on_parse_error: Some("deny".into()),
+        max_decoded_body: None,
     }
 }
 
@@ -398,7 +422,44 @@ fn merge_patches(
         require_complete: overlay.require_complete.or(base.require_complete),
         on_truncated: overlay.on_truncated.or(base.on_truncated),
         on_parse_error: overlay.on_parse_error.or(base.on_parse_error),
+        max_decoded_body: overlay.max_decoded_body.or(base.max_decoded_body),
     }
+}
+
+fn validate_spool_routes(backend: &Backend) {
+    for route in &backend.routes {
+        let policy = backend.inspection_policy(&route.prefix);
+        if policy.max_decoded_body.is_some() && !policy.require_complete {
+            panic!(
+                "max_decoded_body exige inspection.require_complete na rota {}",
+                route.prefix
+            );
+        }
+    }
+}
+
+pub fn parse_byte_size(raw: &str) -> Result<usize, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("tamanho vazio".into());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let (number, multiplier) = if let Some(number) = lower.strip_suffix("kib") {
+        (number.trim(), 1024usize)
+    } else if let Some(number) = lower.strip_suffix("mib") {
+        (number.trim(), 1024 * 1024)
+    } else if let Some(number) = lower.strip_suffix("gib") {
+        (number.trim(), 1024 * 1024 * 1024)
+    } else {
+        (trimmed, 1usize)
+    };
+    let value: usize = number
+        .parse()
+        .map_err(|_| format!("tamanho inválido: {raw}"))?;
+    value
+        .checked_mul(multiplier)
+        .filter(|size| *size > 0)
+        .ok_or_else(|| format!("tamanho inválido: {raw}"))
 }
 
 fn patch_denies_incomplete(patch: &InspectionPolicyFile) -> bool {
@@ -471,6 +532,10 @@ fn overlay_inspection_policy(
             } else {
                 base.on_parse_error
             }),
+        max_decoded_body: match patch.max_decoded_body.as_deref() {
+            Some(raw) => Some(parse_byte_size(raw).unwrap_or_else(|error| panic!("{error}"))),
+            None => base.max_decoded_body,
+        },
     }
 }
 
@@ -790,8 +855,8 @@ inspection.on_parse_error = "deny"
     }
 
     #[test]
-    fn max_decoded_body_is_a_parse_error_until_spool() {
-        let error = toml::from_str::<ConfigFile>(
+    fn max_decoded_body_loads_on_require_complete() {
+        let config = Config::from_toml(
             r#"
 [[sites]]
 hosts = ["api.example"]
@@ -800,15 +865,54 @@ backend = "http://127.0.0.1:8080"
 [[sites.routes]]
 prefix = "/api/payment"
 inspection.require_complete = true
-inspection.max_decoded_body = "2MiB"
+inspection.max_decoded_body = "256KiB"
 "#,
-        )
-        .unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("max_decoded_body"),
-            "expected unknown-field parse error, got {message}"
         );
+        let policy = config
+            .resolve("api.example")
+            .unwrap()
+            .inspection_policy("/api/payment");
+        assert!(policy.require_complete);
+        assert_eq!(policy.max_decoded_body, Some(256 * 1024));
+        assert!(config.has_spool_routes());
+    }
+
+    #[test]
+    fn max_decoded_body_without_require_complete_is_a_load_error() {
+        let result = std::panic::catch_unwind(|| {
+            Config::from_toml(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/api/search"
+inspection.max_decoded_body = "256KiB"
+"#,
+            )
+        });
+        let Err(payload) = result else {
+            panic!("load must fail without require_complete");
+        };
+        let message = payload
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("require_complete"),
+            "expected require_complete load error, got {message}"
+        );
+    }
+
+    #[test]
+    fn parse_byte_size_accepts_kib_mib() {
+        assert_eq!(parse_byte_size("256KiB").unwrap(), 256 * 1024);
+        assert_eq!(parse_byte_size("2MiB").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_byte_size("64").unwrap(), 64);
+        assert!(parse_byte_size("0").is_err());
+        assert!(parse_byte_size("").is_err());
     }
 
     #[test]

@@ -18,6 +18,7 @@ export type BlockedKey =
   | "behavioral_throttle"
   | "behavioral_block"
   | "request_buffer_limit"
+  | "spool_limit"
   | "dlp_partial_block";
 
 const countSchema = z.number().finite().nonnegative();

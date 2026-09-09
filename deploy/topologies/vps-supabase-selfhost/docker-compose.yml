@@ -22,6 +22,7 @@ services:
     volumes:
       - ./ferroada.toml:/ferroada.toml:ro
       - ./certs:/certs:ro
+      - ferroada_spool:/var/lib/ferroada/spool
     working_dir: /
     ports:
       - "80:3000"
@@ -37,3 +38,6 @@ networks:
   origin:
     name: ${ORIGIN_NETWORK:-origin}
     external: true
+
+volumes:
+  ferroada_spool:

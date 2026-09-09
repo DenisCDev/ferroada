@@ -22,6 +22,11 @@ Coloque o binário em `/usr/local/bin/ferroada` antes. Se o Caddy corre no host,
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin ferroada
+sudo mkdir -p /var/lib/ferroada/spool
+sudo chown ferroada:ferroada /var/lib/ferroada/spool
+sudo chmod 0700 /var/lib/ferroada/spool
+sudo cp tmpfiles.d/ferroada.conf /etc/tmpfiles.d/ferroada.conf
+sudo systemd-tmpfiles --create
 sudo mkdir -p /etc/ferroada
 sudo cp ferroada.toml /etc/ferroada/
 sudo cp .env /etc/ferroada/env

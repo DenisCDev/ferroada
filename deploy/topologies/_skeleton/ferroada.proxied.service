@@ -20,6 +20,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadOnlyPaths=/etc/ferroada
+ReadWritePaths=/var/lib/ferroada/spool
 # Caddy/nginx na frente em :80/:443. Sem cap: o processo não publica :80.
 # Não use junto com ferroada.privileged.service.
 

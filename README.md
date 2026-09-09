@@ -115,11 +115,15 @@ cliente mandou `Content-Encoding: gzip`
 ou `deflate` o WAF infla uma cópia só para inspecionar — os bytes originais
 seguem para o upstream somente depois da decisão. No Pingora 0.8.1, o replay
 seguro antes do upstream é limitado a 64KB; por isso `MAX_BODY_SIZE` também é
-limitado a 65536 bytes. A inspeção olha esses 64KB do texto
-(inflado, se for o caso) e registra o resultado como `complete`, `truncated`,
+limitado a 65536 bytes, **exceto** rotas `require_complete` com
+`max_decoded_body` — aí os três tetos (bytes no fio, texto do WAF, inflate)
+sobem juntos para esse número, o body fica num spool e o origin só recebe
+depois do outcome. Sem `max_decoded_body` o processo não cria
+`/var/lib/ferroada/spool`. A inspeção registra `complete`, `truncated`,
 `unsupported_encoding` ou `unsupported_content_type`. Um gzip gigante é
-cortado em 256KB inflados, então um zip bomb não estoura a memória. Rotas
-sensíveis podem exigir inspeção completa e rejeitar qualquer outro estado.
+cortado no teto de inflate da rota (256KB no default), então um zip bomb não
+estoura a memória. Rotas sensíveis podem exigir inspeção completa e rejeitar
+qualquer outro estado.
 JSON é parseado para expor escapes como `\u003c`; form-urlencoded trata `+` e
 percent-encoding; GraphQL textual passa pela mesma canonicalização de texto.
 gRPC/binário, encodings desconhecidos e multipart não textual ficam explícitos
@@ -395,7 +399,10 @@ Toda a configuração é feita por variáveis de ambiente:
 | `CSP_POLICY` | *(desativada)* | Content-Security-Policy — só ative sabendo o que está fazendo |
 | `PERMISSIONS_POLICY` | *(desativada)* | Permissions-Policy — só ative se não usar câmera/mic/geolocalização |
 | `ALLOWED_METHODS` | `GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS` | Métodos HTTP permitidos |
-| `MAX_BODY_SIZE` | `65536` | Tamanho máximo do body; valores maiores são limitados a 64KB pelo replay seguro do Pingora 0.8.1 |
+| `MAX_BODY_SIZE` | `65536` | Tamanho máximo do body; valores maiores são limitados a 64KB pelo replay seguro do Pingora 0.8.1. Rotas com `max_decoded_body` usam esse teto no lugar. |
+| `SPOOL_DIR` | *(unset = off)* | Diretório de spool; só é validado/limpo se alguma rota tem `max_decoded_body`. Default nesse modo: `/var/lib/ferroada/spool` |
+| `SPOOL_MAX_BYTES` | `536870912` | Teto agregado de bytes de spool (512 MiB) |
+| `SPOOL_MAX_FILES` | `256` | Teto de ficheiros `spool-*` simultâneos |
 | `WAF_MAX_IN_FLIGHT_BYTES` | `67108864` | Reserva global para a cópia local, o replay do Pingora e o buffer de inspeção descompactada (256 KiB + byte sentinela) |
 | `MAX_URI_LENGTH` | `8192` | Tamanho máximo da URI em bytes (8KB) |
 | `ALLOWED_HOSTS` | *(desativada)* | Allowlist de domínios no Host header (ex.: `meusite.com,www.meusite.com`) |

@@ -793,6 +793,10 @@ fn prepare_out(out: &Path) -> Result<(), String> {
 }
 
 fn write_file(path: &Path, body: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("não criou {}: {error}", parent.display()))?;
+    }
     fs::write(path, body).map_err(|error| format!("não escreveu {}: {error}", path.display()))
 }
 
