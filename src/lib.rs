@@ -19,3 +19,4 @@ pub mod rate_limit;
 pub mod shield;
 pub mod spool;
 pub mod waf;
+pub mod waf_engine;

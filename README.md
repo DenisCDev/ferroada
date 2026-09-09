@@ -104,6 +104,14 @@ sejam ataques. `wordpress` monitora esses acessos sem bloquear; `strict` os
 bloqueia. Arquivos realmente sensíveis, como `wp-config.php`, continuam
 bloqueados em todos os profiles.
 
+L0 (regex) fica sempre ligado. L1 é um sidecar Coraza com CRS 4.25 LTS no
+Unix socket, opt-in (`WAF_ENGINE=coraza`). O binário do Ferroada não liga
+Coraza: um crash no ruleset não derruba o proxy. Timeout default 500 ms;
+o processo só marca o engine `coraza` depois do ready probe. Sidecar
+ausente numa rota `require_complete` responde 403 e conta
+`waf_engine_unavailable` — não desliga o WAF em silêncio. Ver
+`deploy/coraza/`.
+
 #### Inspeção de body
 
 O body de qualquer método permitido é inspecionado antes de chegar ao backend.
@@ -417,6 +425,9 @@ Toda a configuração é feita por variáveis de ambiente:
 | `BAD_BOT_ENABLED` | `true` | Bloqueio por assinatura de User-Agent (sqlmap, nikto, ...) |
 | `WAF_PROFILE` | `generic` | `generic`, `wordpress` (monitor) ou `strict` para paths operacionais do WordPress |
 | `WAF_REQUIRE_COMPLETE_PATHS` | *(vazio)* | Prefixos fail-closed no modo single-site, separados por vírgula |
+| `WAF_ENGINE` | `native` | `native` (só L0) ou `coraza` (L1 sidecar; exige Unix socket e ready probe) |
+| `WAF_SIDECAR_SOCKET` | `/run/coraza/waf.sock` | Socket do sidecar L1 |
+| `WAF_SIDECAR_TIMEOUT_MS` | `500` | Teto da chamada L1. 20 ms devolveria 403 em tráfego limpo no cold start do CRS |
 | `BEHAVIORAL_ENABLED` | `true` | Score de comportamento por site/rede |
 | `BEHAVIORAL_SLOW_THRESHOLD` | `50` | Pontos para começar a frear o IP |
 | `BEHAVIORAL_BLOCK_THRESHOLD` | `80` | Pontos para banir o IP |

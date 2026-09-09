@@ -27,6 +27,8 @@ export const EVENT_LABELS: Record<string, string> = {
   dlp_partial_block: "resposta parcial bloqueada pelo DLP",
   range_removed: "range removido para inspeção DLP",
   waf_monitor: "monitoramento WAF",
+  waf_l1: "WAF L1 (CRS)",
+  waf_engine_unavailable: "motor WAF L1 indisponível",
   dlp_skip: "DLP não aplicado",
   dlp: "DLP",
   https_redirect: "redirecionamento HTTPS",
