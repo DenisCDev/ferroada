@@ -1,7 +1,8 @@
 <h1 align="center">Ferroada</h1>
 
 <p align="center">
-  <b>Proxy reverso de segurança: WAF, DLP e análise de comportamento na frente do seu sistema, sem mudar uma linha dele</b><br>
+  <b>Na frente do seu app. No seu servidor.</b><br>
+  Bloqueia o ataque e segura o que não podia vazar. Você não mexe no código e não manda o tráfego pra nuvem de ninguém.<br>
   <sub><i>"I will give you a name, and I shall call you Sting."</i></sub>
 </p>
 
@@ -26,10 +27,11 @@ comum, e a maioria dos sistemas só percebe quando o estrago já está no log. C
 o backend é o caminho certo, e também o mais lento: cada framework, cada versão,
 cada sistema legado é uma frente nova.
 
-O Ferroada ataca o problema pela infraestrutura: um proxy reverso que fica **na
-frente** do sistema existente, sem alterar uma linha dele. Bloqueia ataque conhecido
+O Ferroada ataca o problema pela infraestrutura: fica **na frente do seu app,
+no seu servidor**, sem alterar uma linha dele. Bloqueia ataque conhecido
 na entrada, mascara dado sensível na saída e mantém um score por site e rede do cliente
-— quem age como scanner é freado antes de achar alguma coisa. Construído com
+— quem age como scanner é freado antes de achar alguma coisa. DDoS fica no CDN.
+Quem olha a request da sua API é o Ferroada, no seu servidor. Construído com
 [Pingora 0.8.1](https://github.com/cloudflare/pingora/releases/tag/0.8.1), o motor de proxy da Cloudflare,
 compilado num binário único e distribuído como container distroless de ~20MB.
 Esta versão limita por padrão os headers HTTP/2 decodificados a 64 KiB e cada
@@ -551,6 +553,7 @@ backend direto.
 ### Produção atrás de uma borda
 
 O desenho recomendado é `Internet → Cloudflare/CDN/LB → Ferroada → backend`.
+DDoS fica no CDN. Quem olha a request da sua API é o Ferroada, no seu servidor.
 Restrinja a origem para aceitar somente a borda (firewall, tunnel privado ou
 mTLS) e cadastre os CIDRs dela em `TRUSTED_PROXIES`. O Ferroada não substitui
 Anycast nem mitigação DDoS L3/L4: se o link da máquina saturar, o processo não
