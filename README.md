@@ -1,7 +1,8 @@
 <h1 align="center">Ferroada</h1>
 
 <p align="center">
-  <b>Proxy reverso de segurança: WAF, DLP e análise de comportamento na frente do seu sistema, sem mudar uma linha dele</b><br>
+  <b>Na frente do seu app. No seu servidor.</b><br>
+  Bloqueia o ataque e segura o que não podia vazar. Você não mexe no código e não manda o tráfego pra nuvem de ninguém.<br>
   <sub><i>"I will give you a name, and I shall call you Sting."</i></sub>
 </p>
 
@@ -26,10 +27,11 @@ comum, e a maioria dos sistemas só percebe quando o estrago já está no log. C
 o backend é o caminho certo, e também o mais lento: cada framework, cada versão,
 cada sistema legado é uma frente nova.
 
-O Ferroada ataca o problema pela infraestrutura: um proxy reverso que fica **na
-frente** do sistema existente, sem alterar uma linha dele. Bloqueia ataque conhecido
+O Ferroada ataca o problema pela infraestrutura: fica **na frente do seu app,
+no seu servidor**, sem alterar uma linha dele. Bloqueia ataque conhecido
 na entrada, mascara dado sensível na saída e mantém um score por site e rede do cliente
-— quem age como scanner é freado antes de achar alguma coisa. Construído com
+— quem age como scanner é freado antes de achar alguma coisa. DDoS fica no CDN.
+Quem olha a request da sua API é o Ferroada, no seu servidor. Construído com
 [Pingora 0.8.1](https://github.com/cloudflare/pingora/releases/tag/0.8.1), o motor de proxy da Cloudflare,
 compilado num binário único e distribuído como container distroless de ~20MB.
 Esta versão limita por padrão os headers HTTP/2 decodificados a 64 KiB e cada
@@ -113,11 +115,15 @@ cliente mandou `Content-Encoding: gzip`
 ou `deflate` o WAF infla uma cópia só para inspecionar — os bytes originais
 seguem para o upstream somente depois da decisão. No Pingora 0.8.1, o replay
 seguro antes do upstream é limitado a 64KB; por isso `MAX_BODY_SIZE` também é
-limitado a 65536 bytes. A inspeção olha esses 64KB do texto
-(inflado, se for o caso) e registra o resultado como `complete`, `truncated`,
+limitado a 65536 bytes, **exceto** rotas `require_complete` com
+`max_decoded_body` — aí os três tetos (bytes no fio, texto do WAF, inflate)
+sobem juntos para esse número, o body fica num spool e o origin só recebe
+depois do outcome. Sem `max_decoded_body` o processo não cria
+`/var/lib/ferroada/spool`. A inspeção registra `complete`, `truncated`,
 `unsupported_encoding` ou `unsupported_content_type`. Um gzip gigante é
-cortado em 256KB inflados, então um zip bomb não estoura a memória. Rotas
-sensíveis podem exigir inspeção completa e rejeitar qualquer outro estado.
+cortado no teto de inflate da rota (256KB no default), então um zip bomb não
+estoura a memória. Rotas sensíveis podem exigir inspeção completa e rejeitar
+qualquer outro estado.
 JSON é parseado para expor escapes como `\u003c`; form-urlencoded trata `+` e
 percent-encoding; GraphQL textual passa pela mesma canonicalização de texto.
 gRPC/binário, encodings desconhecidos e multipart não textual ficam explícitos
@@ -258,6 +264,8 @@ segurança completa, o backend precisa de validação própria.
 
 ## Quick start
 
+Laboratório na sua máquina. Produção: copie um pack em [`deploy/topologies/`](deploy/topologies/) — o dashboard fica em loopback e **não** se publica na internet.
+
 ### 1. Build
 
 ```bash
@@ -270,15 +278,16 @@ docker build -t ferroada .
 docker run -d \
   -e TARGET_URL=http://host.docker.internal:8080 \
   -e RUST_LOG=info \
-  -e DASHBOARD_BIND=0.0.0.0 \
+  -e DASHBOARD_BIND=127.0.0.1 \
   -e DASHBOARD_TOKEN='troque-por-um-token-longo' \
   -e RATE_LIMIT_MAX=100 \
   -e RATE_LIMIT_WINDOW=60 \
   -p 3000:3000 \
-  -p 9000:9000 \
   --name ferroada \
   ferroada
 ```
+
+O dashboard escuta `127.0.0.1:9000` **dentro** do contêiner. No laboratório, entre com `docker exec` ou publique só no loopback do anfitrião. Em produção use o túnel `ssh -L 9000:127.0.0.1:9000`.
 
 ### 3. Testar
 
@@ -309,11 +318,37 @@ for i in $(seq 1 105); do
   curl -s -o /dev/null -w "%{http_code} " http://localhost:3000/
 done
 
-# Dashboard
+# Dashboard (só se publicou o loopback do anfitrião)
 curl -H 'Authorization: Bearer troque-por-um-token-longo' \
-  http://localhost:9000/api/metrics
-# Ou abra http://localhost:9000 no navegador
+  http://127.0.0.1:9000/api/metrics
 ```
+
+---
+
+## Modos de instalação
+
+O binário é um processo Pingora. Não corre na Hostinger nem como função na Vercel. Cada pasta em `deploy/topologies/` é um pack fail-closed: toml, env, Compose, unit systemd, origin-lock e um `VISIBILIDADE.md` honesto.
+
+| Modo | Quando usar |
+|------|-------------|
+| [`vps-site`](deploy/topologies/vps-site/) | VPS com o site (frontend + backend) |
+| [`vps-api`](deploy/topologies/vps-api/) | VPS só com a API |
+| [`vps-supabase-selfhost`](deploy/topologies/vps-supabase-selfhost/) | API + Supabase auto-hospedado (Kong) |
+| [`vps-supabase-cloud`](deploy/topologies/vps-supabase-cloud/) | API na VPS, Supabase Cloud |
+| [`vps-full`](deploy/topologies/vps-full/) | Tudo na VPS |
+| [`hostinger-origin`](deploy/topologies/hostinger-origin/) | Estático na Hostinger; Ferroada numa VPS à frente |
+| [`vercel-origin`](deploy/topologies/vercel-origin/) | App na Vercel; Ferroada numa VPS à frente |
+| [`cdn-edge`](deploy/topologies/cdn-edge/) | Internet → CDN → Ferroada → backend (recomendado) |
+
+Comece pelo `CHECKLIST.md` do modo. TLS: o Ferroada termina se houver `fullchain.pem`; senão Caddy na frente. Os dois nunca publicam a 443 ao mesmo tempo. CIDRs do edge: `deploy/cidrs/` (snapshot datado, sem fetch no processo).
+
+```bash
+ferroada init --topology vps-api --origin http://127.0.0.1:8080 --public-host api.exemplo.com --non-interactive
+ferroada init --topology cdn-edge --origin http://127.0.0.1:8080 --public-host api.exemplo.com --trusted-proxies auto --non-interactive
+ferroada healthcheck   # GET 127.0.0.1:9000/healthz; exit 0/1. Distroless não tem curl.
+```
+
+`--trusted-proxies auto` copia o snapshot em `deploy/cidrs/` (embutido no binário). Zero HTTP. Para actualizar a lista: `ferroada cidrs update` (HTTP só neste comando; `--cidrs-from-network` não existe no `init`). `--listen-mode privileged` emite :80/:443 **e** `CAP_NET_BIND_SERVICE`; `proxied` deixa o processo em 127.0.0.1:3000 com Caddy na frente.
 
 ---
 
@@ -352,22 +387,31 @@ Toda a configuração é feita por variáveis de ambiente:
 | `GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `30` | Limite da fase final de shutdown gracioso |
 | `TLS_CERT_PATH` | *(opcional)* | Caminho para o certificado TLS (fullchain.pem) |
 | `TLS_KEY_PATH` | *(opcional)* | Caminho para a chave privada TLS |
+| `PROXY_LISTEN` | `0.0.0.0:3000` | Endereço do listener HTTP |
+| `TLS_LISTEN` | `0.0.0.0:3443` | Endereço do listener HTTPS (só se `TLS_CERT_PATH`/`TLS_KEY_PATH`) |
 | `DASHBOARD_PORT` | `9000` | Porta do dashboard de monitoramento |
 | `DASHBOARD_BIND` | `127.0.0.1` | IP do dashboard; bind não-loopback exige token |
-| `DASHBOARD_TOKEN` | *(vazio em loopback)* | Token Bearer; obrigatório quando exposto fora de loopback |
+| `DASHBOARD_TOKEN` | *(vazio em loopback)* | Token Bearer; obrigatório fora de loopback e com `FERROADA_PRODUCTION=true` |
+| `FERROADA_PRODUCTION` | *(unset)* | Se `true`, o token é obrigatório mesmo em 127.0.0.1. O HTML continua público (formulário); `/api/metrics` e `/metrics` exigem Bearer |
 | `TRUSTED_PROXIES` | *(vazio)* | CIDRs autorizados a enviar XFF/X-Forwarded-Proto |
 | `SECURITY_HEADERS` | `true` | Injetar headers seguros nas respostas (nosniff, X-Frame, Referrer) |
 | `FRAME_OPTIONS` | `SAMEORIGIN` | Valor de X-Frame-Options; `off` preserva o upstream |
 | `CSP_POLICY` | *(desativada)* | Content-Security-Policy — só ative sabendo o que está fazendo |
 | `PERMISSIONS_POLICY` | *(desativada)* | Permissions-Policy — só ative se não usar câmera/mic/geolocalização |
 | `ALLOWED_METHODS` | `GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS` | Métodos HTTP permitidos |
-| `MAX_BODY_SIZE` | `65536` | Tamanho máximo do body; valores maiores são limitados a 64KB pelo replay seguro do Pingora 0.8.1 |
+| `MAX_BODY_SIZE` | `65536` | Tamanho máximo do body; valores maiores são limitados a 64KB pelo replay seguro do Pingora 0.8.1. Rotas com `max_decoded_body` usam esse teto no lugar. |
+| `SPOOL_DIR` | *(unset = off)* | Diretório de spool; só é validado/limpo se alguma rota tem `max_decoded_body`. Default nesse modo: `/var/lib/ferroada/spool` |
+| `SPOOL_MAX_BYTES` | `536870912` | Teto agregado de bytes de spool (512 MiB) |
+| `SPOOL_MAX_FILES` | `256` | Teto de ficheiros `spool-*` simultâneos |
 | `WAF_MAX_IN_FLIGHT_BYTES` | `67108864` | Reserva global para a cópia local, o replay do Pingora e o buffer de inspeção descompactada (256 KiB + byte sentinela) |
 | `MAX_URI_LENGTH` | `8192` | Tamanho máximo da URI em bytes (8KB) |
 | `ALLOWED_HOSTS` | *(desativada)* | Allowlist de domínios no Host header (ex.: `meusite.com,www.meusite.com`) |
 | `FORCE_HTTPS` | `false` | Redirecionar HTTP → HTTPS (requer TLS configurado) |
 | `HTTPS_REDIRECT_HOST` | *(vazio)* | Host público confiável para redirect no modo single-site/default |
-| `DLP_ENABLED` | `true` | Mascaramento de CPF e tokens nas respostas |
+| `DLP_ENABLED` | `true` | Liga a inspeção DLP de CPF e tokens nas respostas |
+| `DLP_ACTION` | `redact` se unset e `DLP_ENABLED=true` | `monitor` (conta, não mascara), `redact` (mascara), `block` (502 se achar PII ou o buffer estourar). Packs de produção emitem `monitor` |
+| `ORIGIN_SECRET_HEADER` | `X-Ferroada-Origin` se só `ORIGIN_SECRET` existir | Nome do header injetado no upstream. Unset com secret vazio = não injeta |
+| `ORIGIN_SECRET` | *(unset)* | Valor do header de origem. Nunca logado. Vazio = não injeta |
 | `DLP_MAX_RESPONSE_BYTES` | `1048576` | Buffer máximo por resposta textual inspecionada pelo DLP |
 | `DLP_MAX_IN_FLIGHT_BYTES` | `67108864` | Budget global de memória para buffers DLP simultâneos |
 | `BAD_BOT_ENABLED` | `true` | Bloqueio por assinatura de User-Agent (sqlmap, nikto, ...) |
@@ -415,13 +459,12 @@ configurados recebem `421 Misdirected Request`.
 - A env `ALLOWED_HOSTS` continua funcionando como restrição adicional
 
 ```bash
-# Multi-site com Docker
+# Multi-site com Docker (laboratório). Produção: deploy/topologies/
 docker run -d \
   -v ./ferroada.toml:/ferroada.toml:ro \
-  -e DASHBOARD_BIND=0.0.0.0 \
+  -e DASHBOARD_BIND=127.0.0.1 \
   -e DASHBOARD_TOKEN='troque-por-um-token-longo' \
   -p 3000:3000 \
-  -p 9000:9000 \
   ferroada
 ```
 
@@ -434,12 +477,11 @@ docker run -d \
   -e TARGET_URL=http://backend:8080 \
   -e TLS_CERT_PATH=/certs/fullchain.pem \
   -e TLS_KEY_PATH=/certs/privkey.pem \
-  -e DASHBOARD_BIND=0.0.0.0 \
+  -e DASHBOARD_BIND=127.0.0.1 \
   -e DASHBOARD_TOKEN='troque-por-um-token-longo' \
   -v /etc/letsencrypt/live/meudominio:/certs:ro \
   -p 443:3443 \
   -p 80:3000 \
-  -p 9000:9000 \
   ferroada
 ```
 
@@ -455,11 +497,10 @@ services:
     build: ./ferroada
     ports:
       - "80:3000"
-      - "9000:9000"
     environment:
       - TARGET_URL=http://app:8080
       - RATE_LIMIT_MAX=100
-      - DASHBOARD_BIND=0.0.0.0
+      - DASHBOARD_BIND=127.0.0.1
       - DASHBOARD_TOKEN=${FERROADA_DASHBOARD_TOKEN}
     depends_on:
       - app
@@ -470,6 +511,8 @@ services:
       - "8080"
 ```
 
+O dashboard não se publica na internet. Túnel: `ssh -L 9000:127.0.0.1:9000`. Nos packs Docker o mapa é só `127.0.0.1:9000` no anfitrião. Packs completos: `deploy/topologies/`.
+
 ### Docker Compose (multi-site)
 
 ```yaml
@@ -478,9 +521,8 @@ services:
     build: ./ferroada
     ports:
       - "80:3000"
-      - "9000:9000"
     environment:
-      - DASHBOARD_BIND=0.0.0.0
+      - DASHBOARD_BIND=127.0.0.1
       - DASHBOARD_TOKEN=${FERROADA_DASHBOARD_TOKEN}
     volumes:
       - ./ferroada.toml:/ferroada.toml:ro
@@ -521,6 +563,7 @@ backend direto.
 ### Produção atrás de uma borda
 
 O desenho recomendado é `Internet → Cloudflare/CDN/LB → Ferroada → backend`.
+DDoS fica no CDN. Quem olha a request da sua API é o Ferroada, no seu servidor.
 Restrinja a origem para aceitar somente a borda (firewall, tunnel privado ou
 mTLS) e cadastre os CIDRs dela em `TRUSTED_PROXIES`. O Ferroada não substitui
 Anycast nem mitigação DDoS L3/L4: se o link da máquina saturar, o processo não

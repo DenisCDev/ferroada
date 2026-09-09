@@ -1,10 +1,13 @@
 use once_cell::sync::Lazy;
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-const MAX_EVENTS: usize = 100;
+/// Events kept per `site_scope`. One tenant filling its ring must not
+/// erase another tenant's events (was a single global ring of 100).
+pub const MAX_EVENTS_PER_SITE: usize = 50;
+pub const UNSCOPED_SITE: &str = "__unscoped__";
 
 pub static METRICS: Lazy<Metrics> = Lazy::new(Metrics::new);
 
@@ -27,20 +30,37 @@ pub struct Metrics {
     pub blocked_behavioral_throttle: AtomicU64,
     pub blocked_behavioral_block: AtomicU64,
     pub blocked_waf_incomplete: AtomicU64,
+    pub blocked_inspection_parse_error: AtomicU64,
     pub blocked_header_limit: AtomicU64,
     pub blocked_concurrency_limit: AtomicU64,
     pub blocked_connection_limit: AtomicU64,
     pub blocked_request_buffer_limit: AtomicU64,
+    pub blocked_spool_limit: AtomicU64,
     pub blocked_dlp_partial: AtomicU64,
     pub https_redirect: AtomicU64,
     pub waf_inspection_complete: AtomicU64,
     pub waf_inspection_truncated: AtomicU64,
     pub waf_inspection_unsupported_encoding: AtomicU64,
     pub waf_inspection_unsupported_content_type: AtomicU64,
+    pub waf_inspection_parse_error: AtomicU64,
+    pub waf_inspection_budget_exceeded: AtomicU64,
+    pub waf_inspection_timed_out: AtomicU64,
     pub waf_monitored: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
-    pub recent_events: Mutex<VecDeque<SecurityEvent>>,
+    pub protocol_deny: AtomicU64,
+    pub protocol_monitor: AtomicU64,
+    pub protocol_bypass: AtomicU64,
+    pub protocol_quarantine: AtomicU64,
+    protocol_by_id: Mutex<HashMap<(String, String), u64>>,
+    events_by_site: Mutex<HashMap<String, VecDeque<StoredEvent>>>,
+    event_seq: AtomicU64,
+}
+
+#[derive(Clone)]
+struct StoredEvent {
+    seq: u64,
+    event: SecurityEvent,
 }
 
 #[derive(Serialize, Clone)]
@@ -50,6 +70,7 @@ pub struct SecurityEvent {
     pub client_ip: String,
     pub uri: String,
     pub detail: String,
+    pub site_scope: String,
 }
 
 impl Metrics {
@@ -73,30 +94,68 @@ impl Metrics {
             blocked_behavioral_throttle: AtomicU64::new(0),
             blocked_behavioral_block: AtomicU64::new(0),
             blocked_waf_incomplete: AtomicU64::new(0),
+            blocked_inspection_parse_error: AtomicU64::new(0),
             blocked_header_limit: AtomicU64::new(0),
             blocked_concurrency_limit: AtomicU64::new(0),
             blocked_connection_limit: AtomicU64::new(0),
             blocked_request_buffer_limit: AtomicU64::new(0),
+            blocked_spool_limit: AtomicU64::new(0),
             blocked_dlp_partial: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
             waf_inspection_complete: AtomicU64::new(0),
             waf_inspection_truncated: AtomicU64::new(0),
             waf_inspection_unsupported_encoding: AtomicU64::new(0),
             waf_inspection_unsupported_content_type: AtomicU64::new(0),
+            waf_inspection_parse_error: AtomicU64::new(0),
+            waf_inspection_budget_exceeded: AtomicU64::new(0),
+            waf_inspection_timed_out: AtomicU64::new(0),
             waf_monitored: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
-            recent_events: Mutex::new(VecDeque::with_capacity(MAX_EVENTS)),
+            protocol_deny: AtomicU64::new(0),
+            protocol_monitor: AtomicU64::new(0),
+            protocol_bypass: AtomicU64::new(0),
+            protocol_quarantine: AtomicU64::new(0),
+            protocol_by_id: Mutex::new(HashMap::new()),
+            events_by_site: Mutex::new(HashMap::new()),
+            event_seq: AtomicU64::new(0),
         }
     }
 
-    fn push_event(&self, event: SecurityEvent) {
-        if let Ok(mut events) = self.recent_events.lock() {
-            if events.len() >= MAX_EVENTS {
-                events.pop_front();
+    fn push_event(&self, site_scope: &str, mut event: SecurityEvent) {
+        let site = normalize_site(site_scope);
+        event.site_scope = site.clone();
+        let seq = self.event_seq.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut by_site) = self.events_by_site.lock() {
+            let ring = by_site
+                .entry(site)
+                .or_insert_with(|| VecDeque::with_capacity(MAX_EVENTS_PER_SITE));
+            if ring.len() >= MAX_EVENTS_PER_SITE {
+                ring.pop_front();
             }
-            events.push_back(event);
+            ring.push_back(StoredEvent { seq, event });
         }
+    }
+
+    fn snapshot_events(&self) -> Vec<SecurityEvent> {
+        let Ok(by_site) = self.events_by_site.lock() else {
+            return Vec::new();
+        };
+        let mut collected: Vec<(u64, SecurityEvent)> = by_site
+            .values()
+            .flat_map(|ring| ring.iter().map(|stored| (stored.seq, stored.event.clone())))
+            .collect();
+        collected.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq));
+        collected.into_iter().map(|(_, event)| event).collect()
+    }
+}
+
+fn normalize_site(site_scope: &str) -> String {
+    let trimmed = site_scope.trim();
+    if trimmed.is_empty() {
+        UNSCOPED_SITE.to_string()
+    } else {
+        trimmed.to_ascii_lowercase()
     }
 }
 
@@ -141,6 +200,16 @@ pub fn increment_requests() {
 }
 
 pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) {
+    record_block_in(UNSCOPED_SITE, event_type, client_ip, uri, detail);
+}
+
+pub fn record_block_in(
+    site_scope: &str,
+    event_type: &str,
+    client_ip: &str,
+    uri: &str,
+    detail: &str,
+) {
     let counter = match event_type {
         "sqli" => &METRICS.blocked_sqli,
         "xss" => &METRICS.blocked_xss,
@@ -159,23 +228,76 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
         "behavioral_throttle" => &METRICS.blocked_behavioral_throttle,
         "behavioral_block" => &METRICS.blocked_behavioral_block,
         "waf_incomplete" => &METRICS.blocked_waf_incomplete,
+        "inspection_parse_error" => &METRICS.blocked_inspection_parse_error,
         "header_limit" => &METRICS.blocked_header_limit,
         "concurrency_limit" => &METRICS.blocked_concurrency_limit,
         "connection_limit" => &METRICS.blocked_connection_limit,
         "request_buffer_limit" => &METRICS.blocked_request_buffer_limit,
+        "spool_limit" => &METRICS.blocked_spool_limit,
         "dlp_partial_block" => &METRICS.blocked_dlp_partial,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
     };
     counter.fetch_add(1, Ordering::Relaxed);
 
-    METRICS.push_event(SecurityEvent {
-        timestamp: now_iso(),
-        event_type: event_type.to_string(),
-        client_ip: client_ip.to_string(),
-        uri: uri.to_string(),
-        detail: detail.to_string(),
-    });
+    METRICS.push_event(
+        site_scope,
+        SecurityEvent {
+            timestamp: now_iso(),
+            event_type: event_type.to_string(),
+            client_ip: client_ip.to_string(),
+            uri: uri.to_string(),
+            detail: detail.to_string(),
+            site_scope: String::new(),
+        },
+    );
+}
+
+pub fn record_protocol(protocol_id: &str, action: &str, client_ip: &str, uri: &str, detail: &str) {
+    record_protocol_in(UNSCOPED_SITE, protocol_id, action, client_ip, uri, detail);
+}
+
+pub fn record_protocol_in(
+    site_scope: &str,
+    protocol_id: &str,
+    action: &str,
+    client_ip: &str,
+    uri: &str,
+    detail: &str,
+) {
+    let counter = match action {
+        "deny" => &METRICS.protocol_deny,
+        "monitor" => &METRICS.protocol_monitor,
+        "bypass-explicit" => &METRICS.protocol_bypass,
+        "quarantine" => &METRICS.protocol_quarantine,
+        _ => return,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+
+    if let Ok(mut by_id) = METRICS.protocol_by_id.lock() {
+        *by_id
+            .entry((protocol_id.to_string(), action.to_string()))
+            .or_insert(0) += 1;
+    }
+
+    let event_type = match action {
+        "quarantine" => "quarantine",
+        "deny" => "protocol_deny",
+        "monitor" => "protocol_monitor",
+        "bypass-explicit" => "protocol_bypass",
+        _ => return,
+    };
+    METRICS.push_event(
+        site_scope,
+        SecurityEvent {
+            timestamp: now_iso(),
+            event_type: event_type.to_string(),
+            client_ip: client_ip.to_string(),
+            uri: uri.to_string(),
+            detail: detail.to_string(),
+            site_scope: String::new(),
+        },
+    );
 }
 
 pub fn record_waf_inspection(status: &str) {
@@ -184,27 +306,52 @@ pub fn record_waf_inspection(status: &str) {
         "truncated" => &METRICS.waf_inspection_truncated,
         "unsupported_encoding" => &METRICS.waf_inspection_unsupported_encoding,
         "unsupported_content_type" => &METRICS.waf_inspection_unsupported_content_type,
+        "parse_error" => &METRICS.waf_inspection_parse_error,
+        "budget_exceeded" => &METRICS.waf_inspection_budget_exceeded,
+        "timed_out" => &METRICS.waf_inspection_timed_out,
         _ => return,
     };
     counter.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn record_observation(event_type: &str, client_ip: &str, uri: &str, detail: &str) {
-    if event_type == "waf_monitor" {
-        METRICS.waf_monitored.fetch_add(1, Ordering::Relaxed);
-    } else if !matches!(event_type, "dlp_skip" | "range_removed") {
-        return;
-    }
-    METRICS.push_event(SecurityEvent {
-        timestamp: now_iso(),
-        event_type: event_type.to_string(),
-        client_ip: client_ip.to_string(),
-        uri: uri.to_string(),
-        detail: detail.to_string(),
-    });
+    record_observation_in(UNSCOPED_SITE, event_type, client_ip, uri, detail);
 }
 
-pub fn record_dlp(cpf_count: u64, token_count: u64) {
+pub fn record_observation_in(
+    site_scope: &str,
+    event_type: &str,
+    client_ip: &str,
+    uri: &str,
+    detail: &str,
+) {
+    if event_type == "waf_monitor" {
+        METRICS.waf_monitored.fetch_add(1, Ordering::Relaxed);
+    } else if !matches!(
+        event_type,
+        "dlp_skip"
+            | "range_removed"
+            | "inspection_parse_error"
+            | "inspection_timeout"
+            | "inspection_budget"
+            | "waf_incomplete"
+    ) {
+        return;
+    }
+    METRICS.push_event(
+        site_scope,
+        SecurityEvent {
+            timestamp: now_iso(),
+            event_type: event_type.to_string(),
+            client_ip: client_ip.to_string(),
+            uri: uri.to_string(),
+            detail: detail.to_string(),
+            site_scope: String::new(),
+        },
+    );
+}
+
+pub fn record_dlp(cpf_count: u64, token_count: u64, verb: &str) {
     if cpf_count > 0 {
         METRICS
             .dlp_cpf_masked
@@ -216,23 +363,23 @@ pub fn record_dlp(cpf_count: u64, token_count: u64) {
             .fetch_add(token_count, Ordering::Relaxed);
     }
     if cpf_count > 0 || token_count > 0 {
-        METRICS.push_event(SecurityEvent {
-            timestamp: now_iso(),
-            event_type: "dlp".to_string(),
-            client_ip: "-".to_string(),
-            uri: "-".to_string(),
-            detail: format!("Masked {} CPFs, {} tokens", cpf_count, token_count),
-        });
+        METRICS.push_event(
+            UNSCOPED_SITE,
+            SecurityEvent {
+                timestamp: now_iso(),
+                event_type: "dlp".to_string(),
+                client_ip: "-".to_string(),
+                uri: "-".to_string(),
+                detail: format!("{verb} {cpf_count} CPFs, {token_count} tokens"),
+                site_scope: String::new(),
+            },
+        );
     }
 }
 
 pub fn snapshot_json() -> String {
     let m = &*METRICS;
-    let events: Vec<SecurityEvent> = m
-        .recent_events
-        .lock()
-        .map(|e| e.iter().rev().cloned().collect())
-        .unwrap_or_default();
+    let events = m.snapshot_events();
 
     let json = serde_json::json!({
         "requests_total": m.requests_total.load(Ordering::Relaxed),
@@ -254,23 +401,34 @@ pub fn snapshot_json() -> String {
             "behavioral_throttle": m.blocked_behavioral_throttle.load(Ordering::Relaxed),
             "behavioral_block": m.blocked_behavioral_block.load(Ordering::Relaxed),
             "waf_incomplete": m.blocked_waf_incomplete.load(Ordering::Relaxed),
+            "inspection_parse_error": m.blocked_inspection_parse_error.load(Ordering::Relaxed),
             "header_limit": m.blocked_header_limit.load(Ordering::Relaxed),
             "concurrency_limit": m.blocked_concurrency_limit.load(Ordering::Relaxed),
             "connection_limit": m.blocked_connection_limit.load(Ordering::Relaxed),
             "request_buffer_limit": m.blocked_request_buffer_limit.load(Ordering::Relaxed),
+            "spool_limit": m.blocked_spool_limit.load(Ordering::Relaxed),
             "dlp_partial_block": m.blocked_dlp_partial.load(Ordering::Relaxed)
         },
         "waf_inspection": {
             "complete": m.waf_inspection_complete.load(Ordering::Relaxed),
             "truncated": m.waf_inspection_truncated.load(Ordering::Relaxed),
             "unsupported_encoding": m.waf_inspection_unsupported_encoding.load(Ordering::Relaxed),
-            "unsupported_content_type": m.waf_inspection_unsupported_content_type.load(Ordering::Relaxed)
+            "unsupported_content_type": m.waf_inspection_unsupported_content_type.load(Ordering::Relaxed),
+            "parse_error": m.waf_inspection_parse_error.load(Ordering::Relaxed),
+            "budget_exceeded": m.waf_inspection_budget_exceeded.load(Ordering::Relaxed),
+            "timed_out": m.waf_inspection_timed_out.load(Ordering::Relaxed)
         },
         "waf_monitored": m.waf_monitored.load(Ordering::Relaxed),
         "https_redirect": m.https_redirect.load(Ordering::Relaxed),
         "dlp": {
             "cpf_masked": m.dlp_cpf_masked.load(Ordering::Relaxed),
             "tokens_masked": m.dlp_tokens_masked.load(Ordering::Relaxed)
+        },
+        "protocol": {
+            "deny": m.protocol_deny.load(Ordering::Relaxed),
+            "monitor": m.protocol_monitor.load(Ordering::Relaxed),
+            "bypass_explicit": m.protocol_bypass.load(Ordering::Relaxed),
+            "quarantine": m.protocol_quarantine.load(Ordering::Relaxed)
         },
         "recent_events": events
     });
@@ -299,12 +457,17 @@ pub fn snapshot_prometheus() -> String {
         ("behavioral_throttle", &metrics.blocked_behavioral_throttle),
         ("behavioral_block", &metrics.blocked_behavioral_block),
         ("waf_incomplete", &metrics.blocked_waf_incomplete),
+        (
+            "inspection_parse_error",
+            &metrics.blocked_inspection_parse_error,
+        ),
         ("concurrency_limit", &metrics.blocked_concurrency_limit),
         ("connection_limit", &metrics.blocked_connection_limit),
         (
             "request_buffer_limit",
             &metrics.blocked_request_buffer_limit,
         ),
+        ("spool_limit", &metrics.blocked_spool_limit),
         ("dlp_partial_block", &metrics.blocked_dlp_partial),
     ];
     let mut output = format!(
@@ -329,11 +492,35 @@ pub fn snapshot_prometheus() -> String {
             "unsupported_content_type",
             &metrics.waf_inspection_unsupported_content_type,
         ),
+        ("parse_error", &metrics.waf_inspection_parse_error),
+        ("budget_exceeded", &metrics.waf_inspection_budget_exceeded),
+        ("timed_out", &metrics.waf_inspection_timed_out),
     ] {
         output.push_str(&format!(
             "ferroada_waf_inspection_total{{status=\"{status}\"}} {}\n",
             counter.load(Ordering::Relaxed)
         ));
+    }
+    output.push_str("# TYPE ferroada_protocol_total counter\n");
+    for (action, counter) in [
+        ("deny", &metrics.protocol_deny),
+        ("monitor", &metrics.protocol_monitor),
+        ("bypass-explicit", &metrics.protocol_bypass),
+        ("quarantine", &metrics.protocol_quarantine),
+    ] {
+        output.push_str(&format!(
+            "ferroada_protocol_total{{action=\"{action}\"}} {}\n",
+            counter.load(Ordering::Relaxed)
+        ));
+    }
+    if let Ok(by_id) = metrics.protocol_by_id.lock() {
+        let mut rows: Vec<_> = by_id.iter().collect();
+        rows.sort_by(|left, right| left.0.cmp(right.0));
+        for ((id, action), count) in rows {
+            output.push_str(&format!(
+                "ferroada_protocol_total{{id=\"{id}\",action=\"{action}\"}} {count}\n"
+            ));
+        }
     }
     output
 }
@@ -347,5 +534,83 @@ mod tests {
         let snapshot = snapshot_prometheus();
         assert!(snapshot.contains("ferroada_requests_total"));
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"truncated\"}"));
+        assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"parse_error\"}"));
+        assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"timed_out\"}"));
+        assert!(snapshot.contains("ferroada_protocol_total{action=\"quarantine\"}"));
+    }
+
+    fn unique_sites() -> (String, String) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        (
+            format!("quota-a-{n}.example"),
+            format!("quota-b-{n}.example"),
+        )
+    }
+
+    fn event_uris(snapshot: &str) -> Vec<String> {
+        let value: serde_json::Value =
+            serde_json::from_str(snapshot).expect("metrics snapshot is JSON");
+        value["recent_events"]
+            .as_array()
+            .expect("recent_events")
+            .iter()
+            .map(|event| event["uri"].as_str().expect("event uri").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn noisy_site_does_not_evict_another_site_events() {
+        let (site_a, site_b) = unique_sites();
+        for i in 0..(MAX_EVENTS_PER_SITE + 10) {
+            record_block_in(
+                &site_a,
+                "sqli",
+                "192.0.2.1",
+                &format!("/flood-a/{i}"),
+                "flood",
+            );
+        }
+        record_block_in(&site_b, "xss", "192.0.2.2", "/kept-from-b", "keep");
+
+        let snapshot = snapshot_json();
+        let uris = event_uris(&snapshot);
+        assert!(
+            uris.iter().any(|uri| uri == "/kept-from-b"),
+            "site B event must survive site A filling its ring: {uris:?}"
+        );
+        let a_count = uris
+            .iter()
+            .filter(|uri| uri.starts_with("/flood-a/"))
+            .count();
+        assert_eq!(
+            a_count, MAX_EVENTS_PER_SITE,
+            "site A must keep only its own cap, got {a_count}"
+        );
+        assert!(
+            !uris.iter().any(|uri| uri == "/flood-a/0"),
+            "site A oldest event must be evicted from its own ring"
+        );
+        assert!(snapshot.contains(&site_a), "{snapshot}");
+        assert!(snapshot.contains(&site_b), "{snapshot}");
+    }
+
+    #[test]
+    fn unscoped_flood_does_not_evict_scoped_events() {
+        let (_, site_b) = unique_sites();
+        for i in 0..(MAX_EVENTS_PER_SITE + 10) {
+            record_block(
+                "sqli",
+                "192.0.2.3",
+                &format!("/flood-unscoped/{i}"),
+                "flood",
+            );
+        }
+        record_block_in(&site_b, "xss", "192.0.2.4", "/kept-scoped", "keep");
+        let uris = event_uris(&snapshot_json());
+        assert!(
+            uris.iter().any(|uri| uri == "/kept-scoped"),
+            "scoped event must survive an unscoped flood: {uris:?}"
+        );
     }
 }

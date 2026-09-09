@@ -23,6 +23,16 @@ function demoMessage(reason: MetricsResult["demo_reason"]): string {
   return "O proxy não está acessível. Estes números são de demonstração.";
 }
 
+function unavailableMessage(reason: MetricsResult["demo_reason"]): string {
+  if (reason === "unauthorized") {
+    return "O token do proxy está ausente ou incorreto. Confira FERROADA_TOKEN.";
+  }
+  if (reason === "invalid_response") {
+    return "O proxy respondeu em um formato inesperado. Os totais estão a zero de propósito.";
+  }
+  return "O proxy não respondeu; os totais estão a zero de propósito.";
+}
+
 function useMetricsPolling(initial: MetricsResult) {
   const [data, setData] = useState(initial);
   const [pollError, setPollError] = useState(false);
@@ -174,6 +184,11 @@ function MetricsStatus({ data, pollError }: { data: MetricsResult; pollError: bo
           {demoMessage(data.demo_reason)}
         </p>
       ) : null}
+      {!data.demo && data.unavailable ? (
+        <p className="banner" role="status">
+          {unavailableMessage(data.demo_reason)}
+        </p>
+      ) : null}
       {pollError ? (
         <p className="banner" role="status">
           Não foi possível atualizar as métricas. Uma nova tentativa será feita em cinco segundos.
@@ -224,7 +239,11 @@ export function Dashboard({ initial }: { initial: MetricsResult }) {
 
       <h2 className="section-title">Por tipo</h2>
       {rows.length === 0 ? (
-        <p className="empty">Nenhum bloqueio ainda. O proxy está escutando.</p>
+        <p className="empty">
+          {data.unavailable
+            ? "Nenhum bloqueio a mostrar enquanto o proxy não responde."
+            : "Nenhum bloqueio ainda. O proxy está escutando."}
+        </p>
       ) : (
         <ul className="breakdown">
           {rows.map(([k, n]) => (
@@ -237,7 +256,7 @@ export function Dashboard({ initial }: { initial: MetricsResult }) {
       )}
 
       <h2 className="section-title">Últimos eventos</h2>
-      <EventTable events={data.recent_events} />
+      <EventTable events={data.recent_events} unavailable={data.unavailable} />
     </>
   );
 }
@@ -250,16 +269,26 @@ export function EventsPanel({ initial }: { initial: MetricsResult }) {
   return (
     <>
       <MetricsStatus data={data} pollError={pollError} />
-      <EventTable events={data.recent_events} />
+      <EventTable events={data.recent_events} unavailable={data.unavailable} />
     </>
   );
 }
 
-export function EventTable({ events }: { events: FerroadaMetrics["recent_events"] }) {
+export function EventTable({
+  events,
+  unavailable = false,
+}: {
+  events: FerroadaMetrics["recent_events"];
+  unavailable?: boolean;
+}) {
   if (events.length === 0) {
     return (
       <div className="table-wrap">
-        <p className="empty">Nenhum evento de segurança recente.</p>
+        <p className="empty">
+          {unavailable
+            ? "Nenhum evento a mostrar enquanto o proxy não responde."
+            : "Nenhum evento de segurança recente."}
+        </p>
       </div>
     );
   }

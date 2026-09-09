@@ -18,6 +18,7 @@ export type BlockedKey =
   | "behavioral_throttle"
   | "behavioral_block"
   | "request_buffer_limit"
+  | "spool_limit"
   | "dlp_partial_block";
 
 const countSchema = z.number().finite().nonnegative();
@@ -47,6 +48,7 @@ export const ferroadaMetricsSchema = z.object({
 
 export const metricsResultSchema = ferroadaMetricsSchema.extend({
   demo: z.boolean(),
+  unavailable: z.boolean(),
   demo_reason: z.enum(["unauthorized", "unavailable", "invalid_response"]).optional(),
 });
 

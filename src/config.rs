@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use tracing::info;
 
-use crate::waf::{self, WafProfile};
+use crate::protocol::{ProtocolMatrix, ProtocolsSection};
+use crate::waf::{self, InspectionOutcome, WafProfile};
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConfigFile {
     #[serde(default)]
     default_backend: Option<String>,
@@ -15,9 +17,12 @@ struct ConfigFile {
     default_require_complete_waf_inspection: Vec<String>,
     #[serde(default)]
     default_waf_profile: Option<String>,
+    #[serde(default)]
+    protocols: ProtocolsSection,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SiteEntry {
     hosts: Vec<String>,
     backend: String,
@@ -25,6 +30,117 @@ struct SiteEntry {
     require_complete_waf_inspection: Vec<String>,
     #[serde(default)]
     waf_profile: Option<String>,
+    #[serde(default)]
+    routes: Vec<SiteRouteEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SiteRouteEntry {
+    prefix: String,
+    #[serde(default)]
+    inspection: InspectionPolicyFile,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct InspectionPolicyFile {
+    #[serde(default)]
+    require_complete: Option<bool>,
+    #[serde(default)]
+    on_truncated: Option<String>,
+    #[serde(default)]
+    on_parse_error: Option<String>,
+    #[serde(default)]
+    max_decoded_body: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InspectionAction {
+    Deny,
+    Monitor,
+}
+
+impl InspectionAction {
+    fn parse(key: &str, raw: &str) -> Self {
+        match raw.trim() {
+            "deny" => Self::Deny,
+            "monitor" => Self::Monitor,
+            other => panic!("ação de inspeção inválida em {key} = {other:?}; use deny ou monitor"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InspectionDisposition {
+    Allow,
+    Monitor,
+    Deny,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InspectionPolicy {
+    pub require_complete: bool,
+    pub on_truncated: InspectionAction,
+    pub on_parse_error: InspectionAction,
+    pub max_decoded_body: Option<usize>,
+}
+
+impl InspectionPolicy {
+    pub fn fail_closed() -> Self {
+        Self {
+            require_complete: true,
+            on_truncated: InspectionAction::Deny,
+            on_parse_error: InspectionAction::Deny,
+            max_decoded_body: None,
+        }
+    }
+
+    pub fn open() -> Self {
+        Self {
+            require_complete: false,
+            on_truncated: InspectionAction::Monitor,
+            on_parse_error: InspectionAction::Monitor,
+            max_decoded_body: None,
+        }
+    }
+
+    pub fn uses_spool(self) -> bool {
+        self.max_decoded_body.is_some()
+    }
+
+    pub fn disposition(self, outcome: InspectionOutcome) -> InspectionDisposition {
+        match outcome {
+            InspectionOutcome::Complete => InspectionDisposition::Allow,
+            InspectionOutcome::Truncated { .. } => self.on_truncated.into(),
+            InspectionOutcome::ParseError => self.on_parse_error.into(),
+            InspectionOutcome::UnsupportedEncoding | InspectionOutcome::UnsupportedContentType => {
+                if self.require_complete {
+                    InspectionDisposition::Deny
+                } else {
+                    InspectionDisposition::Monitor
+                }
+            }
+            InspectionOutcome::TimedOut | InspectionOutcome::BudgetExceeded => {
+                InspectionDisposition::Deny
+            }
+        }
+    }
+}
+
+impl From<InspectionAction> for InspectionDisposition {
+    fn from(action: InspectionAction) -> Self {
+        match action {
+            InspectionAction::Deny => Self::Deny,
+            InspectionAction::Monitor => Self::Monitor,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RouteInspection {
+    prefix: String,
+    patch: InspectionPolicyFile,
 }
 
 #[derive(Clone)]
@@ -35,18 +151,46 @@ pub struct Backend {
     pub redirect_host: Option<String>,
     pub tls: bool,
     pub waf_profile: WafProfile,
-    require_complete_waf_inspection: Vec<String>,
+    routes: Vec<RouteInspection>,
 }
 
 impl Backend {
-    pub fn requires_complete_waf_inspection(&self, uri: &str) -> bool {
+    pub fn inspection_policy(&self, uri: &str) -> InspectionPolicy {
         let path = uri.split('?').next().unwrap_or(uri);
         let Some(path) = canonical_route_path(path) else {
-            return !self.require_complete_waf_inspection.is_empty();
+            return if self
+                .routes
+                .iter()
+                .any(|route| patch_denies_incomplete(&route.patch))
+            {
+                InspectionPolicy::fail_closed()
+            } else {
+                InspectionPolicy::open()
+            };
         };
-        self.require_complete_waf_inspection
+        let mut matching: Vec<&RouteInspection> = self
+            .routes
             .iter()
-            .any(|prefix| path_matches_prefix(&path, prefix))
+            .filter(|route| path_matches_prefix(&path, &route.prefix))
+            .collect();
+        matching.sort_by_key(|route| route.prefix.len());
+        let mut policy = InspectionPolicy::open();
+        for route in matching {
+            policy = overlay_inspection_policy(policy, &route.patch);
+        }
+        policy
+    }
+
+    pub fn requires_complete_waf_inspection(&self, uri: &str) -> bool {
+        self.inspection_policy(uri).require_complete
+    }
+
+    pub fn uses_spool(&self) -> bool {
+        self.routes.iter().any(|route| {
+            self.inspection_policy(&route.prefix)
+                .max_decoded_body
+                .is_some()
+        })
     }
 }
 
@@ -56,6 +200,7 @@ pub struct Config {
     backends: Vec<Backend>,
     /// Default backend for requests that don't match any site
     default_idx: Option<usize>,
+    pub protocols: ProtocolMatrix,
 }
 
 impl Config {
@@ -68,11 +213,15 @@ impl Config {
 
         // Fallback: single TARGET_URL (backward compatible)
         let target_url = std::env::var("TARGET_URL").expect("TARGET_URL or ferroada.toml required");
+        Self::from_target_url(&target_url)
+    }
+
+    pub fn from_target_url(target_url: &str) -> Self {
         let complete_waf_paths = std::env::var("WAF_REQUIRE_COMPLETE_PATHS")
             .ok()
             .map(|value| parse_path_prefixes(value.split(',')))
             .unwrap_or_default();
-        let backend = resolve_url(&target_url, complete_waf_paths, waf::default_profile());
+        let backend = resolve_url(target_url, complete_waf_paths, waf::default_profile());
         info!(
             backend = %target_url,
             "Single-site mode (TARGET_URL)"
@@ -81,19 +230,25 @@ impl Config {
             route_table: HashMap::new(),
             backends: vec![backend],
             default_idx: Some(0),
+            protocols: ProtocolMatrix::default(),
         }
     }
 
-    fn from_toml(contents: &str) -> Self {
-        let file: ConfigFile = toml::from_str(contents).expect("Invalid ferroada.toml");
+    pub fn from_toml(contents: &str) -> Self {
+        let file: ConfigFile = toml::from_str(contents)
+            .unwrap_or_else(|error| panic!("Invalid ferroada.toml: {error}"));
+        let protocols =
+            ProtocolMatrix::from_section(file.protocols).unwrap_or_else(|error| panic!("{error}"));
 
         let mut backends = Vec::new();
         let mut route_table = HashMap::new();
+        let site_count = file.sites.len();
 
-        for site in &file.sites {
-            let mut backend = resolve_url(
+        for site in file.sites {
+            let mut backend = resolve_site(
                 &site.backend,
                 parse_path_prefixes(site.require_complete_waf_inspection.iter()),
+                site.routes,
                 site.waf_profile
                     .as_deref()
                     .map(WafProfile::parse)
@@ -112,6 +267,7 @@ impl Config {
                 backend = %site.backend,
                 "Site configured"
             );
+            validate_spool_routes(&backend);
             backends.push(backend);
 
             for host in &site.hosts {
@@ -130,10 +286,11 @@ impl Config {
             .map(WafProfile::parse)
             .unwrap_or_else(waf::default_profile);
         let default_idx = file.default_backend.map(|url| {
-            let mut backend = resolve_url(&url, default_paths, default_profile);
+            let mut backend = resolve_site(&url, default_paths, Vec::new(), default_profile);
             backend.site_scope = "__default__".to_string();
             let idx = backends.len();
             info!(backend = %url, "Default backend configured");
+            validate_spool_routes(&backend);
             backends.push(backend);
             idx
         });
@@ -142,7 +299,6 @@ impl Config {
             panic!("ferroada.toml has no sites configured");
         }
 
-        let site_count = file.sites.len();
         let host_count = route_table.len();
         info!(
             sites = site_count,
@@ -155,6 +311,7 @@ impl Config {
             route_table,
             backends,
             default_idx,
+            protocols,
         }
     }
 
@@ -188,11 +345,29 @@ impl Config {
     pub fn backend_addresses(&self) -> Vec<SocketAddr> {
         self.backends.iter().map(|backend| backend.addr).collect()
     }
+
+    pub fn has_spool_routes(&self) -> bool {
+        self.backends.iter().any(Backend::uses_spool)
+    }
 }
 
 fn resolve_url(
     url: &str,
     require_complete_waf_inspection: Vec<String>,
+    waf_profile: WafProfile,
+) -> Backend {
+    resolve_site(
+        url,
+        require_complete_waf_inspection,
+        Vec::new(),
+        waf_profile,
+    )
+}
+
+fn resolve_site(
+    url: &str,
+    require_complete_waf_inspection: Vec<String>,
+    route_entries: Vec<SiteRouteEntry>,
     waf_profile: WafProfile,
 ) -> Backend {
     let tls = url.starts_with("https://");
@@ -226,7 +401,141 @@ fn resolve_url(
         host,
         tls,
         waf_profile,
-        require_complete_waf_inspection,
+        routes: merge_inspection_routes(require_complete_waf_inspection, route_entries),
+    }
+}
+
+fn fail_closed_patch() -> InspectionPolicyFile {
+    InspectionPolicyFile {
+        require_complete: Some(true),
+        on_truncated: Some("deny".into()),
+        on_parse_error: Some("deny".into()),
+        max_decoded_body: None,
+    }
+}
+
+fn merge_patches(
+    base: InspectionPolicyFile,
+    overlay: InspectionPolicyFile,
+) -> InspectionPolicyFile {
+    InspectionPolicyFile {
+        require_complete: overlay.require_complete.or(base.require_complete),
+        on_truncated: overlay.on_truncated.or(base.on_truncated),
+        on_parse_error: overlay.on_parse_error.or(base.on_parse_error),
+        max_decoded_body: overlay.max_decoded_body.or(base.max_decoded_body),
+    }
+}
+
+fn validate_spool_routes(backend: &Backend) {
+    for route in &backend.routes {
+        let policy = backend.inspection_policy(&route.prefix);
+        if policy.max_decoded_body.is_some() && !policy.require_complete {
+            panic!(
+                "max_decoded_body exige inspection.require_complete na rota {}",
+                route.prefix
+            );
+        }
+    }
+}
+
+pub fn parse_byte_size(raw: &str) -> Result<usize, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("tamanho vazio".into());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let (number, multiplier) = if let Some(number) = lower.strip_suffix("kib") {
+        (number.trim(), 1024usize)
+    } else if let Some(number) = lower.strip_suffix("mib") {
+        (number.trim(), 1024 * 1024)
+    } else if let Some(number) = lower.strip_suffix("gib") {
+        (number.trim(), 1024 * 1024 * 1024)
+    } else {
+        (trimmed, 1usize)
+    };
+    let value: usize = number
+        .parse()
+        .map_err(|_| format!("tamanho inválido: {raw}"))?;
+    value
+        .checked_mul(multiplier)
+        .filter(|size| *size > 0)
+        .ok_or_else(|| format!("tamanho inválido: {raw}"))
+}
+
+fn patch_denies_incomplete(patch: &InspectionPolicyFile) -> bool {
+    patch.require_complete == Some(true)
+        || patch
+            .on_truncated
+            .as_deref()
+            .is_some_and(|value| value.trim() == "deny")
+        || patch
+            .on_parse_error
+            .as_deref()
+            .is_some_and(|value| value.trim() == "deny")
+}
+
+fn merge_inspection_routes(
+    complete_prefixes: Vec<String>,
+    route_entries: Vec<SiteRouteEntry>,
+) -> Vec<RouteInspection> {
+    let mut routes: Vec<RouteInspection> = complete_prefixes
+        .into_iter()
+        .map(|prefix| RouteInspection {
+            prefix,
+            patch: fail_closed_patch(),
+        })
+        .collect();
+    for entry in route_entries {
+        let prefix = parse_path_prefixes(std::iter::once(&entry.prefix))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("Rota de inspeção precisa de um prefixo de path"));
+        if let Some(existing) = routes.iter_mut().find(|route| route.prefix == prefix) {
+            existing.patch = merge_patches(existing.patch.clone(), entry.inspection);
+        } else {
+            routes.push(RouteInspection {
+                prefix,
+                patch: entry.inspection,
+            });
+        }
+    }
+    routes
+}
+
+fn overlay_inspection_policy(
+    base: InspectionPolicy,
+    patch: &InspectionPolicyFile,
+) -> InspectionPolicy {
+    let require_complete = patch.require_complete.unwrap_or(base.require_complete);
+    let derived = if require_complete {
+        InspectionAction::Deny
+    } else {
+        InspectionAction::Monitor
+    };
+    InspectionPolicy {
+        require_complete,
+        on_truncated: patch
+            .on_truncated
+            .as_deref()
+            .map(|raw| InspectionAction::parse("on_truncated", raw))
+            .unwrap_or(if patch.require_complete.is_some() {
+                derived
+            } else {
+                base.on_truncated
+            }),
+        on_parse_error: patch
+            .on_parse_error
+            .as_deref()
+            .map(|raw| InspectionAction::parse("on_parse_error", raw))
+            .unwrap_or(if patch.require_complete.is_some() {
+                derived
+            } else {
+                base.on_parse_error
+            }),
+        max_decoded_body: match patch.max_decoded_body.as_deref() {
+            Some(raw) => Some(parse_byte_size(raw).unwrap_or_else(|error| panic!("{error}"))),
+            None => base.max_decoded_body,
+        },
     }
 }
 
@@ -376,5 +685,320 @@ backend = "http://127.0.0.1:8081"
             config.resolve("known.example").unwrap().site_scope,
             "known.example"
         );
+    }
+
+    #[test]
+    fn protocols_section_loads_route_to_quarantine() {
+        let config = Config::from_toml(
+            r#"
+[protocols]
+grpc = "route-to-quarantine"
+websocket = "deny"
+
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+"#,
+        );
+        let grpc = config.protocols.evaluate(&crate::protocol::RequestFacts {
+            version: http::Version::HTTP_11,
+            upgrade: None,
+            content_encoding: None,
+            content_type: Some("application/grpc"),
+            require_complete: false,
+        });
+        assert_eq!(grpc.event_type(), Some("quarantine"));
+        assert_eq!(grpc.blocked_status(), Some(403));
+        let websocket = config.protocols.evaluate(&crate::protocol::RequestFacts {
+            version: http::Version::HTTP_11,
+            upgrade: Some("websocket"),
+            content_encoding: None,
+            content_type: None,
+            require_complete: false,
+        });
+        assert_eq!(websocket.blocked_status(), Some(403));
+    }
+
+    #[test]
+    fn require_complete_sugar_denies_parse_error_with_403() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+require_complete_waf_inspection = ["/api/payment"]
+"#,
+        );
+        let backend = config.resolve("api.example").unwrap();
+        let policy = backend.inspection_policy("/api/payment");
+        assert_eq!(policy, InspectionPolicy::fail_closed());
+        let inspection = waf::inspect_body(
+            b"{not json",
+            "/api/payment",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+        assert_eq!(
+            policy.disposition(inspection.status),
+            InspectionDisposition::Deny
+        );
+        assert_eq!(inspection.status.denied_status(), 403);
+    }
+
+    fn nested_json_objects(depth: usize) -> Vec<u8> {
+        let mut json = String::from("null");
+        for _ in 0..depth {
+            json = format!("{{\"n\":{json}}}");
+        }
+        json.into_bytes()
+    }
+
+    #[test]
+    fn json_depth_40_on_fail_closed_route_is_403() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+require_complete_waf_inspection = ["/api/payment"]
+"#,
+        );
+        let backend = config.resolve("api.example").unwrap();
+        let policy = backend.inspection_policy("/api/payment");
+        assert_eq!(policy, InspectionPolicy::fail_closed());
+        let inspection = waf::inspect_body(
+            &nested_json_objects(40),
+            "/api/payment",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+        assert_eq!(
+            policy.disposition(inspection.status),
+            InspectionDisposition::Deny
+        );
+        assert_eq!(inspection.status.denied_status(), 403);
+    }
+
+    #[test]
+    fn on_truncated_and_on_parse_error_are_per_prefix() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+require_complete_waf_inspection = ["/api/payment"]
+
+[[sites.routes]]
+prefix = "/api/search"
+inspection.on_parse_error = "deny"
+
+[[sites.routes]]
+prefix = "/api/payment"
+inspection.on_truncated = "monitor"
+"#,
+        );
+        let backend = config.resolve("api.example").unwrap();
+        let payment = backend.inspection_policy("/api/payment/confirm");
+        assert!(payment.require_complete);
+        assert_eq!(payment.on_truncated, InspectionAction::Monitor);
+        assert_eq!(payment.on_parse_error, InspectionAction::Deny);
+        let search = backend.inspection_policy("/api/search");
+        assert!(!search.require_complete);
+        assert_eq!(search.on_truncated, InspectionAction::Monitor);
+        assert_eq!(search.on_parse_error, InspectionAction::Deny);
+        let open = backend.inspection_policy("/health");
+        assert_eq!(open, InspectionPolicy::open());
+    }
+
+    #[test]
+    fn nested_route_inherits_fail_closed_sugar() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+require_complete_waf_inspection = ["/api/"]
+
+[[sites.routes]]
+prefix = "/api/webhooks"
+inspection.on_parse_error = "monitor"
+"#,
+        );
+        let backend = config.resolve("api.example").unwrap();
+        let webhooks = backend.inspection_policy("/api/webhooks/stripe");
+        assert!(webhooks.require_complete);
+        assert_eq!(webhooks.on_truncated, InspectionAction::Deny);
+        assert_eq!(webhooks.on_parse_error, InspectionAction::Monitor);
+        let other = backend.inspection_policy("/api/payment");
+        assert_eq!(other, InspectionPolicy::fail_closed());
+    }
+
+    #[test]
+    fn undecodable_uri_fail_closes_when_parse_error_is_deny() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/api/search"
+inspection.on_parse_error = "deny"
+"#,
+        );
+        let policy = config
+            .resolve("api.example")
+            .unwrap()
+            .inspection_policy("/api/search/%zz");
+        assert_eq!(policy, InspectionPolicy::fail_closed());
+        assert_eq!(
+            policy.disposition(InspectionOutcome::ParseError),
+            InspectionDisposition::Deny
+        );
+    }
+
+    #[test]
+    fn parse_error_deny_survives_unsupported_encoding_combine() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/api/search"
+inspection.on_parse_error = "deny"
+"#,
+        );
+        let policy = config
+            .resolve("api.example")
+            .unwrap()
+            .inspection_policy("/api/search");
+        let inflated = waf::inflate_for_inspect(b"{not json", Some("gzip"));
+        let inspection = waf::inspect_body(
+            &inflated.bytes,
+            "/api/search",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        let outcome = inflated.status.combine(inspection.status);
+        assert_eq!(outcome, InspectionOutcome::ParseError);
+        assert_eq!(policy.disposition(outcome), InspectionDisposition::Deny);
+        assert_eq!(outcome.denied_status(), 403);
+    }
+
+    #[test]
+    fn max_decoded_body_loads_on_require_complete() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/api/payment"
+inspection.require_complete = true
+inspection.max_decoded_body = "256KiB"
+"#,
+        );
+        let policy = config
+            .resolve("api.example")
+            .unwrap()
+            .inspection_policy("/api/payment");
+        assert!(policy.require_complete);
+        assert_eq!(policy.max_decoded_body, Some(256 * 1024));
+        assert!(config.has_spool_routes());
+    }
+
+    #[test]
+    fn max_decoded_body_without_require_complete_is_a_load_error() {
+        let result = std::panic::catch_unwind(|| {
+            Config::from_toml(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/api/search"
+inspection.max_decoded_body = "256KiB"
+"#,
+            )
+        });
+        let Err(payload) = result else {
+            panic!("load must fail without require_complete");
+        };
+        let message = payload
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("require_complete"),
+            "expected require_complete load error, got {message}"
+        );
+    }
+
+    #[test]
+    fn parse_byte_size_accepts_kib_mib() {
+        assert_eq!(parse_byte_size("256KiB").unwrap(), 256 * 1024);
+        assert_eq!(parse_byte_size("2MiB").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_byte_size("64").unwrap(), 64);
+        assert!(parse_byte_size("0").is_err());
+        assert!(parse_byte_size("").is_err());
+    }
+
+    #[test]
+    fn max_decoded_body_on_site_is_a_parse_error() {
+        let error = toml::from_str::<ConfigFile>(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+max_decoded_body = "2MiB"
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("max_decoded_body"));
+    }
+
+    #[test]
+    fn topology_packs_still_parse_with_deny_unknown_fields() {
+        for path in [
+            "ferroada.toml.example",
+            "deploy/topologies/_skeleton/ferroada.toml",
+            "deploy/topologies/vps-api/ferroada.toml",
+            "deploy/topologies/vps-site/ferroada.toml",
+            "deploy/topologies/cdn-edge/ferroada.toml",
+        ] {
+            let contents = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("failed to read {path}: {error}"));
+            toml::from_str::<ConfigFile>(&contents)
+                .unwrap_or_else(|error| panic!("{path} no longer parses: {error}"));
+        }
+    }
+
+    #[test]
+    fn route_require_complete_without_sugar_list() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/api/payment"
+inspection.require_complete = true
+inspection.on_truncated = "deny"
+inspection.on_parse_error = "deny"
+"#,
+        );
+        let policy = config
+            .resolve("api.example")
+            .unwrap()
+            .inspection_policy("/api/payment");
+        assert_eq!(policy, InspectionPolicy::fail_closed());
     }
 }

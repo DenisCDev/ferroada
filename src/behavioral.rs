@@ -190,7 +190,8 @@ pub fn check_and_record(
 
     // Check if currently banned
     if profile.is_banned() {
-        metrics::record_block(
+        metrics::record_block_in(
+            &identity.site,
             "behavioral_block",
             client_addr,
             uri,
@@ -258,7 +259,8 @@ pub fn check_and_record(
             ban_secs = *BAN_DURATION_SECS,
             "Behavioral: IP banned"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            &identity.site,
             "behavioral_block",
             client_addr,
             uri,
@@ -273,7 +275,8 @@ pub fn check_and_record(
             score = score,
             "Behavioral: throttling IP"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            &identity.site,
             "behavioral_throttle",
             client_addr,
             uri,

@@ -10,6 +10,7 @@ COPY .cargo/audit.toml ./.cargo/audit.toml
 COPY fuzz/ ./fuzz/
 RUN mkdir src && echo 'fn main(){}' > src/main.rs && cargo build --release -p ferroada && rm -rf src
 COPY src/ src/
+COPY deploy/ deploy/
 RUN cargo install cargo-audit --quiet
 RUN touch src/main.rs && cargo audit --deny warnings && cargo build --release -p ferroada
 

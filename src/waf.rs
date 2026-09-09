@@ -6,10 +6,21 @@ use std::io::Read;
 use tracing::warn;
 
 use crate::metrics;
+use crate::protocol;
 
 /// Bytes of inflated body the WAF will look at. Caps zip bombs.
 const MAX_INFLATE_FOR_INSPECT: u64 = 256 * 1024;
 const INSPECT_TEXT_LIMIT: usize = 65_536;
+/// Nesting budget for JSON inspection. Deeper than this is ParseError.
+pub const MAX_JSON_DEPTH: usize = 32;
+
+pub fn default_inspect_text_limit() -> usize {
+    INSPECT_TEXT_LIMIT
+}
+
+pub fn default_inflate_limit() -> u64 {
+    MAX_INFLATE_FOR_INSPECT
+}
 /// Percent-decode passes. 3 was shallow: `%2525252e` (4 layers) survived.
 const MAX_DECODE_PASSES: usize = 8;
 
@@ -50,50 +61,116 @@ pub enum WafVerdict {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InspectionStatus {
+pub enum InspectionOutcome {
     Complete,
-    Truncated,
+    Truncated {
+        inspected: usize,
+        total_hint: Option<usize>,
+    },
     UnsupportedEncoding,
     UnsupportedContentType,
+    ParseError,
+    BudgetExceeded,
+    TimedOut,
 }
 
-impl InspectionStatus {
+impl InspectionOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Complete => "complete",
-            Self::Truncated => "truncated",
+            Self::Truncated { .. } => "truncated",
             Self::UnsupportedEncoding => "unsupported_encoding",
             Self::UnsupportedContentType => "unsupported_content_type",
+            Self::ParseError => "parse_error",
+            Self::BudgetExceeded => "budget_exceeded",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    pub fn event_type(self) -> &'static str {
+        match self {
+            Self::Complete => "waf_inspection",
+            Self::Truncated { .. } | Self::UnsupportedEncoding | Self::UnsupportedContentType => {
+                "waf_incomplete"
+            }
+            Self::ParseError => "inspection_parse_error",
+            Self::BudgetExceeded => "inspection_budget",
+            Self::TimedOut => "inspection_timeout",
+        }
+    }
+
+    /// HTTP status when this outcome is not allowed through.
+    pub fn denied_status(self) -> u16 {
+        match self {
+            Self::Complete => 200,
+            Self::TimedOut => 408,
+            Self::BudgetExceeded => 503,
+            Self::Truncated { .. }
+            | Self::UnsupportedEncoding
+            | Self::UnsupportedContentType
+            | Self::ParseError => 403,
         }
     }
 
     pub fn is_complete(self) -> bool {
-        self == Self::Complete
+        matches!(self, Self::Complete)
+    }
+
+    fn severity(self) -> u8 {
+        match self {
+            Self::Complete => 0,
+            Self::Truncated { .. } => 1,
+            Self::UnsupportedContentType => 2,
+            Self::UnsupportedEncoding => 3,
+            Self::ParseError => 4,
+            Self::BudgetExceeded => 5,
+            Self::TimedOut => 6,
+        }
     }
 
     pub fn combine(self, other: Self) -> Self {
-        use InspectionStatus::{Complete, Truncated, UnsupportedContentType, UnsupportedEncoding};
-        match (self, other) {
-            (UnsupportedEncoding, _) | (_, UnsupportedEncoding) => UnsupportedEncoding,
-            (UnsupportedContentType, _) | (_, UnsupportedContentType) => UnsupportedContentType,
-            (Truncated, _) | (_, Truncated) => Truncated,
-            (Complete, Complete) => Complete,
+        match self.severity().cmp(&other.severity()) {
+            std::cmp::Ordering::Greater => self,
+            std::cmp::Ordering::Less => other,
+            std::cmp::Ordering::Equal => match (self, other) {
+                (
+                    Self::Truncated {
+                        inspected: left,
+                        total_hint: left_hint,
+                    },
+                    Self::Truncated {
+                        inspected: right,
+                        total_hint: right_hint,
+                    },
+                ) => Self::Truncated {
+                    inspected: left.min(right),
+                    total_hint: match (left_hint, right_hint) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    },
+                },
+                (left, _) => left,
+            },
         }
     }
 }
 
 pub struct WafInspection {
     pub verdict: WafVerdict,
-    pub status: InspectionStatus,
+    pub status: InspectionOutcome,
 }
 
 pub struct InspectionBody<'a> {
     pub bytes: Cow<'a, [u8]>,
-    pub status: InspectionStatus,
+    pub status: InspectionOutcome,
 }
 
 pub fn max_inflate_buffer_bytes() -> usize {
-    MAX_INFLATE_FOR_INSPECT as usize + 1
+    inflate_buffer_bytes(MAX_INFLATE_FOR_INSPECT)
+}
+
+pub fn inflate_buffer_bytes(limit: u64) -> usize {
+    (limit as usize).saturating_add(1)
 }
 
 // --- SQLi detection: 5 categories for robust coverage ---
@@ -235,7 +312,13 @@ const WORDPRESS_OPERATIONAL_PATHS: &[&str] =
 
 /// Inspect URI, headers, and optionally request body
 pub fn inspect_request(uri: &str, header_values: &[String], client_addr: &str) -> WafVerdict {
-    inspect_request_with_profile(uri, header_values, client_addr, default_profile())
+    inspect_request_with_profile(
+        uri,
+        header_values,
+        client_addr,
+        default_profile(),
+        metrics::UNSCOPED_SITE,
+    )
 }
 
 pub fn inspect_request_with_profile(
@@ -243,6 +326,7 @@ pub fn inspect_request_with_profile(
     header_values: &[String],
     client_addr: &str,
     profile: WafProfile,
+    site_scope: &str,
 ) -> WafVerdict {
     let decoded_uri = decode_uri(uri);
 
@@ -256,7 +340,8 @@ pub fn inspect_request_with_profile(
     if wordpress_operational_path {
         match profile {
             WafProfile::Strict => {
-                metrics::record_block(
+                metrics::record_block_in(
+                    site_scope,
                     "sensitive_path",
                     client_addr,
                     uri,
@@ -265,7 +350,8 @@ pub fn inspect_request_with_profile(
                 return WafVerdict::Block("Access denied by strict WAF profile".to_string());
             }
             WafProfile::Wordpress => {
-                metrics::record_observation(
+                metrics::record_observation_in(
+                    site_scope,
                     "waf_monitor",
                     client_addr,
                     uri,
@@ -285,7 +371,8 @@ pub fn inspect_request_with_profile(
                 path = *blocked,
                 "WAF blocked: sensitive path access"
             );
-            metrics::record_block(
+            metrics::record_block_in(
+                site_scope,
                 "sensitive_path",
                 client_addr,
                 uri,
@@ -303,7 +390,8 @@ pub fn inspect_request_with_profile(
                 prefix = *prefix,
                 "WAF blocked: sensitive path prefix"
             );
-            metrics::record_block(
+            metrics::record_block_in(
+                site_scope,
                 "sensitive_path",
                 client_addr,
                 uri,
@@ -320,7 +408,13 @@ pub fn inspect_request_with_profile(
             uri = uri,
             "WAF blocked: CRLF injection in URI"
         );
-        metrics::record_block("crlf", client_addr, uri, "CRLF injection in URI");
+        metrics::record_block_in(
+            site_scope,
+            "crlf",
+            client_addr,
+            uri,
+            "CRLF injection in URI",
+        );
         return WafVerdict::Block("CRLF injection detected".to_string());
     }
 
@@ -331,7 +425,13 @@ pub fn inspect_request_with_profile(
             uri = uri,
             "WAF blocked: JNDI/Log4Shell in URI"
         );
-        metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in URI");
+        metrics::record_block_in(
+            site_scope,
+            "jndi",
+            client_addr,
+            uri,
+            "JNDI/Log4Shell in URI",
+        );
         return WafVerdict::Block("JNDI injection detected".to_string());
     }
 
@@ -343,7 +443,13 @@ pub fn inspect_request_with_profile(
             category = category,
             "WAF blocked: SQL injection in URI"
         );
-        metrics::record_block("sqli", client_addr, uri, &format!("SQLi ({})", category));
+        metrics::record_block_in(
+            site_scope,
+            "sqli",
+            client_addr,
+            uri,
+            &format!("SQLi ({})", category),
+        );
         return WafVerdict::Block(format!("SQL injection detected ({})", category));
     }
 
@@ -355,7 +461,8 @@ pub fn inspect_request_with_profile(
             pattern = m.as_str(),
             "WAF blocked: path traversal in URI"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "path_traversal",
             client_addr,
             uri,
@@ -372,7 +479,13 @@ pub fn inspect_request_with_profile(
             pattern = m.as_str(),
             "WAF blocked: XSS in URI"
         );
-        metrics::record_block("xss", client_addr, uri, &format!("XSS: {}", m.as_str()));
+        metrics::record_block_in(
+            site_scope,
+            "xss",
+            client_addr,
+            uri,
+            &format!("XSS: {}", m.as_str()),
+        );
         return WafVerdict::Block(format!("XSS detected: {}", m.as_str()));
     }
 
@@ -387,7 +500,13 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: CRLF injection in header"
                 );
-                metrics::record_block("crlf", client_addr, uri, "CRLF injection in header");
+                metrics::record_block_in(
+                    site_scope,
+                    "crlf",
+                    client_addr,
+                    uri,
+                    "CRLF injection in header",
+                );
                 return WafVerdict::Block("CRLF injection detected in header".to_string());
             }
             if contains_jndi(inspected) {
@@ -396,7 +515,13 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: JNDI/Log4Shell in header"
                 );
-                metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in header");
+                metrics::record_block_in(
+                    site_scope,
+                    "jndi",
+                    client_addr,
+                    uri,
+                    "JNDI/Log4Shell in header",
+                );
                 return WafVerdict::Block("JNDI injection detected in header".to_string());
             }
             if let Some(category) = check_sqli(inspected) {
@@ -405,7 +530,8 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: SQL injection in header"
                 );
-                metrics::record_block(
+                metrics::record_block_in(
+                    site_scope,
                     "sqli",
                     client_addr,
                     uri,
@@ -422,7 +548,8 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: path traversal in header"
                 );
-                metrics::record_block(
+                metrics::record_block_in(
+                    site_scope,
                     "path_traversal",
                     client_addr,
                     uri,
@@ -439,7 +566,8 @@ pub fn inspect_request_with_profile(
                     uri = uri,
                     "WAF blocked: XSS in header"
                 );
-                metrics::record_block(
+                metrics::record_block_in(
+                    site_scope,
                     "xss",
                     client_addr,
                     uri,
@@ -454,29 +582,35 @@ pub fn inspect_request_with_profile(
 }
 
 /// Inspect request body (POST/PUT/PATCH) for SQLi, XSS, CRLF and JNDI payloads.
-/// `content_type` is used to skip CRLF checks on multipart/form-data (legitimate \r\n in uploads).
+/// Multipart is not inspectable in v1 (protocol matrix); this returns UnsupportedContentType.
 pub fn inspect_body(
     body: &[u8],
     uri: &str,
     client_addr: &str,
     content_type: Option<&str>,
 ) -> WafInspection {
+    inspect_body_limited(
+        body,
+        uri,
+        client_addr,
+        content_type,
+        INSPECT_TEXT_LIMIT,
+        metrics::UNSCOPED_SITE,
+    )
+}
+
+pub fn inspect_body_limited(
+    body: &[u8],
+    uri: &str,
+    client_addr: &str,
+    content_type: Option<&str>,
+    text_limit: usize,
+    site_scope: &str,
+) -> WafInspection {
     if !is_inspectable_content_type(content_type) {
         return WafInspection {
             verdict: WafVerdict::Allow,
-            status: InspectionStatus::UnsupportedContentType,
-        };
-    }
-    let is_multipart = content_type
-        .map(|ct| ct.to_ascii_lowercase().contains("multipart/form-data"))
-        .unwrap_or(false);
-    if is_multipart
-        && body.len() <= INSPECT_TEXT_LIMIT
-        && multipart_has_unsupported_transfer_encoding(body)
-    {
-        return WafInspection {
-            verdict: WafVerdict::Allow,
-            status: InspectionStatus::UnsupportedContentType,
+            status: InspectionOutcome::UnsupportedContentType,
         };
     }
     let text = match std::str::from_utf8(body) {
@@ -484,30 +618,44 @@ pub fn inspect_body(
         Err(_) => {
             return WafInspection {
                 verdict: WafVerdict::Allow,
-                status: InspectionStatus::UnsupportedContentType,
+                status: InspectionOutcome::UnsupportedContentType,
             }
         }
     };
 
-    // Limit inspection to first 64KB to avoid DoS on large uploads.
-    // Cut on a char boundary so a multibyte UTF-8 scalar at 64KB cannot panic.
-    let (text, status) = if text.len() > INSPECT_TEXT_LIMIT {
-        let mut end = INSPECT_TEXT_LIMIT;
+    // Cut on a char boundary so a multibyte UTF-8 scalar at the limit cannot panic.
+    let total_len = text.len();
+    let (text, mut status) = if total_len > text_limit {
+        let mut end = text_limit;
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }
-        (&text[..end], InspectionStatus::Truncated)
+        (
+            &text[..end],
+            InspectionOutcome::Truncated {
+                inspected: end,
+                total_hint: Some(total_len),
+            },
+        )
     } else {
-        (text, InspectionStatus::Complete)
+        (text, InspectionOutcome::Complete)
     };
 
     let content_type_lower = content_type.unwrap_or("").to_ascii_lowercase();
     let canonical_json = if status.is_complete()
         && (content_type_lower.contains("application/json") || content_type_lower.contains("+json"))
     {
-        serde_json::from_str::<serde_json::Value>(text)
-            .ok()
-            .map(|value| json_strings(&value))
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) if json_nesting_depth(&value) > MAX_JSON_DEPTH => {
+                status = InspectionOutcome::ParseError;
+                None
+            }
+            Ok(value) => Some(json_strings(&value, text_limit)),
+            Err(_) => {
+                status = InspectionOutcome::ParseError;
+                None
+            }
+        }
     } else {
         None
     };
@@ -528,14 +676,19 @@ pub fn inspect_body(
         recursive_urldecode(&inspection_text)
     };
 
-    // CRLF check — skip for multipart/form-data (legitimate \r\n in uploads)
-    if !is_multipart && BODY_CRLF_INJECTION_RE.is_match(&decoded) {
+    if BODY_CRLF_INJECTION_RE.is_match(&decoded) {
         warn!(
             client = client_addr,
             uri = uri,
             "WAF blocked: CRLF injection in request body"
         );
-        metrics::record_block("crlf", client_addr, uri, "CRLF injection in body");
+        metrics::record_block_in(
+            site_scope,
+            "crlf",
+            client_addr,
+            uri,
+            "CRLF injection in body",
+        );
         return WafInspection {
             verdict: WafVerdict::Block("CRLF injection detected in body".to_string()),
             status,
@@ -549,7 +702,13 @@ pub fn inspect_body(
             uri = uri,
             "WAF blocked: JNDI/Log4Shell in request body"
         );
-        metrics::record_block("jndi", client_addr, uri, "JNDI/Log4Shell in body");
+        metrics::record_block_in(
+            site_scope,
+            "jndi",
+            client_addr,
+            uri,
+            "JNDI/Log4Shell in body",
+        );
         return WafInspection {
             verdict: WafVerdict::Block("JNDI injection detected in body".to_string()),
             status,
@@ -563,7 +722,8 @@ pub fn inspect_body(
             category = category,
             "WAF blocked: SQL injection in request body"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "body_sqli",
             client_addr,
             uri,
@@ -582,7 +742,8 @@ pub fn inspect_body(
             pattern = m.as_str(),
             "WAF blocked: XSS in request body"
         );
-        metrics::record_block(
+        metrics::record_block_in(
+            site_scope,
             "body_xss",
             client_addr,
             uri,
@@ -600,33 +761,25 @@ pub fn inspect_body(
     }
 }
 
-fn multipart_has_unsupported_transfer_encoding(body: &[u8]) -> bool {
-    String::from_utf8_lossy(body).lines().any(|line| {
-        let line = line.trim().to_ascii_lowercase();
-        line.strip_prefix("content-transfer-encoding:")
-            .map(str::trim)
-            .is_some_and(|encoding| !matches!(encoding, "7bit" | "8bit" | "binary" | "identity"))
-    })
-}
-
 fn is_inspectable_content_type(content_type: Option<&str>) -> bool {
-    let Some(content_type) = content_type else {
-        return true;
-    };
-    let content_type = content_type.to_ascii_lowercase();
-    content_type.starts_with("text/")
-        || content_type.contains("application/json")
-        || content_type.contains("+json")
-        || content_type.contains("application/xml")
-        || content_type.contains("+xml")
-        || content_type.contains("application/x-www-form-urlencoded")
-        || content_type.contains("multipart/form-data")
-        || content_type.contains("application/graphql")
+    protocol::is_l0_inspectable_content_type(content_type)
 }
 
-fn json_strings(value: &serde_json::Value) -> String {
-    fn visit(value: &serde_json::Value, output: &mut String) {
-        if output.len() >= INSPECT_TEXT_LIMIT {
+fn json_nesting_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(items) => {
+            items.iter().map(json_nesting_depth).max().unwrap_or(0) + 1
+        }
+        serde_json::Value::Object(map) => {
+            map.values().map(json_nesting_depth).max().unwrap_or(0) + 1
+        }
+        _ => 0,
+    }
+}
+
+fn json_strings(value: &serde_json::Value, text_limit: usize) -> String {
+    fn visit(value: &serde_json::Value, output: &mut String, text_limit: usize) {
+        if output.len() >= text_limit {
             return;
         }
         match value {
@@ -636,20 +789,20 @@ fn json_strings(value: &serde_json::Value) -> String {
             }
             serde_json::Value::Array(values) => {
                 for value in values {
-                    visit(value, output);
+                    visit(value, output, text_limit);
                 }
             }
             serde_json::Value::Object(values) => {
                 for (key, value) in values {
                     output.push_str(key);
                     output.push('\n');
-                    visit(value, output);
+                    visit(value, output, text_limit);
                 }
             }
             _ => {}
         }
-        if output.len() > INSPECT_TEXT_LIMIT {
-            let mut end = INSPECT_TEXT_LIMIT;
+        if output.len() > text_limit {
+            let mut end = text_limit;
             while end > 0 && !output.is_char_boundary(end) {
                 end -= 1;
             }
@@ -658,7 +811,7 @@ fn json_strings(value: &serde_json::Value) -> String {
     }
 
     let mut output = String::new();
-    visit(value, &mut output);
+    visit(value, &mut output, text_limit);
     output
 }
 
@@ -698,11 +851,19 @@ pub fn inflate_for_inspect<'a>(
     body: &'a [u8],
     content_encoding: Option<&str>,
 ) -> InspectionBody<'a> {
+    inflate_for_inspect_limited(body, content_encoding, MAX_INFLATE_FOR_INSPECT)
+}
+
+pub fn inflate_for_inspect_limited<'a>(
+    body: &'a [u8],
+    content_encoding: Option<&str>,
+    inflate_limit: u64,
+) -> InspectionBody<'a> {
     let enc = content_encoding.unwrap_or("").to_ascii_lowercase();
     if enc.is_empty() || enc == "identity" {
         return InspectionBody {
             bytes: Cow::Borrowed(body),
-            status: InspectionStatus::Complete,
+            status: InspectionOutcome::Complete,
         };
     }
     let tokens: Vec<&str> = enc.split(',').map(|t| t.trim()).collect();
@@ -710,8 +871,8 @@ pub fn inflate_for_inspect<'a>(
         return unsupported_encoding(body);
     }
     match tokens[0] {
-        "gzip" | "x-gzip" => inflate_with(MultiGzDecoder::new(body), body),
-        "deflate" => inflate_with(DeflateDecoder::new(body), body),
+        "gzip" | "x-gzip" => inflate_with(MultiGzDecoder::new(body), body, inflate_limit),
+        "deflate" => inflate_with(DeflateDecoder::new(body), body, inflate_limit),
         _ => unsupported_encoding(body),
     }
 }
@@ -719,18 +880,25 @@ pub fn inflate_for_inspect<'a>(
 fn unsupported_encoding(body: &[u8]) -> InspectionBody<'_> {
     InspectionBody {
         bytes: Cow::Borrowed(body),
-        status: InspectionStatus::UnsupportedEncoding,
+        status: InspectionOutcome::UnsupportedEncoding,
     }
 }
 
-fn inflate_with<'a, R: Read>(decoder: R, fallback: &'a [u8]) -> InspectionBody<'a> {
-    match read_capped_inflate(decoder) {
+fn inflate_with<'a, R: Read>(
+    decoder: R,
+    fallback: &'a [u8],
+    inflate_limit: u64,
+) -> InspectionBody<'a> {
+    match read_capped_inflate(decoder, inflate_limit) {
         Ok(mut out) if !out.is_empty() => {
-            let status = if out.len() as u64 > MAX_INFLATE_FOR_INSPECT {
-                out.truncate(MAX_INFLATE_FOR_INSPECT as usize);
-                InspectionStatus::Truncated
+            let status = if out.len() as u64 > inflate_limit {
+                out.truncate(inflate_limit as usize);
+                InspectionOutcome::Truncated {
+                    inspected: out.len(),
+                    total_hint: None,
+                }
             } else {
-                InspectionStatus::Complete
+                InspectionOutcome::Complete
             };
             InspectionBody {
                 bytes: Cow::Owned(out),
@@ -741,10 +909,10 @@ fn inflate_with<'a, R: Read>(decoder: R, fallback: &'a [u8]) -> InspectionBody<'
     }
 }
 
-fn read_capped_inflate<R: Read>(mut decoder: R) -> std::io::Result<Vec<u8>> {
+fn read_capped_inflate<R: Read>(mut decoder: R, inflate_limit: u64) -> std::io::Result<Vec<u8>> {
     // A fixed boxed slice makes the heap allocation match the budget exactly;
     // the final byte is only a sentinel to distinguish complete from truncated.
-    let mut buffer = vec![0_u8; max_inflate_buffer_bytes()].into_boxed_slice();
+    let mut buffer = vec![0_u8; inflate_buffer_bytes(inflate_limit)].into_boxed_slice();
     let mut filled = 0;
     while filled < buffer.len() {
         match decoder.read(&mut buffer[filled..]) {
@@ -898,7 +1066,7 @@ mod tests {
         let mut payload = gzip(b"conteudo seguro ");
         payload.extend(gzip(b"1 UNION SELECT password FROM users"));
         let inflated = inflate_for_inspect(&payload, Some("gzip"));
-        assert_eq!(inflated.status, InspectionStatus::Complete);
+        assert_eq!(inflated.status, InspectionOutcome::Complete);
         assert!(body_blocked(inspect_body(
             &inflated.bytes,
             "/",
@@ -982,7 +1150,10 @@ mod tests {
             "inflate must stop at the inspect cap, got {}",
             inflated.bytes.len()
         );
-        assert_eq!(inflated.status, InspectionStatus::Truncated);
+        assert!(matches!(
+            inflated.status,
+            InspectionOutcome::Truncated { inspected, .. } if inspected == MAX_INFLATE_FOR_INSPECT as usize
+        ));
     }
 
     #[test]
@@ -1021,23 +1192,51 @@ mod tests {
     }
 
     #[test]
+    fn raised_text_limit_sees_sqli_past_default_window() {
+        let mut body = vec![b'a'; INSPECT_TEXT_LIMIT];
+        body.extend_from_slice(b" UNION SELECT password FROM users");
+        let truncated = inspect_body(&body, "/", "1.1.1.1", Some("text/plain"));
+        assert_eq!(truncated.verdict, WafVerdict::Allow);
+        assert!(matches!(
+            truncated.status,
+            InspectionOutcome::Truncated { .. }
+        ));
+        let full = inspect_body_limited(
+            &body,
+            "/",
+            "1.1.1.1",
+            Some("text/plain"),
+            body.len(),
+            metrics::UNSCOPED_SITE,
+        );
+        assert!(
+            matches!(full.verdict, WafVerdict::Block(_)),
+            "matching window must see SQLi in the last bytes"
+        );
+        assert_eq!(full.status, InspectionOutcome::Complete);
+    }
+
+    #[test]
     fn text_after_inspection_limit_is_explicitly_truncated() {
         let body = vec![b'a'; INSPECT_TEXT_LIMIT + 1];
         let inspection = inspect_body(&body, "/", "1.1.1.1", Some("application/json"));
         assert_eq!(inspection.verdict, WafVerdict::Allow);
-        assert_eq!(inspection.status, InspectionStatus::Truncated);
+        assert!(matches!(
+            inspection.status,
+            InspectionOutcome::Truncated { inspected, .. } if inspected == INSPECT_TEXT_LIMIT
+        ));
     }
 
     #[test]
     fn unknown_encoding_is_explicitly_unsupported() {
         let inspection = inflate_for_inspect(b"hello", Some("br"));
-        assert_eq!(inspection.status, InspectionStatus::UnsupportedEncoding);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedEncoding);
     }
 
     #[test]
     fn binary_body_is_explicitly_unsupported() {
         let inspection = inspect_body(&[0xff, 0xfe], "/", "1.1.1.1", None);
-        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedContentType);
     }
 
     #[test]
@@ -1059,7 +1258,7 @@ mod tests {
             "1.1.1.1",
             Some("application/octet-stream"),
         );
-        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedContentType);
     }
 
     #[test]
@@ -1071,6 +1270,151 @@ mod tests {
             "1.1.1.1",
             Some("multipart/form-data; boundary=x"),
         );
-        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedContentType);
+    }
+
+    #[test]
+    fn multipart_is_never_inspect_complete() {
+        let body = b"--x\r\nContent-Disposition: form-data; name=q\r\n\r\nhello\r\n--x--\r\n";
+        let inspection = inspect_body(
+            body,
+            "/api/payment",
+            "1.1.1.1",
+            Some("multipart/form-data; boundary=x"),
+        );
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedContentType);
+        assert!(!inspection.status.is_complete());
+    }
+
+    #[test]
+    fn garbage_json_is_parse_error_not_complete() {
+        let inspection = inspect_body(
+            b"{not json",
+            "/api/payment",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+        assert!(!inspection.status.is_complete());
+        assert_eq!(inspection.status.denied_status(), 403);
+        assert_eq!(inspection.status.as_str(), "parse_error");
+    }
+
+    #[test]
+    fn garbage_json_with_charset_is_parse_error() {
+        let inspection = inspect_body(
+            b"[1, 2,",
+            "/",
+            "1.1.1.1",
+            Some("application/json; charset=utf-8"),
+        );
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+    }
+
+    #[test]
+    fn valid_json_stays_complete() {
+        let inspection = inspect_body(br#"{"ok":true}"#, "/", "1.1.1.1", Some("application/json"));
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionOutcome::Complete);
+    }
+
+    fn nested_json_objects(depth: usize) -> Vec<u8> {
+        let mut json = String::from("null");
+        for _ in 0..depth {
+            json = format!("{{\"n\":{json}}}");
+        }
+        json.into_bytes()
+    }
+
+    fn nested_json_arrays(depth: usize) -> Vec<u8> {
+        let mut json = String::from("null");
+        for _ in 0..depth {
+            json = format!("[{json}]");
+        }
+        json.into_bytes()
+    }
+
+    #[test]
+    fn json_at_depth_budget_stays_complete() {
+        let inspection = inspect_body(
+            &nested_json_objects(MAX_JSON_DEPTH),
+            "/",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionOutcome::Complete);
+    }
+
+    #[test]
+    fn json_deeper_than_budget_is_parse_error() {
+        let inspection = inspect_body(
+            &nested_json_objects(40),
+            "/api/payment",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+        assert_eq!(inspection.status.denied_status(), 403);
+    }
+
+    #[test]
+    fn json_array_deeper_than_budget_is_parse_error() {
+        let inspection = inspect_body(
+            &nested_json_arrays(MAX_JSON_DEPTH + 1),
+            "/",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+    }
+
+    #[test]
+    fn truncated_json_is_truncated_not_parse_error() {
+        let body = vec![b'a'; INSPECT_TEXT_LIMIT + 1];
+        let inspection = inspect_body(&body, "/", "1.1.1.1", Some("application/json"));
+        assert!(matches!(
+            inspection.status,
+            InspectionOutcome::Truncated { .. }
+        ));
+        assert_ne!(inspection.status, InspectionOutcome::ParseError);
+    }
+
+    #[test]
+    fn lying_gzip_does_not_hide_json_parse_error() {
+        let inflated = inflate_for_inspect(b"{not json", Some("gzip"));
+        assert_eq!(inflated.status, InspectionOutcome::UnsupportedEncoding);
+        let inspection = inspect_body(&inflated.bytes, "/", "1.1.1.1", Some("application/json"));
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+        assert_eq!(
+            inflated.status.combine(inspection.status),
+            InspectionOutcome::ParseError
+        );
+    }
+
+    #[test]
+    fn body_timeout_outcome_is_408_timed_out() {
+        assert_eq!(InspectionOutcome::TimedOut.denied_status(), 408);
+        assert_eq!(InspectionOutcome::TimedOut.as_str(), "timed_out");
+        assert_eq!(
+            InspectionOutcome::TimedOut.event_type(),
+            "inspection_timeout"
+        );
+    }
+
+    #[test]
+    fn budget_exceeded_outcome_is_503() {
+        assert_eq!(InspectionOutcome::BudgetExceeded.denied_status(), 503);
+        assert_eq!(
+            InspectionOutcome::BudgetExceeded.as_str(),
+            "budget_exceeded"
+        );
+        assert_eq!(
+            InspectionOutcome::BudgetExceeded.event_type(),
+            "inspection_budget"
+        );
     }
 }

@@ -20,8 +20,8 @@ fn inspect_semantics(
     limit: usize,
 ) {
     let header_values: Vec<String> = headers.collect();
-    let _ = shield::check_method(method, uri, "127.0.0.1");
-    let _ = shield::check_uri_length(uri, "127.0.0.1");
+    let _ = shield::check_method(method, uri, "127.0.0.1", "");
+    let _ = shield::check_uri_length(uri, "127.0.0.1", "");
     let _ = waf::inspect_request(uri, &header_values, "127.0.0.1");
 
     let mut buffered = BoundedBodyBuffer::new(limit);
@@ -74,8 +74,8 @@ fn fuzz_h1(data: &[u8]) {
         .map(|header| String::from_utf8_lossy(header.value));
 
     let _ = shield::check_headers(request.headers.len(), body_offset, uri, "127.0.0.1");
-    let _ = shield::check_method(method, uri, "127.0.0.1");
-    let _ = shield::check_uri_length(uri, "127.0.0.1");
+    let _ = shield::check_method(method, uri, "127.0.0.1", "");
+    let _ = shield::check_uri_length(uri, "127.0.0.1", "");
     let _ = shield::check_smuggling(
         !content_lengths.is_empty(),
         content_lengths.len(),
@@ -83,6 +83,7 @@ fn fuzz_h1(data: &[u8]) {
         transfer_encoding.as_deref(),
         uri,
         "127.0.0.1",
+        "",
     );
     let body = &wire[body_offset..];
     let chunk_size = usize::from(control & 0x1f).saturating_add(1);

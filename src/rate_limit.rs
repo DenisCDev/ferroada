@@ -119,7 +119,8 @@ impl RateLimiter {
                     window = self.window_secs,
                     "Rate limit exceeded"
                 );
-                metrics::record_block(
+                metrics::record_block_in(
+                    &identity.site,
                     "rate_limit",
                     &identity.network.to_string(),
                     uri,

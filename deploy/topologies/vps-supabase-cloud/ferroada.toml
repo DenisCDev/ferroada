@@ -1,0 +1,8 @@
+# Substitua {{PUBLIC_HOST}}. O backend tem de ser http:// ou https://
+# (o processo resolve DNS no arranque). Host desconhecido recebe 421.
+
+[[sites]]
+hosts = ["{{PUBLIC_HOST}}"]
+backend = "http://app:8080"
+waf_profile = "generic"
+require_complete_waf_inspection = ["/api/payment", "/api/admin", "/auth", "/login"]

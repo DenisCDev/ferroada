@@ -1,0 +1,49 @@
+# Produção. Dashboard só no loopback do anfitrião (não na internet).
+# Túnel: ssh -L 9000:127.0.0.1:9000 usuario@vps
+# Corra a partir da raiz do repositório, depois de copiar .env.example para .env:
+#   docker compose -f deploy/topologies/vps-supabase-cloud/docker-compose.yml --env-file deploy/topologies/vps-supabase-cloud/.env up -d --build
+#
+# TLS: este ficheiro publica 80:3000 e 443:3443 no Ferroada.
+# Se não há fullchain, use docker-compose.caddy.yml — nunca os dois.
+# Não use este Compose e o unit systemd ao mesmo tempo.
+
+services:
+  ferroada:
+    image: ferroada:0.6.0
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      DASHBOARD_BIND: "0.0.0.0"
+    volumes:
+      - ./ferroada.toml:/ferroada.toml:ro
+      - ./certs:/certs:ro
+      - ferroada_spool:/var/lib/ferroada/spool
+    working_dir: /
+    ports:
+      - "80:3000"
+      - "443:3443"
+      - "127.0.0.1:9000:9000"
+    restart: unless-stopped
+    networks:
+      - edge
+      - origin
+    depends_on:
+      - app
+
+  app:
+    image: ${APP_IMAGE:-nginx:alpine}
+    expose:
+      - "8080"
+    networks:
+      - origin
+    restart: unless-stopped
+
+networks:
+  edge:
+  origin:
+
+volumes:
+  ferroada_spool:

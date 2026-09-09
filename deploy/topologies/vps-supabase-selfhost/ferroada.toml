@@ -1,0 +1,14 @@
+# Substitua {{PUBLIC_HOST}}. O backend tem de ser http:// ou https://
+# (o processo resolve DNS no arranque). Host desconhecido recebe 421.
+
+[[sites]]
+hosts = ["{{PUBLIC_HOST}}"]
+backend = "http://kong:8000"
+waf_profile = "generic"
+require_complete_waf_inspection = ["/auth/v1/token", "/rest/v1/"]
+
+# Studio (não descomente no público):
+# [[sites]]
+# hosts = ["studio.{{PUBLIC_HOST}}"]
+# backend = "http://studio:3000"
+# # Studio não é API. Auth extra ou túnel SSH.

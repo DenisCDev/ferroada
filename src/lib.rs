@@ -1,12 +1,21 @@
 pub mod behavioral;
+pub mod cidrs;
 pub mod client_ip;
 pub mod config;
 pub mod connection;
 pub mod dashboard;
 pub mod dlp;
 pub mod headers;
+pub mod healthcheck;
+pub mod init;
+pub mod listen;
 pub mod metrics;
+pub mod protocol;
 pub mod proxy;
+pub mod proxy_protocol;
+#[cfg(test)]
+mod proxy_protocol_socket;
 pub mod rate_limit;
 pub mod shield;
+pub mod spool;
 pub mod waf;

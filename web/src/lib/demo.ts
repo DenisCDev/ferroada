@@ -1,5 +1,7 @@
 import type { FerroadaMetrics, SecurityEvent } from "./types";
 
+/** Invented traffic for screenshots. Production may use this only when FERROADA_ALLOW_DEMO=true. */
+
 const URIS = [
   "/login?user=admin'--",
   "/.env",
@@ -44,6 +46,7 @@ export function demoMetrics(): FerroadaMetrics {
       concurrency_limit: 0,
       connection_limit: 0,
       request_buffer_limit: 0,
+      spool_limit: 0,
       dlp_partial_block: 0,
     },
     https_redirect: 220,

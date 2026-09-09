@@ -12,6 +12,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::metrics;
+use crate::proxy_protocol::PreTlsProcess;
+use pingora::tls::ssl::SslAcceptor;
 
 #[derive(Debug)]
 pub struct ConnectionRateFilter {
@@ -36,11 +38,23 @@ impl ConnectionRateFilter {
         )
     }
 
-    pub fn wrap<A>(&self, inner: A) -> BoundedHttpApp<A> {
+    pub fn wrap<A>(
+        &self,
+        inner: A,
+        proxy_protocol: bool,
+        tls_acceptor: Option<SslAcceptor>,
+    ) -> BoundedHttpApp<A> {
         BoundedHttpApp {
             inner: Arc::new(inner),
             connections: Arc::clone(&self.connections),
+            proxy_protocol,
+            tls_acceptor: tls_acceptor.map(Arc::new),
         }
+    }
+
+    #[cfg(test)]
+    pub fn for_test(max_active: usize) -> Self {
+        Self::new_with_connection_limit(60, Duration::from_secs(1), 50_000, 10_000, max_active)
     }
 
     #[cfg(test)]
@@ -214,6 +228,10 @@ impl ActiveConnectionState {
 pub struct BoundedHttpApp<A> {
     inner: Arc<A>,
     connections: Arc<ActiveConnectionState>,
+    proxy_protocol: bool,
+    /// When set, PROXY v2 is consumed first ([`PreTlsProcess`]) and then we
+    /// handshake. Pingora 0.8.1 `add_tls` handshakes before `process_new`.
+    tls_acceptor: Option<Arc<SslAcceptor>>,
 }
 
 #[async_trait]
@@ -223,27 +241,63 @@ where
 {
     async fn process_new(
         self: &Arc<Self>,
-        stream: Stream,
+        mut stream: Stream,
         shutdown: &ShutdownWatch,
     ) -> Option<Stream> {
-        let client_addr = stream
+        // Pending reservation is keyed by the TCP peer from should_accept.
+        // PROXY rewrite must not run before activate, or the slot is leaked
+        // and MAX_ACTIVE_CONNECTIONS=1 drops the happy path.
+        let tcp_peer = stream
             .get_socket_digest()
             .and_then(|digest| digest.peer_addr().cloned());
-        let inet_addr = client_addr
+        let tcp_inet = tcp_peer.as_ref().and_then(|addr| addr.as_inet().copied());
+        let tcp_peer_label = tcp_peer
             .as_ref()
-            .and_then(|addr| addr.as_inet().copied());
-        let Some(_guard) = self.connections.activate(inet_addr) else {
-            let client = client_addr
-                .map(|addr| addr.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let Some(_guard) = self.connections.activate(tcp_inet) else {
             metrics::record_block(
                 "connection_limit",
-                &client,
+                &tcp_peer_label,
                 "/",
                 "Maximum active downstream connections reached",
             );
             return None;
         };
+        if self.proxy_protocol {
+            if let Err(error) = PreTlsProcess.process(&mut stream).await {
+                metrics::record_block("proxy_protocol", &tcp_peer_label, "/", error.as_str());
+                tracing::warn!(peer = %tcp_peer_label, reason = error.as_str(), "conexão recusada: PROXY protocol v2");
+                return None;
+            }
+        }
+        if let Some(acceptor) = self.tls_acceptor.as_ref() {
+            let l4 = match pingora::protocols::IO::into_any(stream)
+                .downcast::<pingora::protocols::l4::stream::Stream>()
+            {
+                Ok(l4) => *l4,
+                Err(_) => {
+                    tracing::warn!("PreTlsProcess: stream não é TCP claro");
+                    return None;
+                }
+            };
+            match tokio::time::timeout(
+                Duration::from_secs(60),
+                pingora::protocols::tls::server::handshake(acceptor.as_ref(), l4),
+            )
+            .await
+            {
+                Ok(Ok(tls)) => stream = Box::new(tls),
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "TLS handshake falhou após PROXY v2");
+                    return None;
+                }
+                Err(_) => {
+                    tracing::warn!("TLS handshake esgotou 60s após PROXY v2");
+                    return None;
+                }
+            }
+        }
         ServerApp::process_new(&self.inner, stream, shutdown).await
     }
 

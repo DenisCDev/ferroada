@@ -1,5 +1,8 @@
 # Ferroada Multi-Site Configuration
 #
+# Packs de produção (dashboard em loopback, sem publicar a porta 9000):
+#   deploy/topologies/
+#
 # Quando este arquivo existe, o Ferroada roda em modo multi-site:
 # cada request e roteado para o backend correto pelo Host header.
 #
@@ -9,11 +12,41 @@
 # Se nao definido, requests com Host desconhecido recebem 421.
 # default_backend = "http://fallback:8080"
 
+# Matriz de protocolo. inspect = suportado (L0 faz o que já faz).
+# Não suportado: deny | monitor | bypass-explicit | route-to-quarantine
+# route-to-quarantine (v1) = 403 + evento quarantine; sem origin honeypot.
+# Linhas omitidas usam o default. multipart/brotli/unknown_encoding/
+# unknown_content_type omitidos = deny em require_complete, monitor no resto.
+# Não existe unknown = "deny" ambíguo.
+[protocols]
+http_1_0 = "deny"
+http_1_1 = "inspect"
+http_2 = "inspect"
+http_3 = "deny"
+websocket = "bypass-explicit"
+grpc = "deny"
+json = "inspect"
+gzip_deflate = "inspect"
+sse = "inspect"
+unknown_http_version = "deny"
+unknown_upgrade = "deny"
+
 [[sites]]
 hosts = ["meusite.com", "www.meusite.com"]
 backend = "http://backend-a:8080"
 waf_profile = "wordpress"
 require_complete_waf_inspection = ["/api/payment", "/api/admin/"]
+
+# on_truncated / on_parse_error por prefixo. require_complete_waf_inspection
+# acima já significa on_truncated=deny e on_parse_error=deny nesses paths.
+# max_decoded_body só em require_complete: os três tetos (fio, texto, inflate)
+# usam este número. Sem require_complete o processo recusa o TOML no load.
+# [[sites.routes]]
+# prefix = "/api/payment"
+# inspection.require_complete = true
+# inspection.on_truncated = "deny"
+# inspection.on_parse_error = "deny"
+# inspection.max_decoded_body = "256KiB"
 
 [[sites]]
 hosts = ["api.meusite.com"]

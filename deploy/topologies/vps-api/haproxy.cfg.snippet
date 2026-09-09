@@ -1,0 +1,13 @@
+# HAProxy / NLB TCP imediatamente à frente do Ferroada.
+# Ligue PROXY_PROTOCOL=true no .env antes de send-proxy-v2.
+# `ferroada init --listen-mode proxied` (exceto cdn-edge) já escreve a flag.
+# No privileged a flag começa desligada — não ative send-proxy-v2 sem ela.
+# Pack cdn-edge Cloudflare NÃO usa isto.
+
+listen ferroada_tcp
+    bind *:80
+    mode tcp
+    server ferroada 127.0.0.1:3000 send-proxy-v2
+
+# AWS NLB: Target group → Attributes → Proxy protocol v2 = Enabled.
+# O NLB prefixa v2; o Ferroada recusa GET cru enquanto a flag estiver on.

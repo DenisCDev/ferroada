@@ -1,0 +1,18 @@
+# CDN → Ferroada → backend
+
+Modo recomendado. DDoS volumétrico no edge. Ferroada no origin, application-aware.
+
+Copie esta pasta ou gere com `ferroada init --topology cdn-edge`.
+
+| Ficheiro | Função |
+| --- | --- |
+| `ferroada.toml` | hosts e backend |
+| `.env.example` | knobs que o 0.6.0 já honra (caminho Ferroada termina TLS) |
+| `.env.caddy.example` | Caddy na frente; sem PROXY protocol (Cloudflare não prefixa v2) |
+| `docker-compose.yml` | Ferroada publica 80/443 |
+| `docker-compose.caddy.yml` | Caddy publica 80/443 |
+| `ferroada.service` | systemd em 3000/3443; `ferroada.privileged.service` é :80+:443+cap |
+| `Caddyfile` / `nginx.conf.snippet` | TLS local na frente |
+| `ORIGIN_LOCK.md` | firewall e overlay |
+| `VISIBILIDADE.md` | o que o proxy vê |
+| `CHECKLIST.md` | passos em pt-BR |

@@ -1,0 +1,28 @@
+[Unit]
+Description=Ferroada origin gateway
+Documentation=https://github.com/DenisCDev/ferroada
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ferroada
+Group=ferroada
+WorkingDirectory=/etc/ferroada
+EnvironmentFile=/etc/ferroada/env
+Environment=PROXY_LISTEN=127.0.0.1:3000
+Environment=TLS_LISTEN=127.0.0.1:3443
+ExecStart=/usr/local/bin/ferroada
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/ferroada
+ReadWritePaths=/var/lib/ferroada/spool
+# Caddy/nginx na frente em :80/:443. Sem cap: o processo não publica :80.
+# Não use junto com ferroada.privileged.service.
+
+[Install]
+WantedBy=multi-user.target
