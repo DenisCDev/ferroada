@@ -550,6 +550,7 @@ dependencies = [
  "dashmap",
  "dotenvy",
  "flate2",
+ "h2",
  "http",
  "once_cell",
  "openssl",

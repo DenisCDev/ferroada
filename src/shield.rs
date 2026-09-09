@@ -203,6 +203,121 @@ pub fn check_host(host_header: &str, uri: &str, client_addr: &str) -> ShieldVerd
     ShieldVerdict::Allow
 }
 
+/// RFC 9110 §7.6.1: tokens in `Connection` name hop-by-hop header fields.
+pub fn connection_hop_by_hop_names<'a, I>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut names = Vec::new();
+    for value in values {
+        for part in value.split(',') {
+            let name = part.trim();
+            if is_http_token(name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+fn is_http_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+/// Host and `:authority` (URI authority) must name the same origin when both exist.
+pub fn check_host_authority(
+    host_header: Option<&str>,
+    uri_authority: Option<&str>,
+    uri: &str,
+    client_addr: &str,
+) -> ShieldVerdict {
+    let host = host_header.map(str::trim).filter(|value| !value.is_empty());
+    let authority = uri_authority
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (Some(host), Some(authority)) = (host, authority) else {
+        return ShieldVerdict::Allow;
+    };
+    if authorities_match(host, authority) {
+        return ShieldVerdict::Allow;
+    }
+    warn!(
+        client = client_addr,
+        host, authority, "Blocked: Host and :authority identify different origins"
+    );
+    metrics::record_block(
+        "host",
+        client_addr,
+        uri,
+        &format!("Host {host} != :authority {authority}"),
+    );
+    ShieldVerdict::BlockHost
+}
+
+fn authorities_match(host_header: &str, uri_authority: &str) -> bool {
+    let Some((host_a, port_a)) = split_host_port(host_header) else {
+        return false;
+    };
+    let Some((host_b, port_b)) = split_host_port(uri_authority) else {
+        return false;
+    };
+    if !host_a.eq_ignore_ascii_case(host_b) {
+        return false;
+    }
+    match (port_a, port_b) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+fn split_host_port(value: &str) -> Option<(&str, Option<&str>)> {
+    let value = match value.rsplit_once('@') {
+        Some((_, rest)) => rest,
+        None => value,
+    };
+    if let Some(rest) = value.strip_prefix('[') {
+        let (host, rest) = rest.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        let port = if rest.is_empty() {
+            None
+        } else {
+            Some(rest.strip_prefix(':')?)
+        };
+        return Some((host, port));
+    }
+    match value.rsplit_once(':') {
+        Some((host, port))
+            if !host.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            Some((host, Some(port)))
+        }
+        _ if !value.is_empty() => Some((value, None)),
+        _ => None,
+    }
+}
+
 // --- Bad Bot Detection ---
 
 static BAD_BOT_ENABLED: Lazy<bool> = Lazy::new(|| {
@@ -366,6 +481,66 @@ mod tests {
         assert!(matches!(
             check_headers(1, *MAX_HEADER_BYTES + 1, "/", "127.0.0.1"),
             ShieldVerdict::BlockHeaders
+        ));
+    }
+
+    #[test]
+    fn connection_lists_hop_by_hop_header_names() {
+        let names = connection_hop_by_hop_names(["close, X-Evil", "Keep-Alive"]);
+        assert_eq!(names, ["close", "X-Evil", "Keep-Alive"]);
+        assert!(connection_hop_by_hop_names(["not a token"]).is_empty());
+    }
+
+    #[test]
+    fn host_and_authority_must_name_the_same_origin() {
+        assert!(matches!(
+            check_host_authority(
+                Some("victim.example"),
+                Some("evil.example"),
+                "/",
+                "127.0.0.1"
+            ),
+            ShieldVerdict::BlockHost
+        ));
+        assert!(matches!(
+            check_host_authority(
+                Some("Example.COM:443"),
+                Some("example.com:443"),
+                "/",
+                "127.0.0.1"
+            ),
+            ShieldVerdict::Allow
+        ));
+        assert!(matches!(
+            check_host_authority(
+                Some("example.com"),
+                Some("example.com:443"),
+                "/",
+                "127.0.0.1"
+            ),
+            ShieldVerdict::Allow
+        ));
+        assert!(matches!(
+            check_host_authority(Some("example.com"), None, "/", "127.0.0.1"),
+            ShieldVerdict::Allow
+        ));
+        assert!(matches!(
+            check_host_authority(
+                Some("[2001:db8::1]:8080"),
+                Some("[2001:DB8::1]:8080"),
+                "/",
+                "127.0.0.1"
+            ),
+            ShieldVerdict::Allow
+        ));
+        assert!(matches!(
+            check_host_authority(
+                Some("example.com:80"),
+                Some("example.com:443"),
+                "/",
+                "127.0.0.1"
+            ),
+            ShieldVerdict::BlockHost
         ));
     }
 }

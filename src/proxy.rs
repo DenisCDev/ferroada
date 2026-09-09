@@ -474,6 +474,24 @@ impl ProxyHttp for FerroadaProxy {
             .get("Host")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        let uri_authority = session
+            .req_header()
+            .uri
+            .authority()
+            .map(|authority| authority.as_str().to_string());
+        if matches!(
+            shield::check_host_authority(
+                host_val.as_deref(),
+                uri_authority.as_deref(),
+                &uri,
+                &client_addr,
+            ),
+            ShieldVerdict::BlockHost
+        ) {
+            return self
+                .send_400(session, "Host e :authority divergentes")
+                .await;
+        }
 
         if host_val.as_ref().is_some_and(|hv| {
             matches!(
@@ -1019,6 +1037,7 @@ impl ProxyHttp for FerroadaProxy {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         let backend = ctx.backend.as_ref().expect("backend must be resolved");
+        strip_hop_by_hop_headers(upstream_request);
         strip_untrusted_forwarding_headers(upstream_request);
         upstream_request
             .insert_header("Host", &backend.host)
@@ -1242,6 +1261,19 @@ fn record_inspection_outcome(
     }
 }
 
+fn strip_hop_by_hop_headers(request: &mut RequestHeader) {
+    let connection_values: Vec<String> = request
+        .headers
+        .get_all("Connection")
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_owned))
+        .collect();
+    for name in shield::connection_hop_by_hop_names(connection_values.iter().map(String::as_str)) {
+        request.remove_header(name.as_str());
+    }
+    request.remove_header("Connection");
+}
+
 fn strip_untrusted_forwarding_headers(request: &mut RequestHeader) {
     for header in [
         "Forwarded",
@@ -1281,6 +1313,7 @@ impl FerroadaProxy {
     }
 
     async fn send_400(&self, session: &mut Session, reason: &str) -> Result<bool> {
+        session.set_keepalive(None);
         let body = format!("400 Requisição inválida: {reason}\n");
         let mut header = ResponseHeader::build(400, None)?;
         header.insert_header("Content-Type", "text/plain")?;
@@ -1466,6 +1499,30 @@ mod tests {
         assert!(buffer.push(b"cde"));
         assert!(!buffer.push(b"f"));
         assert_eq!(buffer.as_slice(), b"abcde");
+    }
+
+    #[test]
+    fn connection_named_hop_by_hop_headers_are_removed() {
+        let mut request = RequestHeader::build("GET", b"/", Some(8)).unwrap();
+        request.insert_header("Host", "example.test").unwrap();
+        request
+            .insert_header("Connection", "close, X-Evil")
+            .unwrap();
+        request.insert_header("X-Evil", "injected").unwrap();
+        request.insert_header("X-Keep", "yes").unwrap();
+
+        strip_hop_by_hop_headers(&mut request);
+
+        assert!(!request.headers.contains_key("Connection"));
+        assert!(!request.headers.contains_key("X-Evil"));
+        assert_eq!(
+            request.headers.get("X-Keep").and_then(|v| v.to_str().ok()),
+            Some("yes")
+        );
+        assert_eq!(
+            request.headers.get("Host").and_then(|v| v.to_str().ok()),
+            Some("example.test")
+        );
     }
 
     #[test]
