@@ -27,6 +27,7 @@ pub struct Metrics {
     pub blocked_behavioral_throttle: AtomicU64,
     pub blocked_behavioral_block: AtomicU64,
     pub blocked_waf_incomplete: AtomicU64,
+    pub blocked_inspection_parse_error: AtomicU64,
     pub blocked_header_limit: AtomicU64,
     pub blocked_concurrency_limit: AtomicU64,
     pub blocked_connection_limit: AtomicU64,
@@ -37,6 +38,9 @@ pub struct Metrics {
     pub waf_inspection_truncated: AtomicU64,
     pub waf_inspection_unsupported_encoding: AtomicU64,
     pub waf_inspection_unsupported_content_type: AtomicU64,
+    pub waf_inspection_parse_error: AtomicU64,
+    pub waf_inspection_budget_exceeded: AtomicU64,
+    pub waf_inspection_timed_out: AtomicU64,
     pub waf_monitored: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
@@ -78,6 +82,7 @@ impl Metrics {
             blocked_behavioral_throttle: AtomicU64::new(0),
             blocked_behavioral_block: AtomicU64::new(0),
             blocked_waf_incomplete: AtomicU64::new(0),
+            blocked_inspection_parse_error: AtomicU64::new(0),
             blocked_header_limit: AtomicU64::new(0),
             blocked_concurrency_limit: AtomicU64::new(0),
             blocked_connection_limit: AtomicU64::new(0),
@@ -88,6 +93,9 @@ impl Metrics {
             waf_inspection_truncated: AtomicU64::new(0),
             waf_inspection_unsupported_encoding: AtomicU64::new(0),
             waf_inspection_unsupported_content_type: AtomicU64::new(0),
+            waf_inspection_parse_error: AtomicU64::new(0),
+            waf_inspection_budget_exceeded: AtomicU64::new(0),
+            waf_inspection_timed_out: AtomicU64::new(0),
             waf_monitored: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
@@ -169,6 +177,7 @@ pub fn record_block(event_type: &str, client_ip: &str, uri: &str, detail: &str) 
         "behavioral_throttle" => &METRICS.blocked_behavioral_throttle,
         "behavioral_block" => &METRICS.blocked_behavioral_block,
         "waf_incomplete" => &METRICS.blocked_waf_incomplete,
+        "inspection_parse_error" => &METRICS.blocked_inspection_parse_error,
         "header_limit" => &METRICS.blocked_header_limit,
         "concurrency_limit" => &METRICS.blocked_concurrency_limit,
         "connection_limit" => &METRICS.blocked_connection_limit,
@@ -226,6 +235,9 @@ pub fn record_waf_inspection(status: &str) {
         "truncated" => &METRICS.waf_inspection_truncated,
         "unsupported_encoding" => &METRICS.waf_inspection_unsupported_encoding,
         "unsupported_content_type" => &METRICS.waf_inspection_unsupported_content_type,
+        "parse_error" => &METRICS.waf_inspection_parse_error,
+        "budget_exceeded" => &METRICS.waf_inspection_budget_exceeded,
+        "timed_out" => &METRICS.waf_inspection_timed_out,
         _ => return,
     };
     counter.fetch_add(1, Ordering::Relaxed);
@@ -234,7 +246,15 @@ pub fn record_waf_inspection(status: &str) {
 pub fn record_observation(event_type: &str, client_ip: &str, uri: &str, detail: &str) {
     if event_type == "waf_monitor" {
         METRICS.waf_monitored.fetch_add(1, Ordering::Relaxed);
-    } else if !matches!(event_type, "dlp_skip" | "range_removed") {
+    } else if !matches!(
+        event_type,
+        "dlp_skip"
+            | "range_removed"
+            | "inspection_parse_error"
+            | "inspection_timeout"
+            | "inspection_budget"
+            | "waf_incomplete"
+    ) {
         return;
     }
     METRICS.push_event(SecurityEvent {
@@ -296,6 +316,7 @@ pub fn snapshot_json() -> String {
             "behavioral_throttle": m.blocked_behavioral_throttle.load(Ordering::Relaxed),
             "behavioral_block": m.blocked_behavioral_block.load(Ordering::Relaxed),
             "waf_incomplete": m.blocked_waf_incomplete.load(Ordering::Relaxed),
+            "inspection_parse_error": m.blocked_inspection_parse_error.load(Ordering::Relaxed),
             "header_limit": m.blocked_header_limit.load(Ordering::Relaxed),
             "concurrency_limit": m.blocked_concurrency_limit.load(Ordering::Relaxed),
             "connection_limit": m.blocked_connection_limit.load(Ordering::Relaxed),
@@ -306,7 +327,10 @@ pub fn snapshot_json() -> String {
             "complete": m.waf_inspection_complete.load(Ordering::Relaxed),
             "truncated": m.waf_inspection_truncated.load(Ordering::Relaxed),
             "unsupported_encoding": m.waf_inspection_unsupported_encoding.load(Ordering::Relaxed),
-            "unsupported_content_type": m.waf_inspection_unsupported_content_type.load(Ordering::Relaxed)
+            "unsupported_content_type": m.waf_inspection_unsupported_content_type.load(Ordering::Relaxed),
+            "parse_error": m.waf_inspection_parse_error.load(Ordering::Relaxed),
+            "budget_exceeded": m.waf_inspection_budget_exceeded.load(Ordering::Relaxed),
+            "timed_out": m.waf_inspection_timed_out.load(Ordering::Relaxed)
         },
         "waf_monitored": m.waf_monitored.load(Ordering::Relaxed),
         "https_redirect": m.https_redirect.load(Ordering::Relaxed),
@@ -347,6 +371,10 @@ pub fn snapshot_prometheus() -> String {
         ("behavioral_throttle", &metrics.blocked_behavioral_throttle),
         ("behavioral_block", &metrics.blocked_behavioral_block),
         ("waf_incomplete", &metrics.blocked_waf_incomplete),
+        (
+            "inspection_parse_error",
+            &metrics.blocked_inspection_parse_error,
+        ),
         ("concurrency_limit", &metrics.blocked_concurrency_limit),
         ("connection_limit", &metrics.blocked_connection_limit),
         (
@@ -377,6 +405,9 @@ pub fn snapshot_prometheus() -> String {
             "unsupported_content_type",
             &metrics.waf_inspection_unsupported_content_type,
         ),
+        ("parse_error", &metrics.waf_inspection_parse_error),
+        ("budget_exceeded", &metrics.waf_inspection_budget_exceeded),
+        ("timed_out", &metrics.waf_inspection_timed_out),
     ] {
         output.push_str(&format!(
             "ferroada_waf_inspection_total{{status=\"{status}\"}} {}\n",
@@ -416,6 +447,8 @@ mod tests {
         let snapshot = snapshot_prometheus();
         assert!(snapshot.contains("ferroada_requests_total"));
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"truncated\"}"));
+        assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"parse_error\"}"));
+        assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"timed_out\"}"));
         assert!(snapshot.contains("ferroada_protocol_total{action=\"quarantine\"}"));
     }
 }

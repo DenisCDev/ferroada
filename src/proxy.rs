@@ -61,14 +61,14 @@ static HTTPS_REDIRECT_HOST: Lazy<Option<String>> = Lazy::new(|| {
 
 use crate::behavioral::{self, BehavioralVerdict};
 use crate::client_ip::{RiskIdentity, TrustedProxies};
-use crate::config::Config;
+use crate::config::{Config, InspectionDisposition, InspectionPolicy};
 use crate::dlp;
 use crate::headers;
 use crate::metrics;
 use crate::protocol::{self, ProtocolVerdict, RequestFacts};
 use crate::rate_limit::RateLimiter;
 use crate::shield::{self, ShieldVerdict};
-use crate::waf::{self, WafVerdict};
+use crate::waf::{self, InspectionOutcome, WafVerdict};
 
 fn parse_ip(addr: &str) -> Option<IpAddr> {
     addr.parse::<std::net::SocketAddr>()
@@ -726,17 +726,17 @@ impl ProxyHttp for FerroadaProxy {
             .headers
             .get("Upgrade")
             .and_then(|v| v.to_str().ok());
-        let require_complete = ctx
+        let inspection_policy = ctx
             .backend
             .as_ref()
-            .map(|backend| backend.requires_complete_waf_inspection(&uri))
-            .unwrap_or(false);
+            .map(|backend| backend.inspection_policy(&uri))
+            .unwrap_or_else(InspectionPolicy::open);
         let protocol_verdict = self.config.protocols.evaluate(&RequestFacts {
             version: session.req_header().version,
             upgrade,
             content_encoding: ctx.request_content_encoding.as_deref(),
             content_type: ctx.request_content_type.as_deref(),
-            require_complete,
+            require_complete: inspection_policy.require_complete,
         });
         protocol::record(protocol_verdict, &client_addr, &uri);
         if protocol_verdict.blocked_status().is_some() {
@@ -780,6 +780,12 @@ impl ProxyHttp for FerroadaProxy {
             )
             .unwrap_or(usize::MAX);
             if !ctx.reserve_request(reservation) {
+                record_inspection_outcome(
+                    InspectionOutcome::BudgetExceeded,
+                    &ctx.client_addr,
+                    &ctx.request_uri,
+                    true,
+                );
                 metrics::record_block(
                     "request_buffer_limit",
                     &ctx.client_addr,
@@ -808,7 +814,7 @@ impl ProxyHttp for FerroadaProxy {
             let deadline = Instant::now() + *BODY_READ_TIMEOUT;
             loop {
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                    return self.send_408(session).await;
+                    return self.send_body_timeout(session, ctx).await;
                 };
                 let next = tokio::time::timeout(
                     remaining,
@@ -817,7 +823,7 @@ impl ProxyHttp for FerroadaProxy {
                 .await;
                 let chunk = match next {
                     Ok(result) => result?,
-                    Err(_) => return self.send_408(session).await,
+                    Err(_) => return self.send_body_timeout(session, ctx).await,
                 };
                 let Some(chunk) = chunk else {
                     break;
@@ -862,31 +868,23 @@ impl ProxyHttp for FerroadaProxy {
                     ctx.request_content_type.as_deref(),
                 );
                 let inspection_status = inspect_body.status.combine(inspection.status);
-                metrics::record_waf_inspection(inspection_status.as_str());
                 match inspection.verdict {
-                    WafVerdict::Allow => {
-                        let require_complete = ctx
-                            .backend
-                            .as_ref()
-                            .map(|backend| {
-                                backend.requires_complete_waf_inspection(&ctx.request_uri)
-                            })
-                            .unwrap_or(false);
-                        if require_complete && !inspection_status.is_complete() {
-                            metrics::record_block(
-                                "waf_incomplete",
+                    WafVerdict::Allow => match inspection_policy.disposition(inspection_status) {
+                        InspectionDisposition::Allow => {
+                            record_inspection_outcome(
+                                inspection_status,
                                 &ctx.client_addr,
                                 &ctx.request_uri,
-                                inspection_status.as_str(),
+                                false,
                             );
-                            if let Some(identity) = ctx.risk_identity.as_ref() {
-                                behavioral::record_waf_block(identity);
-                            }
-                            return self
-                                .send_403(session, "Inspeção WAF completa obrigatória nesta rota")
-                                .await;
                         }
-                        if !inspection_status.is_complete() {
+                        InspectionDisposition::Monitor => {
+                            record_inspection_outcome(
+                                inspection_status,
+                                &ctx.client_addr,
+                                &ctx.request_uri,
+                                false,
+                            );
                             tracing::warn!(
                                 client = %ctx.client_addr,
                                 uri = %ctx.request_uri,
@@ -894,8 +892,28 @@ impl ProxyHttp for FerroadaProxy {
                                 "Request body was not completely inspected"
                             );
                         }
-                    }
+                        InspectionDisposition::Deny => {
+                            record_inspection_outcome(
+                                inspection_status,
+                                &ctx.client_addr,
+                                &ctx.request_uri,
+                                true,
+                            );
+                            if let Some(identity) = ctx.risk_identity.as_ref() {
+                                behavioral::record_waf_block(identity);
+                            }
+                            return self
+                                .send_403(session, incomplete_inspection_reason(inspection_status))
+                                .await;
+                        }
+                    },
                     WafVerdict::Block(reason) => {
+                        record_inspection_outcome(
+                            inspection_status,
+                            &ctx.client_addr,
+                            &ctx.request_uri,
+                            false,
+                        );
                         if let Some(identity) = ctx.risk_identity.as_ref() {
                             behavioral::record_waf_block(identity);
                         }
@@ -1147,6 +1165,59 @@ impl ProxyHttp for FerroadaProxy {
     }
 }
 
+fn incomplete_inspection_reason(outcome: InspectionOutcome) -> &'static str {
+    match outcome {
+        InspectionOutcome::ParseError => "JSON inválido (ParseError)",
+        InspectionOutcome::TimedOut => "tempo esgotado (TimedOut)",
+        InspectionOutcome::BudgetExceeded => "orçamento de inspeção esgotado (BudgetExceeded)",
+        _ => "Inspeção WAF completa obrigatória nesta rota",
+    }
+}
+
+fn outcome_detail(outcome: InspectionOutcome) -> &'static str {
+    match outcome {
+        InspectionOutcome::ParseError => "ParseError",
+        InspectionOutcome::TimedOut => "TimedOut",
+        InspectionOutcome::BudgetExceeded => "BudgetExceeded",
+        other => other.as_str(),
+    }
+}
+
+fn on_body_read_timeout(client_addr: &str, uri: &str) -> InspectionOutcome {
+    let outcome = InspectionOutcome::TimedOut;
+    record_inspection_outcome(outcome, client_addr, uri, true);
+    outcome
+}
+
+fn record_inspection_outcome(
+    outcome: InspectionOutcome,
+    client_addr: &str,
+    uri: &str,
+    denied: bool,
+) {
+    metrics::record_waf_inspection(outcome.as_str());
+    if outcome.is_complete() {
+        return;
+    }
+    let detail = outcome_detail(outcome);
+    if denied {
+        match outcome {
+            InspectionOutcome::TimedOut | InspectionOutcome::BudgetExceeded => {
+                metrics::record_observation(outcome.event_type(), client_addr, uri, detail);
+            }
+            _ => {
+                metrics::record_block(outcome.event_type(), client_addr, uri, detail);
+            }
+        }
+        return;
+    }
+    // Truncated/unsupported on an open route already warn; do not fill the
+    // event ring with every upload that merely exceeds the inspect window.
+    if matches!(outcome, InspectionOutcome::ParseError) {
+        metrics::record_observation(outcome.event_type(), client_addr, uri, detail);
+    }
+}
+
 fn strip_untrusted_forwarding_headers(request: &mut RequestHeader) {
     for header in [
         "Forwarded",
@@ -1219,9 +1290,14 @@ impl FerroadaProxy {
         Ok(true)
     }
 
-    async fn send_408(&self, session: &mut Session) -> Result<bool> {
-        let body = "408 Tempo esgotado ao ler a requisição\n";
-        let mut header = ResponseHeader::build(408, None)?;
+    async fn send_body_timeout(&self, session: &mut Session, ctx: &FerroadaCtx) -> Result<bool> {
+        let outcome = on_body_read_timeout(&ctx.client_addr, &ctx.request_uri);
+        self.send_408(session, outcome.denied_status()).await
+    }
+
+    async fn send_408(&self, session: &mut Session, status: u16) -> Result<bool> {
+        let body = format!("{status} Tempo esgotado ao ler a requisição\n");
+        let mut header = ResponseHeader::build(status, None)?;
         header.insert_header("Content-Type", "text/plain; charset=utf-8")?;
         header.insert_header("Content-Length", body.len().to_string())?;
         session
@@ -1280,6 +1356,41 @@ impl FerroadaProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_timeout_records_timed_out_and_is_408() {
+        let outcome = on_body_read_timeout("192.0.2.9", "/slow");
+        assert_eq!(outcome, InspectionOutcome::TimedOut);
+        assert_eq!(outcome.denied_status(), 408);
+        assert_ne!(outcome.denied_status(), 403);
+        let snapshot = metrics::snapshot_json();
+        assert!(snapshot.contains("inspection_timeout"), "{snapshot}");
+        assert!(snapshot.contains("TimedOut"), "{snapshot}");
+        let prometheus = metrics::snapshot_prometheus();
+        assert!(prometheus.contains("ferroada_waf_inspection_total{status=\"timed_out\"}"));
+    }
+
+    #[test]
+    fn garbage_json_fail_closed_reason_names_parse_error() {
+        assert_eq!(
+            incomplete_inspection_reason(InspectionOutcome::ParseError),
+            "JSON inválido (ParseError)"
+        );
+        assert_eq!(InspectionOutcome::ParseError.denied_status(), 403);
+        record_inspection_outcome(
+            InspectionOutcome::ParseError,
+            "192.0.2.10",
+            "/api/payment",
+            true,
+        );
+        let snapshot = metrics::snapshot_json();
+        assert!(snapshot.contains("\"event_type\": \"inspection_parse_error\""));
+        assert!(snapshot.contains("ParseError"));
+        assert!(snapshot.contains("\"inspection_parse_error\":"));
+        let prometheus = metrics::snapshot_prometheus();
+        assert!(prometheus.contains("ferroada_waf_inspection_total{status=\"parse_error\"}"));
+        assert!(prometheus.contains("ferroada_blocks_total{type=\"inspection_parse_error\"}"));
+    }
 
     #[test]
     fn raw_framing_headers_preserve_cl_te_ambiguity() {

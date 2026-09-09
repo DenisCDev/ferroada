@@ -35,7 +35,7 @@ Não há origin honeypot (Fase 7).
 | SSE (request) | `inspect` | — | `gzip_json_and_sse_request_stay_inspect` |
 | SSE (response) | n/a | `bypass-explicit` no DLP (skip observável já existente) | `dlp::streaming_response_is_not_buffered_for_dlp` |
 | gRPC | não suportado | `deny` → 403 | `grpc_default_deny_is_403` |
-| JSON | `inspect` | ParseError é PR 5 | `gzip_json_and_sse_request_stay_inspect` |
+| JSON | `inspect` | ParseError (JSON lixo ≠ Complete); fail-closed → 403 | `garbage_json_is_parse_error_not_complete`, `require_complete_sugar_denies_parse_error_with_403` |
 | gzip/deflate | `inspect` | Truncated / encoding no L0 | `gzip_json_and_sse_request_stay_inspect` |
 | brotli | não suportado | `deny` se `require_complete`; senão `monitor` | `brotli_require_complete_default_deny_is_403`, `brotli_open_route_default_monitor_allows` |
 | multipart | não suportado (sem parser por partes) | `deny` se `require_complete`; senão `monitor`. Nunca `inspect` | `multipart_require_complete_default_deny_is_403`, `multipart_is_never_inspect_complete` |

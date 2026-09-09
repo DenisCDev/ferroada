@@ -51,46 +51,108 @@ pub enum WafVerdict {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InspectionStatus {
+pub enum InspectionOutcome {
     Complete,
-    Truncated,
+    Truncated {
+        inspected: usize,
+        total_hint: Option<usize>,
+    },
     UnsupportedEncoding,
     UnsupportedContentType,
+    ParseError,
+    BudgetExceeded,
+    TimedOut,
 }
 
-impl InspectionStatus {
+impl InspectionOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Complete => "complete",
-            Self::Truncated => "truncated",
+            Self::Truncated { .. } => "truncated",
             Self::UnsupportedEncoding => "unsupported_encoding",
             Self::UnsupportedContentType => "unsupported_content_type",
+            Self::ParseError => "parse_error",
+            Self::BudgetExceeded => "budget_exceeded",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    pub fn event_type(self) -> &'static str {
+        match self {
+            Self::Complete => "waf_inspection",
+            Self::Truncated { .. } | Self::UnsupportedEncoding | Self::UnsupportedContentType => {
+                "waf_incomplete"
+            }
+            Self::ParseError => "inspection_parse_error",
+            Self::BudgetExceeded => "inspection_budget",
+            Self::TimedOut => "inspection_timeout",
+        }
+    }
+
+    /// HTTP status when this outcome is not allowed through.
+    pub fn denied_status(self) -> u16 {
+        match self {
+            Self::Complete => 200,
+            Self::TimedOut => 408,
+            Self::BudgetExceeded => 503,
+            Self::Truncated { .. }
+            | Self::UnsupportedEncoding
+            | Self::UnsupportedContentType
+            | Self::ParseError => 403,
         }
     }
 
     pub fn is_complete(self) -> bool {
-        self == Self::Complete
+        matches!(self, Self::Complete)
+    }
+
+    fn severity(self) -> u8 {
+        match self {
+            Self::Complete => 0,
+            Self::Truncated { .. } => 1,
+            Self::UnsupportedContentType => 2,
+            Self::UnsupportedEncoding => 3,
+            Self::ParseError => 4,
+            Self::BudgetExceeded => 5,
+            Self::TimedOut => 6,
+        }
     }
 
     pub fn combine(self, other: Self) -> Self {
-        use InspectionStatus::{Complete, Truncated, UnsupportedContentType, UnsupportedEncoding};
-        match (self, other) {
-            (UnsupportedEncoding, _) | (_, UnsupportedEncoding) => UnsupportedEncoding,
-            (UnsupportedContentType, _) | (_, UnsupportedContentType) => UnsupportedContentType,
-            (Truncated, _) | (_, Truncated) => Truncated,
-            (Complete, Complete) => Complete,
+        match self.severity().cmp(&other.severity()) {
+            std::cmp::Ordering::Greater => self,
+            std::cmp::Ordering::Less => other,
+            std::cmp::Ordering::Equal => match (self, other) {
+                (
+                    Self::Truncated {
+                        inspected: left,
+                        total_hint: left_hint,
+                    },
+                    Self::Truncated {
+                        inspected: right,
+                        total_hint: right_hint,
+                    },
+                ) => Self::Truncated {
+                    inspected: left.min(right),
+                    total_hint: match (left_hint, right_hint) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    },
+                },
+                (left, _) => left,
+            },
         }
     }
 }
 
 pub struct WafInspection {
     pub verdict: WafVerdict,
-    pub status: InspectionStatus,
+    pub status: InspectionOutcome,
 }
 
 pub struct InspectionBody<'a> {
     pub bytes: Cow<'a, [u8]>,
-    pub status: InspectionStatus,
+    pub status: InspectionOutcome,
 }
 
 pub fn max_inflate_buffer_bytes() -> usize {
@@ -465,7 +527,7 @@ pub fn inspect_body(
     if !is_inspectable_content_type(content_type) {
         return WafInspection {
             verdict: WafVerdict::Allow,
-            status: InspectionStatus::UnsupportedContentType,
+            status: InspectionOutcome::UnsupportedContentType,
         };
     }
     let text = match std::str::from_utf8(body) {
@@ -473,30 +535,41 @@ pub fn inspect_body(
         Err(_) => {
             return WafInspection {
                 verdict: WafVerdict::Allow,
-                status: InspectionStatus::UnsupportedContentType,
+                status: InspectionOutcome::UnsupportedContentType,
             }
         }
     };
 
     // Limit inspection to first 64KB to avoid DoS on large uploads.
     // Cut on a char boundary so a multibyte UTF-8 scalar at 64KB cannot panic.
-    let (text, status) = if text.len() > INSPECT_TEXT_LIMIT {
+    let total_len = text.len();
+    let (text, mut status) = if total_len > INSPECT_TEXT_LIMIT {
         let mut end = INSPECT_TEXT_LIMIT;
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }
-        (&text[..end], InspectionStatus::Truncated)
+        (
+            &text[..end],
+            InspectionOutcome::Truncated {
+                inspected: end,
+                total_hint: Some(total_len),
+            },
+        )
     } else {
-        (text, InspectionStatus::Complete)
+        (text, InspectionOutcome::Complete)
     };
 
     let content_type_lower = content_type.unwrap_or("").to_ascii_lowercase();
     let canonical_json = if status.is_complete()
         && (content_type_lower.contains("application/json") || content_type_lower.contains("+json"))
     {
-        serde_json::from_str::<serde_json::Value>(text)
-            .ok()
-            .map(|value| json_strings(&value))
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) => Some(json_strings(&value)),
+            Err(_) => {
+                status = InspectionOutcome::ParseError;
+                None
+            }
+        }
     } else {
         None
     };
@@ -670,7 +743,7 @@ pub fn inflate_for_inspect<'a>(
     if enc.is_empty() || enc == "identity" {
         return InspectionBody {
             bytes: Cow::Borrowed(body),
-            status: InspectionStatus::Complete,
+            status: InspectionOutcome::Complete,
         };
     }
     let tokens: Vec<&str> = enc.split(',').map(|t| t.trim()).collect();
@@ -687,7 +760,7 @@ pub fn inflate_for_inspect<'a>(
 fn unsupported_encoding(body: &[u8]) -> InspectionBody<'_> {
     InspectionBody {
         bytes: Cow::Borrowed(body),
-        status: InspectionStatus::UnsupportedEncoding,
+        status: InspectionOutcome::UnsupportedEncoding,
     }
 }
 
@@ -696,9 +769,12 @@ fn inflate_with<'a, R: Read>(decoder: R, fallback: &'a [u8]) -> InspectionBody<'
         Ok(mut out) if !out.is_empty() => {
             let status = if out.len() as u64 > MAX_INFLATE_FOR_INSPECT {
                 out.truncate(MAX_INFLATE_FOR_INSPECT as usize);
-                InspectionStatus::Truncated
+                InspectionOutcome::Truncated {
+                    inspected: out.len(),
+                    total_hint: None,
+                }
             } else {
-                InspectionStatus::Complete
+                InspectionOutcome::Complete
             };
             InspectionBody {
                 bytes: Cow::Owned(out),
@@ -866,7 +942,7 @@ mod tests {
         let mut payload = gzip(b"conteudo seguro ");
         payload.extend(gzip(b"1 UNION SELECT password FROM users"));
         let inflated = inflate_for_inspect(&payload, Some("gzip"));
-        assert_eq!(inflated.status, InspectionStatus::Complete);
+        assert_eq!(inflated.status, InspectionOutcome::Complete);
         assert!(body_blocked(inspect_body(
             &inflated.bytes,
             "/",
@@ -950,7 +1026,10 @@ mod tests {
             "inflate must stop at the inspect cap, got {}",
             inflated.bytes.len()
         );
-        assert_eq!(inflated.status, InspectionStatus::Truncated);
+        assert!(matches!(
+            inflated.status,
+            InspectionOutcome::Truncated { inspected, .. } if inspected == MAX_INFLATE_FOR_INSPECT as usize
+        ));
     }
 
     #[test]
@@ -993,19 +1072,22 @@ mod tests {
         let body = vec![b'a'; INSPECT_TEXT_LIMIT + 1];
         let inspection = inspect_body(&body, "/", "1.1.1.1", Some("application/json"));
         assert_eq!(inspection.verdict, WafVerdict::Allow);
-        assert_eq!(inspection.status, InspectionStatus::Truncated);
+        assert!(matches!(
+            inspection.status,
+            InspectionOutcome::Truncated { inspected, .. } if inspected == INSPECT_TEXT_LIMIT
+        ));
     }
 
     #[test]
     fn unknown_encoding_is_explicitly_unsupported() {
         let inspection = inflate_for_inspect(b"hello", Some("br"));
-        assert_eq!(inspection.status, InspectionStatus::UnsupportedEncoding);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedEncoding);
     }
 
     #[test]
     fn binary_body_is_explicitly_unsupported() {
         let inspection = inspect_body(&[0xff, 0xfe], "/", "1.1.1.1", None);
-        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedContentType);
     }
 
     #[test]
@@ -1027,7 +1109,7 @@ mod tests {
             "1.1.1.1",
             Some("application/octet-stream"),
         );
-        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedContentType);
     }
 
     #[test]
@@ -1039,7 +1121,7 @@ mod tests {
             "1.1.1.1",
             Some("multipart/form-data; boundary=x"),
         );
-        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedContentType);
     }
 
     #[test]
@@ -1052,7 +1134,86 @@ mod tests {
             Some("multipart/form-data; boundary=x"),
         );
         assert_eq!(inspection.verdict, WafVerdict::Allow);
-        assert_eq!(inspection.status, InspectionStatus::UnsupportedContentType);
+        assert_eq!(inspection.status, InspectionOutcome::UnsupportedContentType);
         assert!(!inspection.status.is_complete());
+    }
+
+    #[test]
+    fn garbage_json_is_parse_error_not_complete() {
+        let inspection = inspect_body(
+            b"{not json",
+            "/api/payment",
+            "1.1.1.1",
+            Some("application/json"),
+        );
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+        assert!(!inspection.status.is_complete());
+        assert_eq!(inspection.status.denied_status(), 403);
+        assert_eq!(inspection.status.as_str(), "parse_error");
+    }
+
+    #[test]
+    fn garbage_json_with_charset_is_parse_error() {
+        let inspection = inspect_body(
+            b"[1, 2,",
+            "/",
+            "1.1.1.1",
+            Some("application/json; charset=utf-8"),
+        );
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+    }
+
+    #[test]
+    fn valid_json_stays_complete() {
+        let inspection = inspect_body(br#"{"ok":true}"#, "/", "1.1.1.1", Some("application/json"));
+        assert_eq!(inspection.verdict, WafVerdict::Allow);
+        assert_eq!(inspection.status, InspectionOutcome::Complete);
+    }
+
+    #[test]
+    fn truncated_json_is_truncated_not_parse_error() {
+        let body = vec![b'a'; INSPECT_TEXT_LIMIT + 1];
+        let inspection = inspect_body(&body, "/", "1.1.1.1", Some("application/json"));
+        assert!(matches!(
+            inspection.status,
+            InspectionOutcome::Truncated { .. }
+        ));
+        assert_ne!(inspection.status, InspectionOutcome::ParseError);
+    }
+
+    #[test]
+    fn lying_gzip_does_not_hide_json_parse_error() {
+        let inflated = inflate_for_inspect(b"{not json", Some("gzip"));
+        assert_eq!(inflated.status, InspectionOutcome::UnsupportedEncoding);
+        let inspection = inspect_body(&inflated.bytes, "/", "1.1.1.1", Some("application/json"));
+        assert_eq!(inspection.status, InspectionOutcome::ParseError);
+        assert_eq!(
+            inflated.status.combine(inspection.status),
+            InspectionOutcome::ParseError
+        );
+    }
+
+    #[test]
+    fn body_timeout_outcome_is_408_timed_out() {
+        assert_eq!(InspectionOutcome::TimedOut.denied_status(), 408);
+        assert_eq!(InspectionOutcome::TimedOut.as_str(), "timed_out");
+        assert_eq!(
+            InspectionOutcome::TimedOut.event_type(),
+            "inspection_timeout"
+        );
+    }
+
+    #[test]
+    fn budget_exceeded_outcome_is_503() {
+        assert_eq!(InspectionOutcome::BudgetExceeded.denied_status(), 503);
+        assert_eq!(
+            InspectionOutcome::BudgetExceeded.as_str(),
+            "budget_exceeded"
+        );
+        assert_eq!(
+            InspectionOutcome::BudgetExceeded.event_type(),
+            "inspection_budget"
+        );
     }
 }

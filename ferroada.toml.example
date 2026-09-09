@@ -37,6 +37,15 @@ backend = "http://backend-a:8080"
 waf_profile = "wordpress"
 require_complete_waf_inspection = ["/api/payment", "/api/admin/"]
 
+# on_truncated / on_parse_error por prefixo. require_complete_waf_inspection
+# acima já significa on_truncated=deny e on_parse_error=deny nesses paths.
+# max_decoded_body nasce no spool; a chave aqui é erro de parse.
+# [[sites.routes]]
+# prefix = "/api/payment"
+# inspection.require_complete = true
+# inspection.on_truncated = "deny"
+# inspection.on_parse_error = "deny"
+
 [[sites]]
 hosts = ["api.meusite.com"]
 backend = "http://backend-b:3000"
