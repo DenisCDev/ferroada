@@ -206,11 +206,7 @@ impl SpoolHandle {
     }
 
     async fn spill_to_file(&mut self, extra: &[u8]) -> Result<(), SpoolError> {
-        let dir = self
-            .runtime
-            .dir
-            .as_ref()
-            .ok_or(SpoolError::NotConfigured)?;
+        let dir = self.runtime.dir.as_ref().ok_or(SpoolError::NotConfigured)?;
         if !self.runtime.files.acquire() {
             return Err(SpoolError::Files);
         }
@@ -294,7 +290,11 @@ impl SpoolHandle {
                         .await
                         .map_err(SpoolError::Io)?;
                 }
-                let mut buf = vec![0_u8; REPLAY_CHUNK.min(self.len.saturating_sub(self.replay_at as usize).max(1))];
+                let mut buf = vec![
+                    0_u8;
+                    REPLAY_CHUNK
+                        .min(self.len.saturating_sub(self.replay_at as usize).max(1))
+                ];
                 let read = file.read(&mut buf).await.map_err(SpoolError::Io)?;
                 if read == 0 {
                     self.replay_done = true;
@@ -368,8 +368,8 @@ pub fn prepare(dir: &Path) -> Result<(), String> {
         }
     }
 
-    let entries = std::fs::read_dir(dir)
-        .map_err(|error| format!("SPOOL_DIR {}: {error}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|error| format!("SPOOL_DIR {}: {error}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|error| format!("SPOOL_DIR {}: {error}", dir.display()))?;
         let name = entry.file_name();
@@ -504,10 +504,7 @@ mod tests {
         });
         let path = {
             let mut handle = SpoolHandle::new(MEMORY_CEILING + 4096, Arc::clone(&runtime));
-            handle
-                .push(&vec![b'x'; MEMORY_CEILING + 1])
-                .await
-                .unwrap();
+            handle.push(&vec![b'x'; MEMORY_CEILING + 1]).await.unwrap();
             match &handle.storage {
                 Storage::File { path, .. } => path.clone(),
                 Storage::Memory(_) => panic!("expected spill to file"),

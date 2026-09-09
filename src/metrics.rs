@@ -351,7 +351,7 @@ pub fn record_observation_in(
     );
 }
 
-pub fn record_dlp(cpf_count: u64, token_count: u64) {
+pub fn record_dlp(cpf_count: u64, token_count: u64, verb: &str) {
     if cpf_count > 0 {
         METRICS
             .dlp_cpf_masked
@@ -370,7 +370,7 @@ pub fn record_dlp(cpf_count: u64, token_count: u64) {
                 event_type: "dlp".to_string(),
                 client_ip: "-".to_string(),
                 uri: "-".to_string(),
-                detail: format!("Masked {} CPFs, {} tokens", cpf_count, token_count),
+                detail: format!("{verb} {cpf_count} CPFs, {token_count} tokens"),
                 site_scope: String::new(),
             },
         );

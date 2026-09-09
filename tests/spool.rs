@@ -291,10 +291,7 @@ fn zip_bomb_is_truncated_and_denied_on_require_complete() {
     let req = post(
         "/api/payment",
         &payload,
-        &[
-            ("Content-Type", "text/plain"),
-            ("Content-Encoding", "gzip"),
-        ],
+        &[("Content-Type", "text/plain"), ("Content-Encoding", "gzip")],
     );
     let response = send_until_http(listen, &req);
     assert!(

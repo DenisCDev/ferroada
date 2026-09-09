@@ -8,8 +8,6 @@ ROOT = Path(__file__).resolve().parent
 TOPO = ROOT / "topologies"
 CIDRS = ROOT / "cidrs"
 FORBIDDEN_ANY = (
-    "DLP_ACTION",
-    "ORIGIN_SECRET",
     "FERROADA_PRODUCTION",
     "FERROADA_ALLOW_DEMO",
     "location /supabase",
@@ -67,6 +65,13 @@ def main() -> None:
             if path.name == ".env.caddy.example" and "cdn-edge" not in rel_posix:
                 if "PROXY_PROTOCOL=true" not in text:
                     errors.append(f"{rel}: caminho Caddy/nginx sem PROXY_PROTOCOL=true")
+            if path.name in (".env.example", ".env.caddy.example"):
+                if "DLP_ACTION=monitor" not in text:
+                    errors.append(f"{rel}: pack de produção sem DLP_ACTION=monitor")
+                if "ORIGIN_SECRET_HEADER=" not in text:
+                    errors.append(f"{rel}: pack de produção sem ORIGIN_SECRET_HEADER")
+                if "ORIGIN_SECRET=" not in text:
+                    errors.append(f"{rel}: pack de produção sem ORIGIN_SECRET")
             if path.name == ".env.example" and "PROXY_PROTOCOL=true" in text:
                 errors.append(f"{rel}: pack privilegiado liga PROXY_PROTOCOL")
             if path.name == "Caddyfile" and "cdn-edge" not in rel_posix:
@@ -127,6 +132,18 @@ def main() -> None:
     cdn_lock = (TOPO / "cdn-edge" / "ORIGIN_LOCK.md").read_text(encoding="utf-8")
     if "ufw allow 80/tcp" in cdn_lock:
         errors.append("cdn-edge: ORIGIN_LOCK abre 80 ao mundo")
+
+    hostinger_lock = (TOPO / "hostinger-origin" / "ORIGIN_LOCK.md").read_text(
+        encoding="utf-8"
+    )
+    if "X-Ferroada-Origin" not in hostinger_lock or "ORIGIN_SECRET" not in hostinger_lock:
+        errors.append("hostinger-origin: ORIGIN_LOCK não documenta o header secreto")
+    vercel_lock = (TOPO / "vercel-origin" / "ORIGIN_LOCK.md").read_text(encoding="utf-8")
+    if "x-vercel-protection-bypass" not in vercel_lock:
+        errors.append("vercel-origin: ORIGIN_LOCK não documenta x-vercel-protection-bypass")
+    vercel_check = (TOPO / "vercel-origin" / "CHECKLIST.md").read_text(encoding="utf-8")
+    if "ORIGIN_SECRET" not in vercel_check or "não o injeta" in vercel_check.lower():
+        errors.append("vercel-origin: CHECKLIST ainda diz que o header não é injetado")
 
     site_compose = (TOPO / "vps-site" / "docker-compose.yml").read_text(encoding="utf-8")
     site_caddy = (TOPO / "vps-site" / "docker-compose.caddy.yml").read_text(encoding="utf-8")

@@ -62,7 +62,7 @@ static HTTPS_REDIRECT_HOST: Lazy<Option<String>> = Lazy::new(|| {
 use crate::behavioral::{self, BehavioralVerdict};
 use crate::client_ip::{ClientIpConfig, RiskIdentity, TrustedProxies};
 use crate::config::{Config, InspectionDisposition, InspectionPolicy};
-use crate::dlp;
+use crate::dlp::{self, DlpAction};
 use crate::headers;
 use crate::metrics;
 use crate::protocol::{self, ProtocolVerdict, RequestFacts};
@@ -153,6 +153,8 @@ pub struct FerroadaProxy {
     dlp_budget: Arc<ByteBudget>,
     request_budget: Arc<ByteBudget>,
     spool: Arc<SpoolRuntime>,
+    dlp_action: DlpAction,
+    origin_secret: OriginSecretConfig,
 }
 
 pub struct BoundedBodyBuffer {
@@ -274,6 +276,13 @@ impl FerroadaProxy {
         client_ip: ClientIpConfig,
         proxy_protocol: bool,
     ) -> Self {
+        let origin_secret = origin_secret_from_env();
+        if origin_secret.value.is_some() {
+            info!(
+                header = %origin_secret.header,
+                "Origin secret header will be injected on upstream requests"
+            );
+        }
         Self {
             spool: Arc::new(SpoolRuntime::from_config(&config)),
             config,
@@ -290,7 +299,26 @@ impl FerroadaProxy {
                 "WAF_MAX_IN_FLIGHT_BYTES",
                 64 * 1024 * 1024,
             )),
+            dlp_action: dlp::action(),
+            origin_secret,
         }
+    }
+
+    pub fn with_dlp_action(mut self, action: DlpAction) -> Self {
+        self.dlp_action = action;
+        self
+    }
+
+    pub fn with_origin_secret(
+        mut self,
+        header: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.origin_secret = OriginSecretConfig {
+            header: header.into(),
+            value: Some(value.into()),
+        };
+        self
     }
 }
 
@@ -1101,12 +1129,22 @@ impl ProxyHttp for FerroadaProxy {
                 if ctx.spool.as_ref().is_some_and(|handle| !handle.is_empty()) {
                     return self.replay_spool_to_origin(session, ctx).await;
                 }
-            } else {
+            } else if self.dlp_action != DlpAction::Block {
                 // Keep the global reservation until the request finishes: Pingora
                 // owns the replay copy even though our inspection copy can be dropped.
                 ctx.inspect_request_body = !ctx.request_body.is_empty();
                 let _ = ctx.request_body.take();
             }
+        }
+
+        if self.dlp_action == DlpAction::Block
+            && !session.req_header().headers.contains_key("Upgrade")
+        {
+            // Commit-point: inspect the origin response before any downstream
+            // byte. Pingora writes headers before body filters, so block
+            // cannot stream — including GET (empty request body).
+            let body = ctx.request_body.take();
+            return self.commit_origin_response(session, ctx, body).await;
         }
 
         tracing::debug!(client = %client_addr, uri = %uri, "Request filters passed");
@@ -1193,7 +1231,7 @@ impl ProxyHttp for FerroadaProxy {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        stamp_upstream_request(upstream_request, ctx);
+        stamp_upstream_request(upstream_request, ctx, &self.origin_secret);
         Ok(())
     }
 
@@ -1224,10 +1262,23 @@ impl ProxyHttp for FerroadaProxy {
             let exceeds_response_limit = !ctx.body_buffer.push(&b);
             if exceeds_response_limit || !ctx.reserve_dlp(b.len()) {
                 ctx.body_buffer.bytes.truncate(previous_len);
+                ctx.release_dlp();
+                if self.dlp_action.reject_incomplete_response() {
+                    *body = None;
+                    metrics::record_block(
+                        "dlp_partial_block",
+                        &ctx.client_addr,
+                        &ctx.request_uri,
+                        "DLP buffer limit reached",
+                    );
+                    return Error::e_explain(
+                        ErrorType::HTTPStatus(502),
+                        "DLP buffer limit reached",
+                    );
+                }
                 // Too large — flush what we have and skip DLP for the rest
                 ctx.skip_dlp = true;
                 let mut flushed = ctx.body_buffer.take();
-                ctx.release_dlp();
                 flushed.extend_from_slice(&b);
                 *body = Some(Bytes::from(flushed));
                 metrics::record_observation(
@@ -1243,13 +1294,31 @@ impl ProxyHttp for FerroadaProxy {
         if end_of_stream {
             let ct = ctx.content_type.as_deref();
             let buffered = ctx.body_buffer.take();
-            let result = dlp::sanitize_encoded_body(
+            let result = dlp::sanitize_encoded_body_with(
                 &buffered,
                 ct,
                 ctx.response_content_encoding.as_deref(),
                 *MAX_RESPONSE_BUFFER,
+                self.dlp_action,
             );
             ctx.release_dlp();
+            if self.dlp_action.reject_incomplete_response()
+                && (!result.inspection_complete || result.found_sensitive())
+            {
+                *body = None;
+                let detail = if !result.inspection_complete {
+                    "Compressed response could not be inspected within the configured limit"
+                } else {
+                    "DLP blocked a response with sensitive data"
+                };
+                metrics::record_block(
+                    "dlp_partial_block",
+                    &ctx.client_addr,
+                    &ctx.request_uri,
+                    detail,
+                );
+                return Error::e_explain(ErrorType::HTTPStatus(502), detail);
+            }
             if !result.inspection_complete {
                 tracing::warn!(
                     client = %ctx.client_addr,
@@ -1453,12 +1522,16 @@ fn read_http11_response_sync<S: Read>(
     let mut body = buf[header_end..].to_vec();
     if chunked {
         read_capped(stream, &mut body, max_response)?;
-        body = decode_chunked(&body).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "origin chunked body is incomplete",
-            )
-        })?;
+        body = match decode_chunked(&body) {
+            Some(decoded) => decoded,
+            None if body.len() >= max_response => body,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "origin chunked body is incomplete",
+                ));
+            }
+        };
     } else if let Some(cl) = content_length {
         read_capped(stream, &mut body, cl.min(max_response))?;
     } else {
@@ -1506,7 +1579,130 @@ fn decode_chunked(input: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-fn stamp_upstream_request(upstream_request: &mut RequestHeader, ctx: &FerroadaCtx) {
+fn response_content_length(response: &ResponseHeader) -> Option<usize> {
+    response
+        .headers
+        .get("Content-Length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OriginSecretConfig {
+    header: String,
+    value: Option<String>,
+}
+
+impl Default for OriginSecretConfig {
+    fn default() -> Self {
+        Self {
+            header: "X-Ferroada-Origin".to_string(),
+            value: None,
+        }
+    }
+}
+
+pub fn parse_origin_secret(
+    header: Option<&str>,
+    secret: Option<&str>,
+) -> Result<OriginSecretConfig, String> {
+    let value = secret
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string);
+    if let Some(raw) = value.as_deref() {
+        if !is_safe_header_value(raw) {
+            return Err("ORIGIN_SECRET inválido".into());
+        }
+    }
+    let named = header.map(str::trim).filter(|item| !item.is_empty());
+    let header = match named {
+        None => "X-Ferroada-Origin".to_string(),
+        Some(name) => {
+            if !is_http_token(name) || is_reserved_upstream_header(name) {
+                return Err("ORIGIN_SECRET_HEADER inválido: nome de header HTTP recusado".into());
+            }
+            name.to_string()
+        }
+    };
+    Ok(OriginSecretConfig { header, value })
+}
+
+fn is_reserved_upstream_header(name: &str) -> bool {
+    [
+        "host",
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        "transfer-encoding",
+        "te",
+        "trailer",
+        "upgrade",
+        "x-real-ip",
+        "x-forwarded-for",
+        "x-forwarded-proto",
+    ]
+    .iter()
+    .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
+fn is_http_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && name.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+        })
+}
+
+fn is_safe_header_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4096
+        && value
+            .bytes()
+            .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte))
+}
+
+fn origin_secret_from_env() -> OriginSecretConfig {
+    parse_origin_secret(
+        std::env::var("ORIGIN_SECRET_HEADER").ok().as_deref(),
+        std::env::var("ORIGIN_SECRET").ok().as_deref(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn apply_origin_secret(request: &mut RequestHeader, config: &OriginSecretConfig) {
+    request.remove_header("X-Ferroada-Origin");
+    request.remove_header(config.header.as_str());
+    if let Some(value) = &config.value {
+        let _ = request.insert_header(config.header.clone(), value.clone());
+    }
+}
+
+fn stamp_upstream_request(
+    upstream_request: &mut RequestHeader,
+    ctx: &FerroadaCtx,
+    origin_secret: &OriginSecretConfig,
+) {
     let backend = ctx.backend.as_ref().expect("backend must be resolved");
     strip_hop_by_hop_headers(upstream_request);
     strip_untrusted_forwarding_headers(upstream_request);
@@ -1535,6 +1731,7 @@ fn stamp_upstream_request(upstream_request: &mut RequestHeader, ctx: &FerroadaCt
             "Range removed so DLP can inspect the complete representation",
         );
     }
+    apply_origin_secret(upstream_request, origin_secret);
 }
 
 fn strip_hop_by_hop_headers(request: &mut RequestHeader) {
@@ -1562,6 +1759,7 @@ fn strip_untrusted_forwarding_headers(request: &mut RequestHeader) {
         "True-Client-IP",
         "CF-Connecting-IP",
         "Fastly-Client-IP",
+        "X-Ferroada-Origin",
     ] {
         request.remove_header(header);
     }
@@ -1573,13 +1771,6 @@ impl FerroadaProxy {
         session: &mut Session,
         ctx: &mut FerroadaCtx,
     ) -> Result<bool> {
-        let backend = ctx
-            .backend
-            .as_ref()
-            .expect("backend must be resolved")
-            .clone();
-        let mut req = session.req_header().clone();
-        stamp_upstream_request(&mut req, ctx);
         let body = match ctx.spool.as_mut() {
             Some(spool) => match spool.inspect_bytes().await {
                 Ok(bytes) => bytes.to_vec(),
@@ -1595,6 +1786,22 @@ impl FerroadaProxy {
             },
             None => Vec::new(),
         };
+        self.commit_origin_response(session, ctx, body).await
+    }
+
+    async fn commit_origin_response(
+        &self,
+        session: &mut Session,
+        ctx: &mut FerroadaCtx,
+        body: Vec<u8>,
+    ) -> Result<bool> {
+        let backend = ctx
+            .backend
+            .as_ref()
+            .expect("backend must be resolved")
+            .clone();
+        let mut req = session.req_header().clone();
+        stamp_upstream_request(&mut req, ctx, &self.origin_secret);
         req.remove_header("Transfer-Encoding");
         req.insert_header("Content-Length", body.len().to_string())?;
         let head = http11_request_head(&req);
@@ -1608,27 +1815,54 @@ impl FerroadaProxy {
         let (mut resp, origin_body) = match roundtrip {
             Ok(Ok(parsed)) => parsed,
             Ok(Err(error)) => {
-                tracing::warn!(error = %error, "spool origin roundtrip failed");
+                tracing::warn!(error = %error, "origin roundtrip failed");
                 return self.send_503(session).await;
             }
             Err(error) => {
-                tracing::warn!(error = %error, "spool origin task failed");
+                tracing::warn!(error = %error, "origin roundtrip task failed");
                 return self.send_503(session).await;
             }
         };
+        let declared_len = response_content_length(&resp);
         if let Err(error) = self.decorate_origin_response(&mut resp, ctx) {
+            if matches!(error.etype(), ErrorType::HTTPStatus(502)) {
+                return self.send_502(session).await;
+            }
             return Err(error);
         }
 
+        let truncated = declared_len.is_some_and(|cl| cl > origin_body.len())
+            || (declared_len.is_none() && origin_body.len() >= max_response);
+        if self.dlp_action.reject_incomplete_response() && truncated {
+            metrics::record_block(
+                "dlp_partial_block",
+                &ctx.client_addr,
+                &ctx.request_uri,
+                "DLP buffer limit reached",
+            );
+            return self.send_502(session).await;
+        }
         let out_bytes = if ctx.skip_dlp {
             Bytes::from(origin_body)
         } else {
-            let result = dlp::sanitize_encoded_body(
+            let result = dlp::sanitize_encoded_body_with(
                 &origin_body,
                 ctx.content_type.as_deref(),
                 ctx.response_content_encoding.as_deref(),
                 *MAX_RESPONSE_BUFFER,
+                self.dlp_action,
             );
+            if self.dlp_action.reject_incomplete_response()
+                && (!result.inspection_complete || result.found_sensitive())
+            {
+                metrics::record_block(
+                    "dlp_partial_block",
+                    &ctx.client_addr,
+                    &ctx.request_uri,
+                    "DLP buffer limit reached",
+                );
+                return self.send_502(session).await;
+            }
             if !result.inspection_complete {
                 metrics::record_observation(
                     "dlp_skip",
@@ -1684,6 +1918,22 @@ impl FerroadaProxy {
             )
         };
         let dlp_capable = dlp_skip_reason.is_none();
+        if dlp_capable && self.dlp_action.reject_incomplete_response() {
+            if let Some(cl) = response_content_length(upstream_response) {
+                if cl > *MAX_RESPONSE_BUFFER {
+                    metrics::record_block(
+                        "dlp_partial_block",
+                        &ctx.client_addr,
+                        &ctx.request_uri,
+                        "DLP buffer limit reached",
+                    );
+                    return Error::e_explain(
+                        ErrorType::HTTPStatus(502),
+                        "DLP buffer limit reached",
+                    );
+                }
+            }
+        }
         if partial_response && dlp_capable {
             metrics::record_block(
                 "dlp_partial_block",
@@ -1813,6 +2063,20 @@ impl FerroadaProxy {
     async fn send_431(&self, session: &mut Session) -> Result<bool> {
         let body = "431 Headers da requisição muito grandes\n";
         let mut header = ResponseHeader::build(431, None)?;
+        header.insert_header("Content-Type", "text/plain; charset=utf-8")?;
+        header.insert_header("Content-Length", body.len().to_string())?;
+        session
+            .write_response_header(Box::new(header), false)
+            .await?;
+        session
+            .write_response_body(Some(Bytes::from(body)), true)
+            .await?;
+        Ok(true)
+    }
+
+    async fn send_502(&self, session: &mut Session) -> Result<bool> {
+        let body = "502 Resposta bloqueada pelo DLP\n";
+        let mut header = ResponseHeader::build(502, None)?;
         header.insert_header("Content-Type", "text/plain; charset=utf-8")?;
         header.insert_header("Content-Length", body.len().to_string())?;
         session
@@ -1989,5 +2253,48 @@ mod tests {
         assert!(!request.headers.contains_key("Forwarded"));
         assert!(!request.headers.contains_key("X-Forwarded-Host"));
         assert!(!request.headers.contains_key("X-Forwarded-Ssl"));
+    }
+
+    #[test]
+    fn origin_secret_unset_strips_client_header() {
+        let cfg = parse_origin_secret(None, None).unwrap();
+        assert!(cfg.value.is_none());
+        let mut request = RequestHeader::build("GET", b"/", Some(4)).unwrap();
+        request
+            .insert_header("X-Ferroada-Origin", "forged")
+            .unwrap();
+        apply_origin_secret(&mut request, &cfg);
+        assert!(!request.headers.contains_key("X-Ferroada-Origin"));
+        assert!(parse_origin_secret(Some("X-Ferroada-Origin"), Some(""))
+            .unwrap()
+            .value
+            .is_none());
+    }
+
+    #[test]
+    fn origin_secret_defaults_header_name_and_replaces_client_value() {
+        let cfg = parse_origin_secret(None, Some("s3cret")).unwrap();
+        assert_eq!(cfg.header, "X-Ferroada-Origin");
+        let mut request = RequestHeader::build("GET", b"/", Some(4)).unwrap();
+        request
+            .insert_header("X-Ferroada-Origin", "forged")
+            .unwrap();
+        apply_origin_secret(&mut request, &cfg);
+        assert_eq!(
+            request
+                .headers
+                .get("X-Ferroada-Origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("s3cret")
+        );
+    }
+
+    #[test]
+    fn origin_secret_rejects_control_chars_in_header_name() {
+        assert!(parse_origin_secret(Some("X-Evil\r\nX-Other"), Some("s")).is_err());
+        assert!(parse_origin_secret(Some("X-Bad:Name"), Some("s")).is_err());
+        assert!(parse_origin_secret(Some("Host"), Some("s")).is_err());
+        assert!(parse_origin_secret(Some("X-Forwarded-For"), Some("s")).is_err());
+        assert!(parse_origin_secret(None, Some("bad\r\nvalue")).is_err());
     }
 }

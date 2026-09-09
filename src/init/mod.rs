@@ -1359,6 +1359,32 @@ mod tests {
     }
 
     #[test]
+    fn production_pack_emits_dlp_monitor_and_origin_secret() {
+        let dir = run_init(&[
+            "--topology",
+            "vps-api",
+            "--origin",
+            "http://127.0.0.1:8080",
+            "--public-host",
+            "api.exemplo.com",
+            "--listen-mode",
+            "privileged",
+            "--dashboard-token",
+            "tok",
+        ])
+        .unwrap();
+        let example = fs::read_to_string(dir.join(".env.example")).unwrap();
+        let live = fs::read_to_string(dir.join(".env")).unwrap();
+        assert!(
+            example.contains("DLP_ACTION=monitor"),
+            "pack sem DLP_ACTION=monitor: {example}"
+        );
+        assert!(example.contains("ORIGIN_SECRET_HEADER="), "{example}");
+        assert!(live.contains("DLP_ACTION=monitor"), "{live}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn refuses_non_empty_out() {
         let dir = temp_out("occupied");
         fs::create_dir_all(&dir).unwrap();

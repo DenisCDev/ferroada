@@ -7,7 +7,7 @@ Copie esta pasta ou gere com `ferroada init --topology vercel-origin`.
 | Ficheiro | Função |
 | --- | --- |
 | `ferroada.toml` | hosts e backend |
-| `.env.example` | knobs que o 0.6.0 já honra (caminho Ferroada termina TLS) |
+| `.env.example` | knobs que o binário honra, incluindo `DLP_ACTION=monitor` e `ORIGIN_SECRET_*` |
 | `.env.caddy.example` | Caddy na frente, com `PROXY_PROTOCOL=true` |
 | `docker-compose.yml` | Ferroada publica 80/443 |
 | `docker-compose.caddy.yml` | Caddy publica 80/443 |

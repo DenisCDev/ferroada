@@ -68,6 +68,7 @@ fn main() {
 
     info!("Ferroada starting");
     waf::validate_config();
+    ferroada::dlp::validate_config();
 
     // Load config: ferroada.toml (multi-site) or TARGET_URL (single-site)
     let config = Arc::new(Config::load());

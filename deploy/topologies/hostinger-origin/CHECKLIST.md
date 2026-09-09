@@ -47,7 +47,7 @@ Se a ideia era «instalar o Ferroada na Hostinger»: pare. Este processo precisa
 
 ## `--static-placement` (três receitas)
 
-1. **ferroada-front (default):** a VPS é o origin público; a Hostinger só aceita o IP desta VPS. Header secreto de origem ainda não existe neste binário — a defesa é a allowlist de IP.
+1. **ferroada-front (default):** a VPS é o origin público; a Hostinger só aceita o IP desta VPS. O Ferroada injeta `X-Ferroada-Origin` (`ORIGIN_SECRET_HEADER` / `ORIGIN_SECRET` no `.env`). A origem deve recusar pedidos sem esse valor — allowlist de IP sozinha não basta.
 2. **public:** o estático na Hostinger é público (o Ferroada **não** o protege). `{{ORIGIN}}` é só a API na VPS. Leia o `VISIBILIDADE.md`.
 3. **cdn:** Cloudflare na frente do Ferroada; Hostinger como origin do cache de estático. Junte o pack `cdn-edge`.
 

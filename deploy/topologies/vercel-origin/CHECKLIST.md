@@ -48,7 +48,7 @@ Mensagem se a ideia era «Ferroada na Vercel»: este processo precisa de uma VM.
 ## Protection Bypass
 
 Na Vercel: Deployment Protection → allowlist do IP desta VPS **ou** `x-vercel-protection-bypass`.
-Cole o valor no painel da Vercel. Este pack **documenta** o header; o Ferroada 0.6.0 **não** o injeta (isso é outro PR). Até lá, a allowlist de IP é o que fecha a origem.
+Este pack injeta `ORIGIN_SECRET_HEADER` (já vem `x-vercel-protection-bypass`) com `ORIGIN_SECRET`. Cole o mesmo token no painel da Vercel. O processo não loga o valor.
 
 O serverless da Vercel continua responsável pela autorização da app. O Ferroada faz Level 1 na borda da VPS.
 

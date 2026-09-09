@@ -408,7 +408,10 @@ Toda a configuração é feita por variáveis de ambiente:
 | `ALLOWED_HOSTS` | *(desativada)* | Allowlist de domínios no Host header (ex.: `meusite.com,www.meusite.com`) |
 | `FORCE_HTTPS` | `false` | Redirecionar HTTP → HTTPS (requer TLS configurado) |
 | `HTTPS_REDIRECT_HOST` | *(vazio)* | Host público confiável para redirect no modo single-site/default |
-| `DLP_ENABLED` | `true` | Mascaramento de CPF e tokens nas respostas |
+| `DLP_ENABLED` | `true` | Liga a inspeção DLP de CPF e tokens nas respostas |
+| `DLP_ACTION` | `redact` se unset e `DLP_ENABLED=true` | `monitor` (conta, não mascara), `redact` (mascara), `block` (502 se achar PII ou o buffer estourar). Packs de produção emitem `monitor` |
+| `ORIGIN_SECRET_HEADER` | `X-Ferroada-Origin` se só `ORIGIN_SECRET` existir | Nome do header injetado no upstream. Unset com secret vazio = não injeta |
+| `ORIGIN_SECRET` | *(unset)* | Valor do header de origem. Nunca logado. Vazio = não injeta |
 | `DLP_MAX_RESPONSE_BYTES` | `1048576` | Buffer máximo por resposta textual inspecionada pelo DLP |
 | `DLP_MAX_IN_FLIGHT_BYTES` | `67108864` | Budget global de memória para buffers DLP simultâneos |
 | `BAD_BOT_ENABLED` | `true` | Bloqueio por assinatura de User-Agent (sqlmap, nikto, ...) |

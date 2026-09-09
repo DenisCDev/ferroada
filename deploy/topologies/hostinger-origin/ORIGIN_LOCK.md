@@ -30,6 +30,6 @@ Caddy no host: use o `Caddyfile` desta pasta, não um `reverse_proxy` nu. Se o C
 
 ## Header secreto de origem
 
-O binário 0.6.0 ainda não injeta um header de origem. Até esse knob existir, a defesa é IP allowlist / overlay interna, não um segredo no pedido.
+O Ferroada injeta `ORIGIN_SECRET_HEADER` (default `X-Ferroada-Origin`) com o valor de `ORIGIN_SECRET` em cada pedido ao upstream. Vazio = não injeta. A app deve recusar pedidos sem esse valor. O processo não loga o segredo, só o nome do header.
 
-Allowlist na Hostinger: só o IP público desta VPS. Sem header secreto até o knob existir.
+Allowlist na Hostinger: só o IP público desta VPS **e** o header `X-Ferroada-Origin` (o mesmo valor em `ORIGIN_SECRET`). Sem o header, um IP na allowlist não basta se a origem recusar o pedido.
