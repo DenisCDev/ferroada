@@ -77,6 +77,10 @@ backend = "http://backend-b:3000"
 # unknown method e content-type não listado: sempre deny.
 # extra field no JSON: deny, salvo additionalProperties: true no spec.
 # openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }
+# JWT/JWKS (opt-in). Sem bloco jwt o site continua Level 1, sem Authorization.
+# alg default: RS256 e ES256. none é recusado. HS* só com algorithms explícito
+# e hmac_secret_env. iss e aud obrigatórios. Bindings declarativos.
+# jwt = { jwks = "https://auth.exemplo.com/.well-known/jwks.json", issuer = "https://auth.exemplo.com", audience = "api.meusite.com", paths = ["/accounts/{account_id}"], bindings = ["jwt.sub == path.account_id", "jwt.tenant_id == body.tenant_id"] }
 
 # [[sites]]
 # hosts = ["outrosite.com", "www.outrosite.com"]

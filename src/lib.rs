@@ -8,6 +8,7 @@ pub mod dlp;
 pub mod headers;
 pub mod healthcheck;
 pub mod init;
+pub mod jwt;
 pub mod listen;
 pub mod metrics;
 pub mod openapi;

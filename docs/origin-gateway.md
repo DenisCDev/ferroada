@@ -1018,7 +1018,12 @@ Ordem de produto (packs primeiro) é consciente: o txt pedia Pingora → identid
 - **Descrição:** spec é um path no TOML por site (`openapi = "./openapi.yaml"` ou `openapi = { spec = "...", unknown_endpoint = "observe"|"deny" }`). Compila no load, não a cada request. Valida método, rota, path params, query, headers, content-type e body JSON (tipos, required, enum, additionalProperties). Extra field no objeto é deny salvo `additionalProperties: true`. unknown endpoint: observe|deny (default observe se a chave falta em rota aberta; deny em `require_complete` se a chave falta). unknown method e unknown content-type: deny. `SecurityEvent` com path/campo, sem dump do body. Sem spec o site permanece Level 1. Sem JWT, DLP de campo, GraphQL, gRPC, validação de response.
 - **Exit:** GET `/pets/1` com spec → 200. GET `/nao-existe` + unknown=deny → 403 + evento, zero request no stub. POST `/pets` JSON fora do schema → 403, stub 0. POST `/pets` content-type xml não listado → 403. Site sem spec não 403 por endpoint desconhecido.
 
-#### PR 14 — `feat: JWT/JWKS identity keys for rate and bindings` (tardio)
+#### PR 14 — `feat: JWT/JWKS identity keys for rate and bindings`
+
+- **Ficheiros:** `src/jwt.rs`, `src/config.rs`, `src/proxy.rs`, `src/client_ip.rs`, `src/rate_limit.rs`, `src/behavioral.rs`, `src/metrics.rs`, `ferroada.toml.example`, packs `vps-api`/`_skeleton` (comentário opt-in), `tests/jwt.rs`
+- **Deps:** PR 13 (OpenAPI na main). openssl já no crate para RS256/ES256; JWKS HTTP com timeout próprio (não o comando `cidrs`).
+- **Descrição:** JWT é um bloco TOML por site (`jwt = { jwks, issuer, audience, bindings, paths }`). Sem bloco o site permanece Level 1. Allowlist de alg: default RS256/ES256; `none` nunca; HS* só com `algorithms` explícito + `hmac_secret_env`. `iss` e `aud` obrigatórios. Valida `exp`, `nbf`, `iat`, `jti` (replay por site, teto no mapa). JWKS cacheado; fetch com timeout; kid novo dispara refresh; fetch falhou → last-known-good. Bindings declarativos `jwt.sub == path.account_id` e `jwt.tenant_id == body.tenant_id`. Rate/behavior usam hash de `sub`/tenant além do IP. Evento `jwt`/`jwt_binding` sem token nem payload. Sem DLP por campo, GraphQL, gRPC, OPA, Helm.
+- **Exit:** JWT válido + binding ok → 200. alg none / iss errado / exp vencido → 401, stub 0. `sub` ≠ `path.account_id` → 403, stub 0. kid novo passa depois do refresh do cache. Site sem jwt continua 200 sem Authorization.
 
 #### PR 15 — `feat: field-aware DLP and block commit-point` (tardio; amplia PR 10)
 

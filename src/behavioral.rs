@@ -75,7 +75,31 @@ const CLEANUP_INTERVAL: u64 = 1000;
 
 // --- Global state ---
 
-static PROFILES: Lazy<DashMap<SiteClientKey, IpProfile>> = Lazy::new(DashMap::new);
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum BehaviorKey {
+    Network(SiteClientKey),
+    JwtSub { site: String, hash: u64 },
+    JwtTenant { site: String, hash: u64 },
+}
+
+fn behavior_keys(identity: &RiskIdentity) -> Vec<BehaviorKey> {
+    let mut keys = vec![BehaviorKey::Network(identity.network_key())];
+    if let Some(hash) = identity.jwt_sub_hash {
+        keys.push(BehaviorKey::JwtSub {
+            site: identity.site.clone(),
+            hash,
+        });
+    }
+    if let Some(hash) = identity.jwt_tenant_hash {
+        keys.push(BehaviorKey::JwtTenant {
+            site: identity.site.clone(),
+            hash,
+        });
+    }
+    keys
+}
+
+static PROFILES: Lazy<DashMap<BehaviorKey, IpProfile>> = Lazy::new(DashMap::new);
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct IpProfile {
@@ -183,12 +207,28 @@ pub fn check_and_record(
         cleanup_stale();
     }
 
-    let key = identity.network_key();
-    let mut entry = PROFILES.entry(key).or_insert_with(IpProfile::new);
+    let mut worst = BehavioralVerdict::Allow;
+    for key in behavior_keys(identity) {
+        match score_key(&key, identity, uri, ua, client_addr) {
+            BehavioralVerdict::Block => return BehavioralVerdict::Block,
+            BehavioralVerdict::Throttle => worst = BehavioralVerdict::Throttle,
+            BehavioralVerdict::Allow => {}
+        }
+    }
+    worst
+}
+
+fn score_key(
+    key: &BehaviorKey,
+    identity: &RiskIdentity,
+    uri: &str,
+    ua: Option<&str>,
+    client_addr: &str,
+) -> BehavioralVerdict {
+    let mut entry = PROFILES.entry(key.clone()).or_insert_with(IpProfile::new);
     let profile = entry.value_mut();
     profile.last_seen = Instant::now();
 
-    // Check if currently banned
     if profile.is_banned() {
         metrics::record_block_in(
             &identity.site,
@@ -200,16 +240,13 @@ pub fn check_and_record(
         return BehavioralVerdict::Block;
     }
 
-    // Apply decay
     profile.apply_decay();
 
-    // Record path diversity
     profile.reset_path_window_if_expired();
     let path = uri.split('?').next().unwrap_or(uri);
     let path_hash = hash_str(path);
     add_hash(&mut profile.unique_paths, path_hash);
 
-    // Check path diversity (scan detection)
     if !profile.path_diversity_flagged && profile.unique_paths.len() > PATH_DIVERSITY_THRESHOLD {
         profile.path_diversity_flagged = true;
         profile.add_score(20.0);
@@ -220,10 +257,8 @@ pub fn check_and_record(
         );
     }
 
-    // Record UA and check rotation
     if let Some(ua_str) = ua {
         if ua_str.is_empty() {
-            // No User-Agent
             profile.add_score(8.0);
         } else {
             let ua_hash = hash_str(ua_str);
@@ -240,14 +275,10 @@ pub fn check_and_record(
             }
         }
     } else {
-        // No User-Agent header at all
         profile.add_score(8.0);
     }
 
-    // Small baseline score per request
     profile.score += 0.1;
-
-    // Evaluate thresholds
     let score = profile.score;
 
     if score >= *SCORE_THRESHOLD_BLOCK {
@@ -293,13 +324,13 @@ pub fn record_waf_block(identity: &RiskIdentity) {
     if !*BEHAVIORAL_ENABLED {
         return;
     }
-    let mut entry = PROFILES
-        .entry(identity.network_key())
-        .or_insert_with(IpProfile::new);
-    let profile = entry.value_mut();
-    profile.last_seen = Instant::now();
-    profile.waf_blocks = profile.waf_blocks.saturating_add(1);
-    profile.add_score(20.0);
+    for key in behavior_keys(identity) {
+        let mut entry = PROFILES.entry(key).or_insert_with(IpProfile::new);
+        let profile = entry.value_mut();
+        profile.last_seen = Instant::now();
+        profile.waf_blocks = profile.waf_blocks.saturating_add(1);
+        profile.add_score(20.0);
+    }
 }
 
 /// Record upstream response status — feeds scoring for scan/brute-force detection.
@@ -307,26 +338,26 @@ pub fn record_response(identity: &RiskIdentity, status: u16) {
     if !*BEHAVIORAL_ENABLED {
         return;
     }
-    let mut entry = PROFILES
-        .entry(identity.network_key())
-        .or_insert_with(IpProfile::new);
-    let profile = entry.value_mut();
-    profile.last_seen = Instant::now();
+    for key in behavior_keys(identity) {
+        let mut entry = PROFILES.entry(key).or_insert_with(IpProfile::new);
+        let profile = entry.value_mut();
+        profile.last_seen = Instant::now();
 
-    match status {
-        404 => {
-            profile.not_found = profile.not_found.saturating_add(1);
-            profile.add_score(3.0);
+        match status {
+            404 => {
+                profile.not_found = profile.not_found.saturating_add(1);
+                profile.add_score(3.0);
+            }
+            401 => {
+                profile.auth_failures = profile.auth_failures.saturating_add(1);
+                profile.add_score(5.0);
+            }
+            403 => {
+                profile.auth_failures = profile.auth_failures.saturating_add(1);
+                profile.add_score(3.0);
+            }
+            _ => {}
         }
-        401 => {
-            profile.auth_failures = profile.auth_failures.saturating_add(1);
-            profile.add_score(5.0);
-        }
-        403 => {
-            profile.auth_failures = profile.auth_failures.saturating_add(1);
-            profile.add_score(3.0);
-        }
-        _ => {}
     }
 }
 
@@ -347,7 +378,7 @@ fn cleanup_stale() {
     // Phase 2: if still over limit, remove lowest-score entries
     if PROFILES.len() > *MAX_TRACKED_IPS {
         let to_remove = PROFILES.len() - *MAX_TRACKED_IPS;
-        let mut entries: Vec<(SiteClientKey, f32)> = PROFILES
+        let mut entries: Vec<(BehaviorKey, f32)> = PROFILES
             .iter()
             .map(|e| (e.key().clone(), e.value().score))
             .collect();
@@ -371,10 +402,14 @@ mod tests {
         RiskIdentity::new(site, ip, uri, None, None)
     }
 
+    fn net_key(site: &str, ip: IpAddr) -> BehaviorKey {
+        BehaviorKey::Network(SiteClientKey::new(site, ip))
+    }
+
     #[test]
     fn test_normal_traffic_stays_low() {
         let ip = test_ip(1);
-        let key = SiteClientKey::new("site-a", ip);
+        let key = net_key("site-a", ip);
         PROFILES.remove(&key);
         for _ in 0..10 {
             let verdict = check_and_record(
@@ -396,7 +431,7 @@ mod tests {
     #[test]
     fn test_waf_blocks_raise_score() {
         let ip = test_ip(2);
-        let key = SiteClientKey::new("site-a", ip);
+        let key = net_key("site-a", ip);
         PROFILES.remove(&key);
         let identity = identity(ip, "site-a", "/test");
         check_and_record(&identity, "/test", Some("Mozilla/5.0"), "10.0.0.2");
@@ -414,7 +449,7 @@ mod tests {
     #[test]
     fn test_decay_reduces_score() {
         let ip = test_ip(3);
-        let key = SiteClientKey::new("site-a", ip);
+        let key = net_key("site-a", ip);
         PROFILES.remove(&key);
         {
             let mut entry = PROFILES.entry(key.clone()).or_insert_with(IpProfile::new);
@@ -443,7 +478,7 @@ mod tests {
     #[test]
     fn test_ban_blocks_requests() {
         let ip = test_ip(4);
-        let key = SiteClientKey::new("site-a", ip);
+        let key = net_key("site-a", ip);
         PROFILES.remove(&key);
         {
             let mut entry = PROFILES.entry(key).or_insert_with(IpProfile::new);
@@ -462,7 +497,7 @@ mod tests {
     #[test]
     fn test_no_ua_adds_score() {
         let ip = test_ip(5);
-        let key = SiteClientKey::new("site-a", ip);
+        let key = net_key("site-a", ip);
         PROFILES.remove(&key);
         for _ in 0..5 {
             check_and_record(&identity(ip, "site-a", "/test"), "/test", None, "10.0.0.5");
@@ -479,7 +514,7 @@ mod tests {
     #[test]
     fn test_404_scanning_raises_score() {
         let ip = test_ip(6);
-        let key = SiteClientKey::new("site-a", ip);
+        let key = net_key("site-a", ip);
         PROFILES.remove(&key);
         let identity = identity(ip, "site-a", "/test");
         check_and_record(&identity, "/test", Some("Mozilla/5.0"), "10.0.0.6");
@@ -498,8 +533,8 @@ mod tests {
     #[test]
     fn sites_have_independent_behavior_profiles() {
         let ip = test_ip(7);
-        let site_a = SiteClientKey::new("site-a", ip);
-        let site_b = SiteClientKey::new("site-b", ip);
+        let site_a = net_key("site-a", ip);
+        let site_b = net_key("site-b", ip);
         PROFILES.remove(&site_a);
         PROFILES.remove(&site_b);
         record_waf_block(&identity(ip, "site-a", "/"));
@@ -510,7 +545,7 @@ mod tests {
     #[test]
     fn path_scan_detection_uses_rolling_windows_for_old_profiles() {
         let ip = test_ip(8);
-        let key = SiteClientKey::new("site-a", ip);
+        let key = net_key("site-a", ip);
         PROFILES.remove(&key);
         {
             let mut entry = PROFILES.entry(key.clone()).or_insert_with(IpProfile::new);
@@ -538,5 +573,21 @@ mod tests {
         profile.last_decay = Instant::now() - std::time::Duration::from_secs(301);
         profile.apply_decay();
         assert!(profile.is_stale(std::time::Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn jwt_sub_has_its_own_behavior_profile() {
+        let ip = test_ip(9);
+        let mut identity = identity(ip, "site-a", "/");
+        identity.set_jwt(Some("user-1"), None);
+        let jwt_key = BehaviorKey::JwtSub {
+            site: "site-a".into(),
+            hash: identity.jwt_sub_hash.expect("hash"),
+        };
+        PROFILES.remove(&jwt_key);
+        PROFILES.remove(&net_key("site-a", ip));
+        record_waf_block(&identity);
+        assert!(PROFILES.contains_key(&jwt_key));
+        assert!(PROFILES.contains_key(&net_key("site-a", ip)));
     }
 }

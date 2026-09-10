@@ -21,6 +21,14 @@ enum RateKey {
         site: String,
         hash: u64,
     },
+    JwtSub {
+        site: String,
+        hash: u64,
+    },
+    JwtTenant {
+        site: String,
+        hash: u64,
+    },
 }
 
 const DEFAULT_MAX: u64 = 100;
@@ -103,6 +111,18 @@ impl RateLimiter {
         }
         if let Some(hash) = identity.api_key_hash {
             keys.push(RateKey::ApiKey {
+                site: identity.site.clone(),
+                hash,
+            });
+        }
+        if let Some(hash) = identity.jwt_sub_hash {
+            keys.push(RateKey::JwtSub {
+                site: identity.site.clone(),
+                hash,
+            });
+        }
+        if let Some(hash) = identity.jwt_tenant_hash {
+            keys.push(RateKey::JwtTenant {
                 site: identity.site.clone(),
                 hash,
             });
@@ -271,6 +291,17 @@ mod tests {
         let rl = RateLimiter::new(1, 60, 100);
         let first = RiskIdentity::new("site-a", ip(1), "/api", None, Some("same-key"));
         let second = RiskIdentity::new("site-a", ip(2), "/api", None, Some("same-key"));
+        assert!(rl.check(&first, "/api"));
+        assert!(!rl.check(&second, "/api"));
+    }
+
+    #[test]
+    fn jwt_sub_budget_is_shared_across_networks() {
+        let rl = RateLimiter::new(1, 60, 100);
+        let mut first = RiskIdentity::new("site-a", ip(1), "/api", None, None);
+        first.set_jwt(Some("user-1"), Some("tenant-a"));
+        let mut second = RiskIdentity::new("site-a", ip(2), "/api", None, None);
+        second.set_jwt(Some("user-1"), Some("tenant-a"));
         assert!(rl.check(&first, "/api"));
         assert!(!rl.check(&second, "/api"));
     }

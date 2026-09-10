@@ -64,6 +64,7 @@ use crate::client_ip::{ClientIpConfig, RiskIdentity, TrustedProxies};
 use crate::config::{Config, InspectionDisposition, InspectionPolicy};
 use crate::dlp::{self, DlpAction};
 use crate::headers;
+use crate::jwt::{self, JwtFailure, JwtPrincipal};
 use crate::metrics;
 use crate::openapi::{BodyVerdict, EnvelopeVerdict, MatchedOp};
 use crate::protocol::{self, ProtocolVerdict, RequestFacts};
@@ -361,6 +362,7 @@ pub struct FerroadaCtx {
     pub risk_identity: Option<RiskIdentity>,
     inspection_policy: InspectionPolicy,
     openapi_match: Option<MatchedOp>,
+    jwt: Option<JwtPrincipal>,
     spool: Option<SpoolHandle>,
     concurrency_guard: Option<ConcurrencyGuard>,
     dlp_budget: Arc<ByteBudget>,
@@ -429,6 +431,7 @@ impl ProxyHttp for FerroadaProxy {
             risk_identity: None,
             inspection_policy: InspectionPolicy::open(),
             openapi_match: None,
+            jwt: None,
             spool: None,
             concurrency_guard: None,
             dlp_budget: Arc::clone(&self.dlp_budget),
@@ -668,6 +671,10 @@ impl ProxyHttp for FerroadaProxy {
             return Ok(true);
         }
 
+        if self.apply_jwt_identity(session, ctx, &uri).await? {
+            return Ok(true);
+        }
+
         let session_id = session
             .req_header()
             .headers
@@ -679,8 +686,13 @@ impl ProxyHttp for FerroadaProxy {
             .headers
             .get(RISK_API_KEY_HEADER.as_str())
             .and_then(|value| value.to_str().ok());
-        ctx.risk_identity = parse_ip(&client_addr)
-            .map(|ip| RiskIdentity::new(&site, ip, &uri, session_id, api_key));
+        ctx.risk_identity = parse_ip(&client_addr).map(|ip| {
+            let mut identity = RiskIdentity::new(&site, ip, &uri, session_id, api_key);
+            if let Some(principal) = ctx.jwt.as_ref() {
+                identity.set_jwt(Some(principal.sub.as_str()), principal.tenant.as_deref());
+            }
+            identity
+        });
 
         if let Some(identity) = ctx.risk_identity.as_ref() {
             let ua = session
@@ -865,13 +877,14 @@ impl ProxyHttp for FerroadaProxy {
         }
         ctx.skip_body_waf = protocol_verdict.skips_body_waf();
 
-        // WAF inspection on URI + headers
+        // WAF inspection on URI + headers. Authorization is identity, not a
+        // WAF input — matching it would put the token in the event detail.
         let header_values: Vec<String> = session
             .req_header()
             .headers
-            .values()
-            .filter_map(|v| v.to_str().ok())
-            .map(|s| s.to_string())
+            .iter()
+            .filter(|(name, _)| !name.as_str().eq_ignore_ascii_case("authorization"))
+            .filter_map(|(_, value)| value.to_str().ok().map(|s| s.to_string()))
             .collect();
 
         let waf_profile = ctx.backend.as_ref().expect("backend resolved").waf_profile;
@@ -1161,7 +1174,16 @@ impl ProxyHttp for FerroadaProxy {
                 if self.apply_openapi_body(session, ctx, l1_body).await? {
                     return Ok(true);
                 }
-            } else if ctx.openapi_match.is_some() {
+                if self.apply_jwt_body(session, ctx, l1_body).await? {
+                    return Ok(true);
+                }
+            } else if ctx.openapi_match.is_some()
+                || ctx
+                    .backend
+                    .as_ref()
+                    .and_then(|backend| backend.jwt.as_ref())
+                    .is_some_and(|policy| policy.has_body_bindings())
+            {
                 let wire = if spooling {
                     match ctx
                         .spool
@@ -1187,6 +1209,9 @@ impl ProxyHttp for FerroadaProxy {
                 if self.apply_openapi_body(session, ctx, &wire).await? {
                     return Ok(true);
                 }
+                if self.apply_jwt_body(session, ctx, &wire).await? {
+                    return Ok(true);
+                }
             }
 
             // Keep the global reservation until the request finishes: Pingora now
@@ -1209,6 +1234,9 @@ impl ProxyHttp for FerroadaProxy {
                 return Ok(true);
             }
             if self.apply_openapi_body(session, ctx, &[]).await? {
+                return Ok(true);
+            }
+            if self.apply_jwt_body(session, ctx, &[]).await? {
                 return Ok(true);
             }
         }
@@ -1431,6 +1459,7 @@ fn l1_header_pairs(session: &Session, body: &[u8], body_is_decoded: bool) -> Vec
         .req_header()
         .headers
         .iter()
+        .filter(|(name, _)| !name.as_str().eq_ignore_ascii_case("authorization"))
         .filter_map(|(name, value)| {
             Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
         });
@@ -2134,6 +2163,92 @@ impl FerroadaProxy {
         Ok(true)
     }
 
+    async fn apply_jwt_identity(
+        &self,
+        session: &mut Session,
+        ctx: &mut FerroadaCtx,
+        uri: &str,
+    ) -> Result<bool> {
+        let Some(policy) = ctx.backend.as_ref().and_then(|backend| backend.jwt.clone()) else {
+            return Ok(false);
+        };
+        let authorization = session
+            .req_header()
+            .headers
+            .get("Authorization")
+            .and_then(|value| value.to_str().ok());
+        match policy.authenticate(authorization, jwt::unix_now()) {
+            Ok(principal) => {
+                let path = uri.split('?').next().unwrap_or(uri);
+                let extra = ctx
+                    .backend
+                    .as_ref()
+                    .and_then(|backend| backend.openapi.as_ref())
+                    .map(|spec| spec.path_params(path))
+                    .unwrap_or_default();
+                if let Err(failure) = policy.bind_path(&principal, path, &extra) {
+                    return self.reject_jwt(session, ctx, uri, failure).await;
+                }
+                ctx.jwt = Some(principal);
+                Ok(false)
+            }
+            Err(failure) => self.reject_jwt(session, ctx, uri, failure).await,
+        }
+    }
+
+    async fn apply_jwt_body(
+        &self,
+        session: &mut Session,
+        ctx: &FerroadaCtx,
+        body: &[u8],
+    ) -> Result<bool> {
+        let Some(policy) = ctx
+            .backend
+            .as_ref()
+            .and_then(|backend| backend.jwt.as_ref())
+        else {
+            return Ok(false);
+        };
+        if !policy.has_body_bindings() {
+            return Ok(false);
+        }
+        let Some(principal) = ctx.jwt.as_ref() else {
+            return Ok(false);
+        };
+        match policy.bind_body(principal, body) {
+            Ok(()) => Ok(false),
+            Err(failure) => {
+                self.reject_jwt(session, ctx, &ctx.request_uri, failure)
+                    .await
+            }
+        }
+    }
+
+    async fn reject_jwt(
+        &self,
+        session: &mut Session,
+        ctx: &FerroadaCtx,
+        uri: &str,
+        failure: JwtFailure,
+    ) -> Result<bool> {
+        metrics::record_block_in(
+            &ctx.site_scope,
+            failure.event_type(),
+            &ctx.client_addr,
+            uri,
+            failure.reason(),
+        );
+        match failure {
+            JwtFailure::Unauthorized(_) => {
+                self.send_401(session, "token inválido ou ausente").await
+            }
+            JwtFailure::Forbidden(_) => {
+                self.send_403(session, "identidade não corresponde ao recurso")
+                    .await
+            }
+        }
+    }
+
     async fn apply_openapi_envelope(
         &self,
         session: &mut Session,
@@ -2350,6 +2465,21 @@ impl FerroadaProxy {
         let mut header = ResponseHeader::build(status, None)?;
         header.insert_header("Content-Type", "text/plain; charset=utf-8")?;
         header.insert_header("Content-Length", body.len().to_string())?;
+        session
+            .write_response_header(Box::new(header), false)
+            .await?;
+        session
+            .write_response_body(Some(Bytes::from(body)), true)
+            .await?;
+        Ok(true)
+    }
+
+    async fn send_401(&self, session: &mut Session, reason: &str) -> Result<bool> {
+        let body = format!("401 Não autorizado: {reason}\n");
+        let mut header = ResponseHeader::build(401, None)?;
+        header.insert_header("Content-Type", "text/plain; charset=utf-8")?;
+        header.insert_header("Content-Length", body.len().to_string())?;
+        header.insert_header("WWW-Authenticate", "Bearer")?;
         session
             .write_response_header(Box::new(header), false)
             .await?;

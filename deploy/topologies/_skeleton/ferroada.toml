@@ -8,3 +8,4 @@ waf_profile = "generic"
 require_complete_waf_inspection = ["/api/payment", "/api/admin", "/auth", "/login"]
 # OpenAPI (opt-in). Sem spec o site continua Level 1.
 # openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }
+# jwt = { jwks = "https://auth.exemplo.com/.well-known/jwks.json", issuer = "https://auth.exemplo.com", audience = "{{PUBLIC_HOST}}", paths = ["/accounts/{account_id}"], bindings = ["jwt.sub == path.account_id"] }

@@ -4,6 +4,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+use crate::jwt::{JwtPolicy, JwtSpec};
 use crate::openapi::{OpenApiPolicy, UnknownEndpoint};
 use crate::protocol::{ProtocolMatrix, ProtocolsSection};
 use crate::waf::{self, InspectionOutcome, WafProfile};
@@ -48,6 +49,8 @@ struct SiteEntry {
     l1: L1File,
     #[serde(default)]
     openapi: Option<OpenApiFile>,
+    #[serde(default)]
+    jwt: Option<JwtFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +66,24 @@ struct OpenApiTable {
     spec: String,
     #[serde(default)]
     unknown_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JwtFile {
+    jwks: String,
+    #[serde(alias = "iss")]
+    issuer: String,
+    #[serde(alias = "aud")]
+    audience: String,
+    #[serde(default)]
+    algorithms: Vec<String>,
+    #[serde(default)]
+    bindings: Vec<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    hmac_secret_env: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,6 +229,7 @@ pub struct Backend {
     routes: Vec<RouteInspection>,
     l1: SiteL1,
     pub openapi: Option<OpenApiPolicy>,
+    pub jwt: Option<JwtPolicy>,
 }
 
 impl Backend {
@@ -301,6 +323,7 @@ impl Config {
             waf::default_profile(),
             SiteL1::default(),
             None,
+            None,
         );
         info!(
             backend = %target_url,
@@ -338,10 +361,15 @@ impl Config {
                     parse_l1_exclusions(site.l1.exclusions),
                 ),
             };
+            let site_host = site.hosts.first().map(String::as_str);
             let openapi = site
                 .openapi
                 .as_ref()
-                .map(|file| load_openapi(file, base_dir, site.hosts.first().map(String::as_str)));
+                .map(|file| load_openapi(file, base_dir, site_host));
+            let jwt = site
+                .jwt
+                .as_ref()
+                .map(|file| load_jwt(file, base_dir, site_host));
             let mut backend = resolve_site(
                 &site.backend,
                 parse_path_prefixes(site.require_complete_waf_inspection.iter()),
@@ -352,6 +380,7 @@ impl Config {
                     .unwrap_or_else(waf::default_profile),
                 site_l1,
                 openapi,
+                jwt,
             );
             backend.site_scope = site
                 .hosts
@@ -395,6 +424,7 @@ impl Config {
                     settings: l1_defaults,
                     exclusions: global_exclusions,
                 },
+                None,
                 None,
             );
             backend.site_scope = "__default__".to_string();
@@ -468,6 +498,7 @@ fn resolve_url(
     waf_profile: WafProfile,
     l1: SiteL1,
     openapi: Option<OpenApiPolicy>,
+    jwt: Option<JwtPolicy>,
 ) -> Backend {
     resolve_site(
         url,
@@ -476,6 +507,7 @@ fn resolve_url(
         waf_profile,
         l1,
         openapi,
+        jwt,
     )
 }
 
@@ -509,6 +541,23 @@ fn load_openapi(file: &OpenApiFile, base_dir: &Path, site_host: Option<&str>) ->
     policy
 }
 
+fn load_jwt(file: &JwtFile, base_dir: &Path, site_host: Option<&str>) -> JwtPolicy {
+    JwtPolicy::load(
+        JwtSpec {
+            jwks: &file.jwks,
+            issuer: &file.issuer,
+            audience: &file.audience,
+            algorithms: &file.algorithms,
+            bindings: &file.bindings,
+            paths: &file.paths,
+            hmac_secret_env: file.hmac_secret_env.as_deref(),
+        },
+        base_dir,
+        site_host,
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
 fn resolve_site(
     url: &str,
     require_complete_waf_inspection: Vec<String>,
@@ -516,6 +565,7 @@ fn resolve_site(
     waf_profile: WafProfile,
     l1: SiteL1,
     openapi: Option<OpenApiPolicy>,
+    jwt: Option<JwtPolicy>,
 ) -> Backend {
     let tls = url.starts_with("https://");
     let without_scheme = url
@@ -551,6 +601,7 @@ fn resolve_site(
         routes: merge_inspection_routes(require_complete_waf_inspection, route_entries),
         l1,
         openapi,
+        jwt,
     }
 }
 
@@ -849,6 +900,7 @@ mod tests {
             WafProfile::Generic,
             SiteL1::default(),
             None,
+            None,
         );
         assert!(backend.requires_complete_waf_inspection("/api/payment?id=1"));
     }
@@ -860,6 +912,7 @@ mod tests {
             vec!["/api/payment".to_string()],
             WafProfile::Generic,
             SiteL1::default(),
+            None,
             None,
         );
         assert!(backend.requires_complete_waf_inspection("/api/%70ayment"));
@@ -1312,6 +1365,43 @@ backend = "http://127.0.0.1:8081"
         ));
         assert!(config.resolve("pets.example").unwrap().openapi.is_some());
         assert!(config.resolve("plain.example").unwrap().openapi.is_none());
+    }
+
+    #[test]
+    fn jwt_is_opt_in_per_site() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferroada-jwt-cfg-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jwks = dir.join("jwks.json");
+        std::fs::write(
+            &jwks,
+            r#"{"keys":[{"kty":"RSA","kid":"k1","n":"AQAB","e":"AQAB"}]}"#,
+        )
+        .unwrap();
+        let jwks_path = jwks.to_string_lossy().replace('\\', "/");
+        let dir_path = dir.to_string_lossy().replace('\\', "/");
+        let config = Config::from_toml_in(
+            &format!(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+jwt = {{ jwks = "{jwks_path}", issuer = "https://issuer.test", audience = "api.example" }}
+
+[[sites]]
+hosts = ["plain.example"]
+backend = "http://127.0.0.1:8081"
+"#
+            ),
+            std::path::Path::new(&dir_path),
+        );
+        assert!(config.resolve("api.example").unwrap().jwt.is_some());
+        assert!(config.resolve("plain.example").unwrap().jwt.is_none());
     }
 
     #[test]

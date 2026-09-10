@@ -546,6 +546,7 @@ name = "ferroada"
 version = "0.6.0"
 dependencies = [
  "async-trait",
+ "base64",
  "bytes",
  "dashmap",
  "dotenvy",
@@ -555,6 +556,7 @@ dependencies = [
  "once_cell",
  "openssl",
  "openssl-probe",
+ "openssl-sys",
  "pingora",
  "regex",
  "serde",
