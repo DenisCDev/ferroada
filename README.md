@@ -136,6 +136,17 @@ com timeout no fetch e last-known-good se o IdP cair. Bindings no TOML
 comportamento passam a usar o hash de `sub`/tenant, não só o IP. O token e o
 payload não entram no log.
 
+GraphQL é opt-in por site/rota (`graphql = { max_depth = 8, max_operations = 5, introspection = false }`).
+Sem o bloco, `POST /graphql` continua só com HTTP/WAF/OpenAPI. Com o bloco, o
+proxy parseia o AST (JSON `{"query":...}`, batch em array, ou
+`application/graphql`) e aplica tetos de profundidade, complexidade, aliases,
+fragments e quantidade de operações. Introspection (`__schema` / `__type`)
+nasce desligada em produção. Persisted queries são uma allowlist local de
+SHA-256; `persisted_only = true` recusa query solta fora da lista. Quota de
+custo usa `jwt.sub` se o site tem JWT, senão o IP. Parse falhou vira
+`ParseError` e segue a política da rota (403 em `require_complete`). O evento
+diz o limite que estourou (`depth`, `aliases`, …), nunca a query.
+
 #### Inspeção de body
 
 O body de qualquer método permitido é inspecionado antes de chegar ao backend.
@@ -636,6 +647,7 @@ src/
 ├── headers.rs       # Injeção de security headers + remoção de headers de servidor
 ├── shield.rs        # Restrição de métodos + limites de tamanho + validação de Host + bad bots
 ├── dlp.rs           # DLP: identity/gzip/deflate, limites e integridade de headers
+├── graphql.rs       # GraphQL AST: profundidade, aliases, fragments, batch, introspection
 ├── rate_limit.rs    # Sliding window isolado por site/rede, evicção e teto de chaves
 ├── metrics.rs       # Contadores atômicos + ring buffer de eventos
 └── dashboard.rs     # API JSON /api/metrics + HTML mínimo

@@ -1032,7 +1032,12 @@ Ordem de produto (packs primeiro) é consciente: o txt pedia Pingora → identid
 - **Descrição:** detectores CPF/CNPJ com dígito verificador e cartão com Luhn (não mascara CPF inválido). DLP por campo JSON (`path = "$.user.cpf"`) opt-in no TOML por site/rota; sem fields o blob do PR 10 permanece. `block` não libera byte ao cliente antes do fim da inspeção (commit-point); overflow continua 502, nunca body parcial. Brotli inspeciona se o orçamento de inflate couber; senão skip observável, não “limpo”. Resposta assinada continua intocada. Evento DLP não loga o valor mascarado.
 - **Exit:** JSON `{"user":{"cpf":"390.533.447-05"}}` em redact → CPF mascarado, stub viu o pedido. CPF com dígito errado → não mascara. Cartão Luhn em block → 502, zero bytes do origin no cliente. `Content-Encoding: br` sem orçamento → skip observável. Site sem paths de campo continua o DLP de blob.
 
-#### PR 16 — `feat: GraphQL AST limits` (tardio)
+#### PR 16 — `feat: GraphQL AST limits`
+
+- **Ficheiros:** `src/graphql.rs`, `src/config.rs`, `src/proxy.rs`, `src/metrics.rs`, `ferroada.toml.example`, packs `vps-api`/`_skeleton` (comentário opt-in), `tests/graphql.rs`
+- **Deps:** PR 13 (OpenAPI) e PR 14 (JWT na main). Sem gRPC, Helm, OPA, persisted-query store remoto.
+- **Descrição:** parser AST no POST `application/graphql` ou JSON `{"query":...}` (e batch em array). Limites TOML por site/rota: profundidade, complexidade, aliases, fragments, quantidade de operações. Introspection default off em produção. Persisted queries: allowlist de SHA-256 opt-in; query solta fora da lista é deny se `persisted_only`. Quota/custo por `jwt.sub` se o site tem JWT, senão IP. Sem bloco graphql o POST `/graphql` continua HTTP/WAF/OpenAPI. Parse falhou → `ParseError` + política da rota (403 em `require_complete`). Evento com o limite que estourou, nunca a query.
+- **Exit:** query rasa dentro do teto → 200, stub 1. profundidade > `max_depth` → 403, stub 0, evento `depth`. `__schema` com `introspection=false` → 403. batch de 20 com `max_operations=5` → 403. JSON `{"query":"not graphql"}` em fail-closed → 403 ParseError. site sem bloco graphql não 403 por profundidade.
 
 #### PR 17 — `feat: gRPC method allowlist via descriptors` (tardio)
 

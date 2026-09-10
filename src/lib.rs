@@ -5,6 +5,7 @@ pub mod config;
 pub mod connection;
 pub mod dashboard;
 pub mod dlp;
+pub mod graphql;
 pub mod headers;
 pub mod healthcheck;
 pub mod init;
