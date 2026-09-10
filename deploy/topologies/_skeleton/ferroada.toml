@@ -9,3 +9,7 @@ require_complete_waf_inspection = ["/api/payment", "/api/admin", "/auth", "/logi
 # OpenAPI (opt-in). Sem spec o site continua Level 1.
 # openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }
 # jwt = { jwks = "https://auth.exemplo.com/.well-known/jwks.json", issuer = "https://auth.exemplo.com", audience = "{{PUBLIC_HOST}}", paths = ["/accounts/{account_id}"], bindings = ["jwt.sub == path.account_id"] }
+# DLP por campo JSON (opt-in). Sem isto o DLP de blob do processo permanece.
+# [[sites.dlp.fields]]
+# path = "$.user.cpf"
+# detector = "cpf"

@@ -81,6 +81,19 @@ backend = "http://backend-b:3000"
 # alg default: RS256 e ES256. none é recusado. HS* só com algorithms explícito
 # e hmac_secret_env. iss e aud obrigatórios. Bindings declarativos.
 # jwt = { jwks = "https://auth.exemplo.com/.well-known/jwks.json", issuer = "https://auth.exemplo.com", audience = "api.meusite.com", paths = ["/accounts/{account_id}"], bindings = ["jwt.sub == path.account_id", "jwt.tenant_id == body.tenant_id"] }
+# DLP por campo JSON (opt-in). Sem isto o site continua o DLP de blob
+# (CPF/CNPJ com dígito, cartão com Luhn, Bearer). Path tipo $.user.cpf.
+# [[sites.dlp.fields]]
+# path = "$.user.cpf"
+# detector = "cpf"
+# [[sites.dlp.fields]]
+# path = "$.company.cnpj"
+# detector = "cnpj"
+# [[sites.routes]]
+# prefix = "/api/pay"
+# [[sites.routes.dlp.fields]]
+# path = "$.card"
+# detector = "card"
 
 # [[sites]]
 # hosts = ["outrosite.com", "www.outrosite.com"]

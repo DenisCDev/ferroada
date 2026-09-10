@@ -174,8 +174,8 @@ fn setup(
 #[test]
 fn monitor_leaves_cpf_intact_and_counts_detection() {
     let _guard = live_lock();
-    const BODY: &[u8] = b"CPF 123.456.789-00";
-    let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 18\r\nConnection: close\r\n\r\nCPF 123.456.789-00";
+    const BODY: &[u8] = b"CPF 390.533.447-05";
+    let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 18\r\nConnection: close\r\n\r\nCPF 390.533.447-05";
     assert_eq!(BODY.len(), 18);
     let (listen, _stub) = setup(response, DlpAction::Monitor, None);
     let out = send_until_http(listen, &get());

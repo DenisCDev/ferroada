@@ -233,11 +233,18 @@ Server, X-Powered-By, X-AspNet-Version, X-Debug-Token, X-Runtime
 
 | Dado sensível | Padrão detectado | Resultado mascarado |
 |---------------|------------------|---------------------|
-| **CPF** | `123.456.789-00` | `***.***.***-**` |
+| **CPF** | `390.533.447-05` (dígito verificador) | `***.***.***-**` |
+| **CNPJ** | `04.252.011/0001-10` (dígito verificador) | `**.***.***/****-**` |
+| **Cartão** | 13–19 dígitos com Luhn | dígitos viram `*` |
 | **Bearer Token** | `Bearer eyJhbGciOi...` | `Bearer [REDACTED]` |
 
-Se o backend vazar um CPF ou token em resposta textual identity, gzip ou
-deflate, o Ferroada descomprime com limite, mascara e recomprime. Quando pode
+CPF/CNPJ com dígito errado não são mascarados. Paths JSON (`$.user.cpf`) são
+opt-in no TOML por site ou rota; sem eles o DLP de blob continua. `DLP_ACTION=block`
+não libera nenhum byte ao cliente antes do fim da inspeção.
+
+Se o backend vazar um CPF ou token em resposta textual identity, gzip,
+deflate ou brotli, o Ferroada descomprime com limite, mascara e recomprime.
+Brotli sem orçamento de inflate é skip observável, não “limpo”. Quando pode
 transformar uma resposta, remove `Content-Length`, `ETag`, `Content-MD5`,
 `Digest`, `Content-Digest` e `Repr-Digest`, pois deixariam de representar os
 bytes enviados. SSE, gRPC, NDJSON, WebSocket e respostas assinadas passam sem
@@ -440,7 +447,7 @@ Toda a configuração é feita por variáveis de ambiente:
 | `ALLOWED_HOSTS` | *(desativada)* | Allowlist de domínios no Host header (ex.: `meusite.com,www.meusite.com`) |
 | `FORCE_HTTPS` | `false` | Redirecionar HTTP → HTTPS (requer TLS configurado) |
 | `HTTPS_REDIRECT_HOST` | *(vazio)* | Host público confiável para redirect no modo single-site/default |
-| `DLP_ENABLED` | `true` | Liga a inspeção DLP de CPF e tokens nas respostas |
+| `DLP_ENABLED` | `true` | Liga a inspeção DLP de CPF/CNPJ/cartão e tokens nas respostas |
 | `DLP_ACTION` | `redact` se unset e `DLP_ENABLED=true` | `monitor` (conta, não mascara), `redact` (mascara), `block` (502 se achar PII ou o buffer estourar). Packs de produção emitem `monitor` |
 | `ORIGIN_SECRET_HEADER` | `X-Ferroada-Origin` se só `ORIGIN_SECRET` existir | Nome do header injetado no upstream. Unset com secret vazio = não injeta |
 | `ORIGIN_SECRET` | *(unset)* | Valor do header de origem. Nunca logado. Vazio = não injeta |
@@ -681,7 +688,7 @@ Cliente
 [Inject Security Headers] → HSTS, CSP, X-Frame-Options, etc.
   │
   ▼
-[DLP: Response Masking] → CPF e tokens mascarados
+[DLP: Response Masking] → CPF/CNPJ/cartão e tokens mascarados
   │
   ▼
 Cliente (resposta limpa e hardened)

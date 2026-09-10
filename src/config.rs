@@ -4,6 +4,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+use crate::dlp::{self, DlpField};
 use crate::jwt::{JwtPolicy, JwtSpec};
 use crate::openapi::{OpenApiPolicy, UnknownEndpoint};
 use crate::protocol::{ProtocolMatrix, ProtocolsSection};
@@ -51,6 +52,8 @@ struct SiteEntry {
     openapi: Option<OpenApiFile>,
     #[serde(default)]
     jwt: Option<JwtFile>,
+    #[serde(default)]
+    dlp: DlpFile,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +97,22 @@ struct SiteRouteEntry {
     inspection: InspectionPolicyFile,
     #[serde(default)]
     l1: L1File,
+    #[serde(default)]
+    dlp: DlpFile,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DlpFile {
+    #[serde(default)]
+    fields: Vec<DlpFieldFile>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DlpFieldFile {
+    path: String,
+    detector: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -201,6 +220,7 @@ struct RouteInspection {
     prefix: String,
     patch: InspectionPolicyFile,
     l1: L1File,
+    dlp_fields: Vec<DlpField>,
 }
 
 #[derive(Clone)]
@@ -230,6 +250,7 @@ pub struct Backend {
     l1: SiteL1,
     pub openapi: Option<OpenApiPolicy>,
     pub jwt: Option<JwtPolicy>,
+    dlp_fields: Vec<DlpField>,
 }
 
 impl Backend {
@@ -286,6 +307,26 @@ impl Backend {
             path.as_deref(),
             content_type,
         )
+    }
+
+    pub fn dlp_fields_for(&self, uri: &str) -> Vec<DlpField> {
+        let mut fields = self.dlp_fields.clone();
+        let path = uri.split('?').next().unwrap_or(uri);
+        let Some(path) = canonical_route_path(path) else {
+            return fields;
+        };
+        let mut matching: Vec<&RouteInspection> = self
+            .routes
+            .iter()
+            .filter(|route| {
+                !route.dlp_fields.is_empty() && path_matches_prefix(&path, &route.prefix)
+            })
+            .collect();
+        matching.sort_by_key(|route| route.prefix.len());
+        for route in matching {
+            fields.extend(route.dlp_fields.iter().cloned());
+        }
+        fields
     }
 }
 
@@ -382,6 +423,7 @@ impl Config {
                 openapi,
                 jwt,
             );
+            backend.dlp_fields = parse_dlp_fields(site.dlp.fields);
             backend.site_scope = site
                 .hosts
                 .first()
@@ -602,6 +644,7 @@ fn resolve_site(
         l1,
         openapi,
         jwt,
+        dlp_fields: Vec::new(),
     }
 }
 
@@ -736,6 +779,7 @@ fn merge_inspection_routes(
             prefix,
             patch: fail_closed_patch(),
             l1: L1File::default(),
+            dlp_fields: Vec::new(),
         })
         .collect();
     for entry in route_entries {
@@ -743,18 +787,37 @@ fn merge_inspection_routes(
             .into_iter()
             .next()
             .unwrap_or_else(|| panic!("Rota de inspeção precisa de um prefixo de path"));
+        let dlp_fields = parse_dlp_fields(entry.dlp.fields);
         if let Some(existing) = routes.iter_mut().find(|route| route.prefix == prefix) {
             existing.patch = merge_patches(existing.patch.clone(), entry.inspection);
             existing.l1 = merge_l1_files(existing.l1.clone(), entry.l1);
+            existing.dlp_fields.extend(dlp_fields);
         } else {
             routes.push(RouteInspection {
                 prefix,
                 patch: entry.inspection,
                 l1: entry.l1,
+                dlp_fields,
             });
         }
     }
     routes
+}
+
+fn parse_dlp_fields(files: Vec<DlpFieldFile>) -> Vec<DlpField> {
+    if files.len() > dlp::MAX_FIELDS {
+        panic!(
+            "DLP aceita no máximo {} fields por site ou rota, veio {}",
+            dlp::MAX_FIELDS,
+            files.len()
+        );
+    }
+    files
+        .into_iter()
+        .map(|file| {
+            DlpField::parse(&file.path, &file.detector).unwrap_or_else(|error| panic!("{error}"))
+        })
+        .collect()
 }
 
 fn overlay_inspection_policy(
@@ -1428,5 +1491,40 @@ openapi = "./nao-existe.yaml"
             message.contains("OpenAPI"),
             "expected OpenAPI load error, got {message}"
         );
+    }
+
+    #[test]
+    fn dlp_fields_are_opt_in_per_site_and_route() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.dlp.fields]]
+path = "$.user.cpf"
+detector = "cpf"
+
+[[sites.routes]]
+prefix = "/pay"
+[[sites.routes.dlp.fields]]
+path = "$.card"
+detector = "card"
+
+[[sites]]
+hosts = ["plain.example"]
+backend = "http://127.0.0.1:8081"
+"#,
+        );
+        let api = config.resolve("api.example").unwrap();
+        let root = api.dlp_fields_for("/");
+        assert_eq!(root.len(), 1);
+        assert_eq!(root[0].detector, crate::dlp::Detector::Cpf);
+        assert_eq!(root[0].path(), "$.user.cpf");
+        let pay = api.dlp_fields_for("/pay/charge");
+        assert_eq!(pay.len(), 2);
+        assert_eq!(pay[1].detector, crate::dlp::Detector::Card);
+        let plain = config.resolve("plain.example").unwrap();
+        assert!(plain.dlp_fields_for("/pay").is_empty());
     }
 }
