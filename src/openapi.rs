@@ -138,6 +138,22 @@ impl OpenApiPolicy {
         })
     }
 
+    pub fn path_params(&self, path: &str) -> BTreeMap<String, String> {
+        let normalized = config::canonical_route_path(path.split('?').next().unwrap_or(path))
+            .unwrap_or_else(|| path.split('?').next().unwrap_or("/").to_string());
+        for prefix in &self.spec.prefixes {
+            let Some(stripped) = strip_prefix(&normalized, prefix) else {
+                continue;
+            };
+            for compiled in &self.spec.paths {
+                if let Some(params) = match_segments(&compiled.segments, stripped) {
+                    return params;
+                }
+            }
+        }
+        BTreeMap::new()
+    }
+
     pub fn validate_envelope(
         &self,
         method: &str,

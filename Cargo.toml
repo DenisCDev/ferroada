@@ -26,7 +26,9 @@ toml = "0.8"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tokio = { version = "1", features = ["net", "time", "io-util", "fs", "rt"] }
 openssl = "0.10"
+openssl-sys = "0.9"
 openssl-probe = "0.1"
+base64 = "0.22"
 
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
@@ -35,3 +37,6 @@ http = "1"
 pingora = { version = "=0.8.1", features = ["proxy", "openssl", "connection_filter"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "rt", "time", "io-util", "fs", "macros"] }
+openssl = "0.10"
+openssl-sys = "0.9"
+base64 = "0.22"

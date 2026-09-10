@@ -38,6 +38,8 @@ pub struct Metrics {
     pub blocked_spool_limit: AtomicU64,
     pub blocked_waf_l1: AtomicU64,
     pub blocked_openapi: AtomicU64,
+    pub blocked_jwt: AtomicU64,
+    pub blocked_jwt_binding: AtomicU64,
     pub blocked_dlp_partial: AtomicU64,
     pub https_redirect: AtomicU64,
     pub waf_inspection_complete: AtomicU64,
@@ -107,6 +109,8 @@ impl Metrics {
             blocked_spool_limit: AtomicU64::new(0),
             blocked_waf_l1: AtomicU64::new(0),
             blocked_openapi: AtomicU64::new(0),
+            blocked_jwt: AtomicU64::new(0),
+            blocked_jwt_binding: AtomicU64::new(0),
             blocked_dlp_partial: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
             waf_inspection_complete: AtomicU64::new(0),
@@ -246,6 +250,8 @@ pub fn record_block_in(
         "spool_limit" => &METRICS.blocked_spool_limit,
         "waf_l1" => &METRICS.blocked_waf_l1,
         "openapi" => &METRICS.blocked_openapi,
+        "jwt" => &METRICS.blocked_jwt,
+        "jwt_binding" => &METRICS.blocked_jwt_binding,
         "dlp_partial_block" => &METRICS.blocked_dlp_partial,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
@@ -438,6 +444,8 @@ pub fn snapshot_json() -> String {
             "spool_limit": m.blocked_spool_limit.load(Ordering::Relaxed),
             "waf_l1": m.blocked_waf_l1.load(Ordering::Relaxed),
             "openapi": m.blocked_openapi.load(Ordering::Relaxed),
+            "jwt": m.blocked_jwt.load(Ordering::Relaxed),
+            "jwt_binding": m.blocked_jwt_binding.load(Ordering::Relaxed),
             "dlp_partial_block": m.blocked_dlp_partial.load(Ordering::Relaxed)
         },
         "waf_inspection": {
@@ -504,6 +512,8 @@ pub fn snapshot_prometheus() -> String {
         ("spool_limit", &metrics.blocked_spool_limit),
         ("waf_l1", &metrics.blocked_waf_l1),
         ("openapi", &metrics.blocked_openapi),
+        ("jwt", &metrics.blocked_jwt),
+        ("jwt_binding", &metrics.blocked_jwt_binding),
         ("dlp_partial_block", &metrics.blocked_dlp_partial),
     ];
     let mut output = format!(

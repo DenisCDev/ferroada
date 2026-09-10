@@ -124,8 +124,17 @@ hoje. Com spec, o Ferroada valida método, rota, path/query/header, content-type
 e o JSON do body (tipos, required, enum, campos a mais). Endpoint desconhecido
 é observe ou deny (no pack o default é observe; em rota `require_complete`
 sem a chave, deny). Método ou content-type fora do contrato: deny. O evento
-diz o path e o campo; o body não entra no log. Response body e JWT ficam
-para PRs seguintes.
+diz o path e o campo; o body não entra no log.
+
+JWT/JWKS é opt-in por site (`jwt = { jwks = "...", issuer = "...", audience = "..." }`).
+Sem o bloco o site continua igual, inclusive sem `Authorization`. Com o bloco,
+o token é a chave de identidade: allowlist de alg (default só RS256/ES256;
+`none` recusado; HS* só com `algorithms` explícito e `hmac_secret_env`),
+`iss` e `aud` obrigatórios, `exp`/`nbf`/`iat`/`jti` validados, JWKS cacheado
+com timeout no fetch e last-known-good se o IdP cair. Bindings no TOML
+(`jwt.sub == path.account_id`, `jwt.tenant_id == body.tenant_id`). Rate e
+comportamento passam a usar o hash de `sub`/tenant, não só o IP. O token e o
+payload não entram no log.
 
 #### Inspeção de body
 

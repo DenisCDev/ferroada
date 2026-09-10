@@ -9,3 +9,5 @@ require_complete_waf_inspection = ["/api/", "/auth/", "/graphql"]
 # OpenAPI 3.0/3.1 (opt-in). Sem spec o proxy não valida endpoint.
 # Default do pack: observe. unknown method / content-type: deny.
 # openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }
+# JWT/JWKS (opt-in). Sem este bloco o site aceita pedidos sem Authorization.
+# jwt = { jwks = "https://auth.exemplo.com/.well-known/jwks.json", issuer = "https://auth.exemplo.com", audience = "{{PUBLIC_HOST}}", paths = ["/accounts/{account_id}"], bindings = ["jwt.sub == path.account_id"] }

@@ -32,6 +32,8 @@ export const EVENT_LABELS: Record<string, string> = {
   waf_engine_unavailable: "motor WAF L1 indisponível",
   openapi: "validação OpenAPI",
   openapi_observe: "OpenAPI (observação)",
+  jwt: "JWT inválido",
+  jwt_binding: "JWT (binding)",
   dlp_skip: "DLP não aplicado",
   dlp: "DLP",
   https_redirect: "redirecionamento HTTPS",

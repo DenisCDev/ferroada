@@ -22,6 +22,8 @@ pub struct RiskIdentity {
     pub route: String,
     pub session_hash: Option<u64>,
     pub api_key_hash: Option<u64>,
+    pub jwt_sub_hash: Option<u64>,
+    pub jwt_tenant_hash: Option<u64>,
 }
 
 impl SiteClientKey {
@@ -47,7 +49,14 @@ impl RiskIdentity {
             route: route_group(uri),
             session_hash: bounded_hash(session_id),
             api_key_hash: bounded_hash(api_key),
+            jwt_sub_hash: None,
+            jwt_tenant_hash: None,
         }
+    }
+
+    pub fn set_jwt(&mut self, sub: Option<&str>, tenant: Option<&str>) {
+        self.jwt_sub_hash = bounded_hash(sub);
+        self.jwt_tenant_hash = bounded_hash(tenant);
     }
 
     pub fn network_key(&self) -> SiteClientKey {
