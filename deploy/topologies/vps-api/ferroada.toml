@@ -6,3 +6,6 @@ hosts = ["{{PUBLIC_HOST}}"]
 backend = "http://app:8080"
 waf_profile = "generic"
 require_complete_waf_inspection = ["/api/", "/auth/", "/graphql"]
+# OpenAPI 3.0/3.1 (opt-in). Sem spec o proxy não valida endpoint.
+# Default do pack: observe. unknown method / content-type: deny.
+# openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }

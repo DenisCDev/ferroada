@@ -37,6 +37,7 @@ pub struct Metrics {
     pub blocked_request_buffer_limit: AtomicU64,
     pub blocked_spool_limit: AtomicU64,
     pub blocked_waf_l1: AtomicU64,
+    pub blocked_openapi: AtomicU64,
     pub blocked_dlp_partial: AtomicU64,
     pub https_redirect: AtomicU64,
     pub waf_inspection_complete: AtomicU64,
@@ -48,6 +49,7 @@ pub struct Metrics {
     pub waf_inspection_timed_out: AtomicU64,
     pub waf_engine_unavailable: AtomicU64,
     pub waf_l1_shadow: AtomicU64,
+    pub openapi_observed: AtomicU64,
     pub waf_monitored: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
@@ -104,6 +106,7 @@ impl Metrics {
             blocked_request_buffer_limit: AtomicU64::new(0),
             blocked_spool_limit: AtomicU64::new(0),
             blocked_waf_l1: AtomicU64::new(0),
+            blocked_openapi: AtomicU64::new(0),
             blocked_dlp_partial: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
             waf_inspection_complete: AtomicU64::new(0),
@@ -115,6 +118,7 @@ impl Metrics {
             waf_inspection_timed_out: AtomicU64::new(0),
             waf_engine_unavailable: AtomicU64::new(0),
             waf_l1_shadow: AtomicU64::new(0),
+            openapi_observed: AtomicU64::new(0),
             waf_monitored: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
@@ -241,6 +245,7 @@ pub fn record_block_in(
         "request_buffer_limit" => &METRICS.blocked_request_buffer_limit,
         "spool_limit" => &METRICS.blocked_spool_limit,
         "waf_l1" => &METRICS.blocked_waf_l1,
+        "openapi" => &METRICS.blocked_openapi,
         "dlp_partial_block" => &METRICS.blocked_dlp_partial,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
@@ -348,6 +353,8 @@ pub fn record_observation_in(
     } else if event_type == "waf_l1_shadow" {
         METRICS.waf_l1_shadow.fetch_add(1, Ordering::Relaxed);
         METRICS.waf_monitored.fetch_add(1, Ordering::Relaxed);
+    } else if event_type == "openapi_observe" {
+        METRICS.openapi_observed.fetch_add(1, Ordering::Relaxed);
     } else if !matches!(
         event_type,
         "dlp_skip"
@@ -430,6 +437,7 @@ pub fn snapshot_json() -> String {
             "request_buffer_limit": m.blocked_request_buffer_limit.load(Ordering::Relaxed),
             "spool_limit": m.blocked_spool_limit.load(Ordering::Relaxed),
             "waf_l1": m.blocked_waf_l1.load(Ordering::Relaxed),
+            "openapi": m.blocked_openapi.load(Ordering::Relaxed),
             "dlp_partial_block": m.blocked_dlp_partial.load(Ordering::Relaxed)
         },
         "waf_inspection": {
@@ -443,6 +451,7 @@ pub fn snapshot_json() -> String {
         },
         "waf_engine_unavailable": m.waf_engine_unavailable.load(Ordering::Relaxed),
         "waf_l1_shadow": m.waf_l1_shadow.load(Ordering::Relaxed),
+        "openapi_observed": m.openapi_observed.load(Ordering::Relaxed),
         "waf_monitored": m.waf_monitored.load(Ordering::Relaxed),
         "https_redirect": m.https_redirect.load(Ordering::Relaxed),
         "dlp": {
@@ -494,6 +503,7 @@ pub fn snapshot_prometheus() -> String {
         ),
         ("spool_limit", &metrics.blocked_spool_limit),
         ("waf_l1", &metrics.blocked_waf_l1),
+        ("openapi", &metrics.blocked_openapi),
         ("dlp_partial_block", &metrics.blocked_dlp_partial),
     ];
     let mut output = format!(
@@ -534,6 +544,10 @@ pub fn snapshot_prometheus() -> String {
     output.push_str(&format!(
         "# TYPE ferroada_waf_l1_shadow_total counter\nferroada_waf_l1_shadow_total {}\n",
         metrics.waf_l1_shadow.load(Ordering::Relaxed)
+    ));
+    output.push_str(&format!(
+        "# TYPE ferroada_openapi_observed_total counter\nferroada_openapi_observed_total {}\n",
+        metrics.openapi_observed.load(Ordering::Relaxed)
     ));
     output.push_str("# TYPE ferroada_protocol_total counter\n");
     for (action, counter) in [

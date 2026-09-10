@@ -10,6 +10,7 @@ pub mod healthcheck;
 pub mod init;
 pub mod listen;
 pub mod metrics;
+pub mod openapi;
 pub mod protocol;
 pub mod proxy;
 pub mod proxy_protocol;

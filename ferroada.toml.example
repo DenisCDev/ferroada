@@ -71,6 +71,12 @@ require_complete_waf_inspection = ["/api/payment", "/api/admin/"]
 [[sites]]
 hosts = ["api.meusite.com"]
 backend = "http://backend-b:3000"
+# OpenAPI 3.0/3.1 (opt-in). Sem spec o proxy permanece Level 1.
+# Compilado no load. unknown_endpoint: observe (default do pack) ou deny.
+# Sem a chave, rotas require_complete negam endpoint desconhecido.
+# unknown method e content-type não listado: sempre deny.
+# extra field no JSON: deny, salvo additionalProperties: true no spec.
+# openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }
 
 # [[sites]]
 # hosts = ["outrosite.com", "www.outrosite.com"]

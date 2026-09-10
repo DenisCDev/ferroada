@@ -1,8 +1,10 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use tracing::info;
 
+use crate::openapi::{OpenApiPolicy, UnknownEndpoint};
 use crate::protocol::{ProtocolMatrix, ProtocolsSection};
 use crate::waf::{self, InspectionOutcome, WafProfile};
 use crate::waf_l1::{self, L1Exclusion, L1ExclusionFile, L1File, L1RequestPolicy, L1Settings};
@@ -44,6 +46,23 @@ struct SiteEntry {
     routes: Vec<SiteRouteEntry>,
     #[serde(default)]
     l1: L1File,
+    #[serde(default)]
+    openapi: Option<OpenApiFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OpenApiFile {
+    Path(String),
+    Table(OpenApiTable),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenApiTable {
+    spec: String,
+    #[serde(default)]
+    unknown_endpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +207,7 @@ pub struct Backend {
     pub waf_profile: WafProfile,
     routes: Vec<RouteInspection>,
     l1: SiteL1,
+    pub openapi: Option<OpenApiPolicy>,
 }
 
 impl Backend {
@@ -261,7 +281,8 @@ impl Config {
     pub fn load() -> Self {
         // Try config file first
         if let Ok(contents) = std::fs::read_to_string("ferroada.toml") {
-            return Self::from_toml(&contents);
+            let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            return Self::from_toml_in(&contents, &base);
         }
 
         // Fallback: single TARGET_URL (backward compatible)
@@ -279,6 +300,7 @@ impl Config {
             complete_waf_paths,
             waf::default_profile(),
             SiteL1::default(),
+            None,
         );
         info!(
             backend = %target_url,
@@ -293,6 +315,10 @@ impl Config {
     }
 
     pub fn from_toml(contents: &str) -> Self {
+        Self::from_toml_in(contents, Path::new("."))
+    }
+
+    pub fn from_toml_in(contents: &str, base_dir: &Path) -> Self {
         let file: ConfigFile = toml::from_str(contents)
             .unwrap_or_else(|error| panic!("Invalid ferroada.toml: {error}"));
         let protocols =
@@ -312,6 +338,10 @@ impl Config {
                     parse_l1_exclusions(site.l1.exclusions),
                 ),
             };
+            let openapi = site
+                .openapi
+                .as_ref()
+                .map(|file| load_openapi(file, base_dir, site.hosts.first().map(String::as_str)));
             let mut backend = resolve_site(
                 &site.backend,
                 parse_path_prefixes(site.require_complete_waf_inspection.iter()),
@@ -321,6 +351,7 @@ impl Config {
                     .map(WafProfile::parse)
                     .unwrap_or_else(waf::default_profile),
                 site_l1,
+                openapi,
             );
             backend.site_scope = site
                 .hosts
@@ -364,6 +395,7 @@ impl Config {
                     settings: l1_defaults,
                     exclusions: global_exclusions,
                 },
+                None,
             );
             backend.site_scope = "__default__".to_string();
             let idx = backends.len();
@@ -435,6 +467,7 @@ fn resolve_url(
     require_complete_waf_inspection: Vec<String>,
     waf_profile: WafProfile,
     l1: SiteL1,
+    openapi: Option<OpenApiPolicy>,
 ) -> Backend {
     resolve_site(
         url,
@@ -442,7 +475,38 @@ fn resolve_url(
         Vec::new(),
         waf_profile,
         l1,
+        openapi,
     )
+}
+
+fn load_openapi(file: &OpenApiFile, base_dir: &Path, site_host: Option<&str>) -> OpenApiPolicy {
+    let (spec, unknown) = match file {
+        OpenApiFile::Path(path) => (path.as_str(), None),
+        OpenApiFile::Table(table) => (
+            table.spec.as_str(),
+            table
+                .unknown_endpoint
+                .as_deref()
+                .map(|raw| UnknownEndpoint::parse("openapi.unknown_endpoint", raw)),
+        ),
+    };
+    let path = Path::new(spec);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    };
+    let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "OpenAPI spec não encontrado para {} ({}): {error}",
+            site_host.unwrap_or("site"),
+            path.display()
+        )
+    });
+    let policy = OpenApiPolicy::from_bytes(&bytes, &path.display().to_string(), unknown)
+        .unwrap_or_else(|error| panic!("{error}"));
+    info!(spec = %path.display(), host = site_host.unwrap_or("-"), "OpenAPI compiled");
+    policy
 }
 
 fn resolve_site(
@@ -451,6 +515,7 @@ fn resolve_site(
     route_entries: Vec<SiteRouteEntry>,
     waf_profile: WafProfile,
     l1: SiteL1,
+    openapi: Option<OpenApiPolicy>,
 ) -> Backend {
     let tls = url.starts_with("https://");
     let without_scheme = url
@@ -485,6 +550,7 @@ fn resolve_site(
         waf_profile,
         routes: merge_inspection_routes(require_complete_waf_inspection, route_entries),
         l1,
+        openapi,
     }
 }
 
@@ -677,7 +743,7 @@ fn overlay_inspection_policy(
     }
 }
 
-fn canonical_route_path(path: &str) -> Option<String> {
+pub(crate) fn canonical_route_path(path: &str) -> Option<String> {
     let mut decoded = path.as_bytes().to_vec();
     let mut stable = false;
     for _ in 0..8 {
@@ -782,6 +848,7 @@ mod tests {
             vec!["/api/payment".to_string()],
             WafProfile::Generic,
             SiteL1::default(),
+            None,
         );
         assert!(backend.requires_complete_waf_inspection("/api/payment?id=1"));
     }
@@ -793,6 +860,7 @@ mod tests {
             vec!["/api/payment".to_string()],
             WafProfile::Generic,
             SiteL1::default(),
+            None,
         );
         assert!(backend.requires_complete_waf_inspection("/api/%70ayment"));
         assert!(backend.requires_complete_waf_inspection("/api/x/../payment"));
@@ -1222,5 +1290,53 @@ l1.blocking_paranoia = 4
         assert!(!api.settings.shadow);
         assert_eq!(api.settings.blocking_paranoia, 4);
         assert_eq!(api.settings.executing_paranoia, 4);
+    }
+
+    #[test]
+    fn openapi_is_opt_in_per_site() {
+        let spec = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/openapi-pets.yaml")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let config = Config::from_toml(&format!(
+            r#"
+[[sites]]
+hosts = ["pets.example"]
+backend = "http://127.0.0.1:8080"
+openapi = {{ spec = "{spec}", unknown_endpoint = "deny" }}
+
+[[sites]]
+hosts = ["plain.example"]
+backend = "http://127.0.0.1:8081"
+"#
+        ));
+        assert!(config.resolve("pets.example").unwrap().openapi.is_some());
+        assert!(config.resolve("plain.example").unwrap().openapi.is_none());
+    }
+
+    #[test]
+    fn missing_openapi_spec_is_a_load_error() {
+        let result = std::panic::catch_unwind(|| {
+            Config::from_toml(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+openapi = "./nao-existe.yaml"
+"#,
+            )
+        });
+        let Err(payload) = result else {
+            panic!("load must fail when the spec file is missing");
+        };
+        let message = payload
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("OpenAPI"),
+            "expected OpenAPI load error, got {message}"
+        );
     }
 }

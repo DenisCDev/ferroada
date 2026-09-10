@@ -65,6 +65,7 @@ use crate::config::{Config, InspectionDisposition, InspectionPolicy};
 use crate::dlp::{self, DlpAction};
 use crate::headers;
 use crate::metrics;
+use crate::openapi::{BodyVerdict, EnvelopeVerdict, MatchedOp};
 use crate::protocol::{self, ProtocolVerdict, RequestFacts};
 use crate::rate_limit::RateLimiter;
 use crate::shield::{self, ShieldVerdict};
@@ -359,6 +360,7 @@ pub struct FerroadaCtx {
     pub backend: Option<crate::config::Backend>,
     pub risk_identity: Option<RiskIdentity>,
     inspection_policy: InspectionPolicy,
+    openapi_match: Option<MatchedOp>,
     spool: Option<SpoolHandle>,
     concurrency_guard: Option<ConcurrencyGuard>,
     dlp_budget: Arc<ByteBudget>,
@@ -426,6 +428,7 @@ impl ProxyHttp for FerroadaProxy {
             backend: None,
             risk_identity: None,
             inspection_policy: InspectionPolicy::open(),
+            openapi_match: None,
             spool: None,
             concurrency_guard: None,
             dlp_budget: Arc::clone(&self.dlp_budget),
@@ -888,6 +891,13 @@ impl ProxyHttp for FerroadaProxy {
             }
         }
 
+        if self
+            .apply_openapi_envelope(session, ctx, &method, &uri)
+            .await?
+        {
+            return Ok(true);
+        }
+
         // Read and approve the complete body before Pingora opens the upstream.
         // Spool routes hold in SpoolHandle and do not call enable_retry_buffering.
         if !session.as_mut().is_body_empty() {
@@ -1148,6 +1158,35 @@ impl ProxyHttp for FerroadaProxy {
                 {
                     return Ok(true);
                 }
+                if self.apply_openapi_body(session, ctx, l1_body).await? {
+                    return Ok(true);
+                }
+            } else if ctx.openapi_match.is_some() {
+                let wire = if spooling {
+                    match ctx
+                        .spool
+                        .as_mut()
+                        .expect("spool handle")
+                        .inspect_bytes()
+                        .await
+                    {
+                        Ok(bytes) => bytes.to_vec(),
+                        Err(_) => {
+                            metrics::record_block(
+                                "spool_limit",
+                                &ctx.client_addr,
+                                &ctx.request_uri,
+                                "Spool inspect read failed",
+                            );
+                            return self.send_503(session).await;
+                        }
+                    }
+                } else {
+                    ctx.request_body.as_slice().to_vec()
+                };
+                if self.apply_openapi_body(session, ctx, &wire).await? {
+                    return Ok(true);
+                }
             }
 
             // Keep the global reservation until the request finishes: Pingora now
@@ -1162,11 +1201,16 @@ impl ProxyHttp for FerroadaProxy {
                 ctx.inspect_request_body = !ctx.request_body.is_empty();
                 let _ = ctx.request_body.take();
             }
-        } else if self
-            .apply_l1(session, ctx, &method, &uri, &[], false)
-            .await?
-        {
-            return Ok(true);
+        } else {
+            if self
+                .apply_l1(session, ctx, &method, &uri, &[], false)
+                .await?
+            {
+                return Ok(true);
+            }
+            if self.apply_openapi_body(session, ctx, &[]).await? {
+                return Ok(true);
+            }
         }
 
         if self.dlp_action == DlpAction::Block
@@ -1369,6 +1413,17 @@ impl ProxyHttp for FerroadaProxy {
 
         Ok(None)
     }
+}
+
+fn request_header_pairs(session: &Session) -> Vec<(String, String)> {
+    session
+        .req_header()
+        .headers
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+        })
+        .collect()
 }
 
 fn l1_header_pairs(session: &Session, body: &[u8], body_is_decoded: bool) -> Vec<(String, String)> {
@@ -2077,6 +2132,84 @@ impl FerroadaProxy {
             .write_response_body(Some(Bytes::from(body)), true)
             .await?;
         Ok(true)
+    }
+
+    async fn apply_openapi_envelope(
+        &self,
+        session: &mut Session,
+        ctx: &mut FerroadaCtx,
+        method: &str,
+        uri: &str,
+    ) -> Result<bool> {
+        let Some(policy) = ctx
+            .backend
+            .as_ref()
+            .and_then(|backend| backend.openapi.as_ref())
+        else {
+            return Ok(false);
+        };
+        let path = uri.split('?').next().unwrap_or(uri);
+        let query = uri.split_once('?').map(|(_, query)| query);
+        let headers = request_header_pairs(session);
+        match policy.validate_envelope(
+            method,
+            path,
+            query,
+            &headers,
+            ctx.request_content_type.as_deref(),
+            ctx.inspection_policy.require_complete,
+        ) {
+            EnvelopeVerdict::Allow(matched) => {
+                ctx.openapi_match = Some(matched);
+                Ok(false)
+            }
+            EnvelopeVerdict::Observe { detail } => {
+                metrics::record_observation_in(
+                    &ctx.site_scope,
+                    "openapi_observe",
+                    &ctx.client_addr,
+                    uri,
+                    &detail,
+                );
+                Ok(false)
+            }
+            EnvelopeVerdict::Deny { detail } => {
+                metrics::record_block_in(
+                    &ctx.site_scope,
+                    "openapi",
+                    &ctx.client_addr,
+                    uri,
+                    &detail,
+                );
+                self.send_403(session, "requisição fora do contrato OpenAPI")
+                    .await
+            }
+        }
+    }
+
+    async fn apply_openapi_body(
+        &self,
+        session: &mut Session,
+        ctx: &FerroadaCtx,
+        body: &[u8],
+    ) -> Result<bool> {
+        let Some(matched) = ctx.openapi_match.as_ref() else {
+            return Ok(false);
+        };
+        match matched.validate_body(ctx.request_content_type.as_deref(), body) {
+            BodyVerdict::Allow => Ok(false),
+            BodyVerdict::Deny { detail } => {
+                metrics::record_block_in(
+                    &ctx.site_scope,
+                    "openapi",
+                    &ctx.client_addr,
+                    &ctx.request_uri,
+                    &detail,
+                );
+                self.send_403(session, "requisição fora do contrato OpenAPI")
+                    .await
+            }
+        }
     }
 
     async fn apply_l1(
