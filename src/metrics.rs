@@ -36,6 +36,7 @@ pub struct Metrics {
     pub blocked_connection_limit: AtomicU64,
     pub blocked_request_buffer_limit: AtomicU64,
     pub blocked_spool_limit: AtomicU64,
+    pub blocked_waf_l1: AtomicU64,
     pub blocked_dlp_partial: AtomicU64,
     pub https_redirect: AtomicU64,
     pub waf_inspection_complete: AtomicU64,
@@ -45,6 +46,7 @@ pub struct Metrics {
     pub waf_inspection_parse_error: AtomicU64,
     pub waf_inspection_budget_exceeded: AtomicU64,
     pub waf_inspection_timed_out: AtomicU64,
+    pub waf_engine_unavailable: AtomicU64,
     pub waf_monitored: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
@@ -100,6 +102,7 @@ impl Metrics {
             blocked_connection_limit: AtomicU64::new(0),
             blocked_request_buffer_limit: AtomicU64::new(0),
             blocked_spool_limit: AtomicU64::new(0),
+            blocked_waf_l1: AtomicU64::new(0),
             blocked_dlp_partial: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
             waf_inspection_complete: AtomicU64::new(0),
@@ -109,6 +112,7 @@ impl Metrics {
             waf_inspection_parse_error: AtomicU64::new(0),
             waf_inspection_budget_exceeded: AtomicU64::new(0),
             waf_inspection_timed_out: AtomicU64::new(0),
+            waf_engine_unavailable: AtomicU64::new(0),
             waf_monitored: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
@@ -234,6 +238,7 @@ pub fn record_block_in(
         "connection_limit" => &METRICS.blocked_connection_limit,
         "request_buffer_limit" => &METRICS.blocked_request_buffer_limit,
         "spool_limit" => &METRICS.blocked_spool_limit,
+        "waf_l1" => &METRICS.blocked_waf_l1,
         "dlp_partial_block" => &METRICS.blocked_dlp_partial,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
@@ -314,6 +319,13 @@ pub fn record_waf_inspection(status: &str) {
     counter.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn record_waf_engine_unavailable(site_scope: &str, client_ip: &str, uri: &str, detail: &str) {
+    METRICS
+        .waf_engine_unavailable
+        .fetch_add(1, Ordering::Relaxed);
+    record_observation_in(site_scope, "waf_engine_unavailable", client_ip, uri, detail);
+}
+
 pub fn record_observation(event_type: &str, client_ip: &str, uri: &str, detail: &str) {
     record_observation_in(UNSCOPED_SITE, event_type, client_ip, uri, detail);
 }
@@ -335,6 +347,7 @@ pub fn record_observation_in(
             | "inspection_timeout"
             | "inspection_budget"
             | "waf_incomplete"
+            | "waf_engine_unavailable"
     ) {
         return;
     }
@@ -407,6 +420,7 @@ pub fn snapshot_json() -> String {
             "connection_limit": m.blocked_connection_limit.load(Ordering::Relaxed),
             "request_buffer_limit": m.blocked_request_buffer_limit.load(Ordering::Relaxed),
             "spool_limit": m.blocked_spool_limit.load(Ordering::Relaxed),
+            "waf_l1": m.blocked_waf_l1.load(Ordering::Relaxed),
             "dlp_partial_block": m.blocked_dlp_partial.load(Ordering::Relaxed)
         },
         "waf_inspection": {
@@ -418,6 +432,7 @@ pub fn snapshot_json() -> String {
             "budget_exceeded": m.waf_inspection_budget_exceeded.load(Ordering::Relaxed),
             "timed_out": m.waf_inspection_timed_out.load(Ordering::Relaxed)
         },
+        "waf_engine_unavailable": m.waf_engine_unavailable.load(Ordering::Relaxed),
         "waf_monitored": m.waf_monitored.load(Ordering::Relaxed),
         "https_redirect": m.https_redirect.load(Ordering::Relaxed),
         "dlp": {
@@ -468,6 +483,7 @@ pub fn snapshot_prometheus() -> String {
             &metrics.blocked_request_buffer_limit,
         ),
         ("spool_limit", &metrics.blocked_spool_limit),
+        ("waf_l1", &metrics.blocked_waf_l1),
         ("dlp_partial_block", &metrics.blocked_dlp_partial),
     ];
     let mut output = format!(
@@ -501,6 +517,10 @@ pub fn snapshot_prometheus() -> String {
             counter.load(Ordering::Relaxed)
         ));
     }
+    output.push_str(&format!(
+        "# TYPE ferroada_waf_engine_unavailable_total counter\nferroada_waf_engine_unavailable_total {}\n",
+        metrics.waf_engine_unavailable.load(Ordering::Relaxed)
+    ));
     output.push_str("# TYPE ferroada_protocol_total counter\n");
     for (action, counter) in [
         ("deny", &metrics.protocol_deny),
@@ -536,6 +556,7 @@ mod tests {
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"truncated\"}"));
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"parse_error\"}"));
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"timed_out\"}"));
+        assert!(snapshot.contains("ferroada_waf_engine_unavailable_total"));
         assert!(snapshot.contains("ferroada_protocol_total{action=\"quarantine\"}"));
     }
 
@@ -593,6 +614,35 @@ mod tests {
         );
         assert!(snapshot.contains(&site_a), "{snapshot}");
         assert!(snapshot.contains(&site_b), "{snapshot}");
+    }
+
+    #[test]
+    fn waf_l1_block_event_keeps_rule_ids_in_detail() {
+        let site = format!(
+            "l1-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        record_block_in(
+            &site,
+            "waf_l1",
+            "192.0.2.4",
+            "/search",
+            "CRS 942100,942110: SQLi",
+        );
+        let snapshot = snapshot_json();
+        assert!(snapshot.contains("\"waf_l1\""), "{snapshot}");
+        assert!(snapshot.contains("942100"), "{snapshot}");
+        assert!(snapshot.contains("942110"), "{snapshot}");
+        record_waf_engine_unavailable(&site, "192.0.2.4", "/search", "TimedOut");
+        let snapshot = snapshot_json();
+        assert!(snapshot.contains("waf_engine_unavailable"), "{snapshot}");
+        assert!(snapshot.contains("TimedOut"), "{snapshot}");
+        let prometheus = snapshot_prometheus();
+        assert!(prometheus.contains("ferroada_blocks_total{type=\"waf_l1\"}"));
+        assert!(prometheus.contains("ferroada_waf_engine_unavailable_total"));
     }
 
     #[test]

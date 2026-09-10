@@ -1,0 +1,41 @@
+# Overlay L1: sidecar Coraza + CRS 4.25 LTS no Unix socket.
+# O crate ferroada não liga Coraza. L0 regex continua sempre.
+#
+# Na raiz do repositório:
+#   echo WAF_ENGINE=coraza >> deploy/topologies/vps-api/.env
+#   docker compose -f deploy/topologies/vps-api/docker-compose.yml \
+#     -f deploy/coraza/docker-compose.yml --profile coraza up -d --build
+#
+# Sem --profile coraza o sidecar não sobe. Sem WAF_ENGINE=coraza o proxy
+# fica só no L0. Os dois juntos: ready probe no boot, senão o processo recusa.
+
+services:
+  coraza:
+    profiles: ["coraza"]
+    image: ferroada-coraza:0.6.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      WAF_SOCKET: /run/coraza/waf.sock
+    volumes:
+      - coraza_run:/run/coraza
+    networks:
+      - origin
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/coraza-sidecar", "-check"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 15s
+
+  ferroada:
+    volumes:
+      - coraza_run:/run/coraza
+    environment:
+      WAF_SIDECAR_SOCKET: /run/coraza/waf.sock
+      WAF_SIDECAR_TIMEOUT_MS: "500"
+
+volumes:
+  coraza_run:

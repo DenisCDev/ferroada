@@ -70,6 +70,7 @@ use crate::rate_limit::RateLimiter;
 use crate::shield::{self, ShieldVerdict};
 use crate::spool::{SpoolError, SpoolHandle, SpoolRuntime};
 use crate::waf::{self, InspectionOutcome, WafVerdict};
+use crate::waf_engine::{self, InspectRequest, L1Verdict, WafEngine};
 use std::io::{Read, Write};
 
 fn parse_ip(addr: &str) -> Option<IpAddr> {
@@ -155,6 +156,7 @@ pub struct FerroadaProxy {
     spool: Arc<SpoolRuntime>,
     dlp_action: DlpAction,
     origin_secret: OriginSecretConfig,
+    waf_engine: WafEngine,
 }
 
 pub struct BoundedBodyBuffer {
@@ -301,7 +303,13 @@ impl FerroadaProxy {
             )),
             dlp_action: dlp::action(),
             origin_secret,
+            waf_engine: WafEngine::native(),
         }
+    }
+
+    pub fn with_waf_engine(mut self, engine: WafEngine) -> Self {
+        self.waf_engine = engine;
+        self
     }
 
     pub fn with_dlp_action(mut self, action: DlpAction) -> Self {
@@ -1121,6 +1129,24 @@ impl ProxyHttp for FerroadaProxy {
                         return self.send_403(session, &reason).await;
                     }
                 }
+                let l1_decoded =
+                    ctx.request_content_encoding.as_deref().is_some_and(|enc| {
+                        matches!(
+                            enc.trim().to_ascii_lowercase().as_str(),
+                            "gzip" | "x-gzip" | "deflate"
+                        )
+                    }) && !matches!(inspect_body.status, InspectionOutcome::UnsupportedEncoding);
+                let l1_body = if l1_decoded {
+                    inspect_body.bytes.as_ref()
+                } else {
+                    wire.as_slice()
+                };
+                if self
+                    .apply_l1(session, ctx, &method, &uri, l1_body, l1_decoded)
+                    .await?
+                {
+                    return Ok(true);
+                }
             }
 
             // Keep the global reservation until the request finishes: Pingora now
@@ -1135,6 +1161,11 @@ impl ProxyHttp for FerroadaProxy {
                 ctx.inspect_request_body = !ctx.request_body.is_empty();
                 let _ = ctx.request_body.take();
             }
+        } else if self
+            .apply_l1(session, ctx, &method, &uri, &[], false)
+            .await?
+        {
+            return Ok(true);
         }
 
         if self.dlp_action == DlpAction::Block
@@ -1336,6 +1367,54 @@ impl ProxyHttp for FerroadaProxy {
         }
 
         Ok(None)
+    }
+}
+
+fn l1_header_pairs(session: &Session, body: &[u8], body_is_decoded: bool) -> Vec<(String, String)> {
+    let raw = session
+        .req_header()
+        .headers
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+        });
+    adjust_l1_headers(raw, body.len(), body_is_decoded)
+}
+
+fn adjust_l1_headers(
+    headers: impl IntoIterator<Item = (String, String)>,
+    body_len: usize,
+    body_is_decoded: bool,
+) -> Vec<(String, String)> {
+    if !body_is_decoded {
+        return headers.into_iter().collect();
+    }
+    let mut out = Vec::new();
+    let mut wrote_length = false;
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("content-encoding") {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            out.push(("content-length".to_string(), body_len.to_string()));
+            wrote_length = true;
+            continue;
+        }
+        out.push((name, value));
+    }
+    if !wrote_length {
+        out.push(("content-length".to_string(), body_len.to_string()));
+    }
+    out
+}
+
+fn http_version_token(version: http::Version) -> &'static str {
+    if version == http::Version::HTTP_10 {
+        "HTTP/1.0"
+    } else if version == http::Version::HTTP_2 {
+        "HTTP/2.0"
+    } else {
+        "HTTP/1.1"
     }
 }
 
@@ -1999,6 +2078,76 @@ impl FerroadaProxy {
         Ok(true)
     }
 
+    async fn apply_l1(
+        &self,
+        session: &mut Session,
+        ctx: &FerroadaCtx,
+        method: &str,
+        uri: &str,
+        body: &[u8],
+        body_is_decoded: bool,
+    ) -> Result<bool> {
+        // bypass-explicit (websocket, etc.) already skipped L0 body; L1 is
+        // not a way around that protocol action.
+        if ctx.skip_body_waf || !self.waf_engine.is_coraza() {
+            return Ok(false);
+        }
+        let headers = l1_header_pairs(session, body, body_is_decoded);
+        let verdict = self
+            .waf_engine
+            .inspect(&InspectRequest {
+                method,
+                uri,
+                protocol: http_version_token(session.req_header().version),
+                headers: &headers,
+                body,
+                client_ip: &ctx.client_addr,
+            })
+            .await;
+        match verdict {
+            L1Verdict::Skipped | L1Verdict::Allow => Ok(false),
+            L1Verdict::Block { rule_ids, message } => {
+                let detail = waf_engine::l1_detail(&rule_ids, &message);
+                metrics::record_block_in(&ctx.site_scope, "waf_l1", &ctx.client_addr, uri, &detail);
+                if let Some(identity) = ctx.risk_identity.as_ref() {
+                    behavioral::record_waf_block(identity);
+                }
+                self.send_403(session, &detail).await
+            }
+            L1Verdict::Unavailable => {
+                waf_engine::record_unavailable(&ctx.site_scope, &ctx.client_addr, uri, "TimedOut");
+                let outcome = InspectionOutcome::TimedOut;
+                match ctx.inspection_policy.disposition(outcome) {
+                    InspectionDisposition::Deny => {
+                        record_inspection_outcome(
+                            outcome,
+                            &ctx.client_addr,
+                            uri,
+                            true,
+                            &ctx.site_scope,
+                        );
+                        if let Some(identity) = ctx.risk_identity.as_ref() {
+                            behavioral::record_waf_block(identity);
+                        }
+                        self.send_403(session, incomplete_inspection_reason(outcome))
+                            .await
+                    }
+                    InspectionDisposition::Monitor => {
+                        record_inspection_outcome(
+                            outcome,
+                            &ctx.client_addr,
+                            uri,
+                            false,
+                            &ctx.site_scope,
+                        );
+                        Ok(false)
+                    }
+                    InspectionDisposition::Allow => Ok(false),
+                }
+            }
+        }
+    }
+
     async fn send_413(
         &self,
         session: &mut Session,
@@ -2107,6 +2256,37 @@ impl FerroadaProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn l1_headers_drop_content_encoding_after_inflate() {
+        let headers = vec![
+            ("host".to_string(), "api.example".to_string()),
+            ("content-encoding".to_string(), "gzip".to_string()),
+            ("content-length".to_string(), "40".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let adjusted = adjust_l1_headers(headers, 12, true);
+        assert!(
+            !adjusted
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("content-encoding")),
+            "{adjusted:?}"
+        );
+        let length = adjusted
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .map(|(_, value)| value.as_str());
+        assert_eq!(length, Some("12"));
+        assert!(adjusted.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("content-type") && value == "application/json"
+        }));
+        let untouched = adjust_l1_headers(
+            vec![("content-encoding".to_string(), "gzip".to_string())],
+            12,
+            false,
+        );
+        assert_eq!(untouched.len(), 1);
+    }
 
     #[test]
     fn body_timeout_records_timed_out_and_is_408() {

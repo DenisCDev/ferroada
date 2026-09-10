@@ -121,8 +121,13 @@ impl InspectionPolicy {
                     InspectionDisposition::Monitor
                 }
             }
-            InspectionOutcome::TimedOut | InspectionOutcome::BudgetExceeded => {
-                InspectionDisposition::Deny
+            InspectionOutcome::BudgetExceeded => InspectionDisposition::Deny,
+            InspectionOutcome::TimedOut => {
+                if self.require_complete {
+                    InspectionDisposition::Deny
+                } else {
+                    InspectionDisposition::Monitor
+                }
             }
         }
     }
@@ -717,6 +722,22 @@ backend = "http://127.0.0.1:8080"
             require_complete: false,
         });
         assert_eq!(websocket.blocked_status(), Some(403));
+    }
+
+    #[test]
+    fn timed_out_follows_route_fail_closed_or_open() {
+        assert_eq!(
+            InspectionPolicy::fail_closed().disposition(InspectionOutcome::TimedOut),
+            InspectionDisposition::Deny
+        );
+        assert_eq!(
+            InspectionPolicy::open().disposition(InspectionOutcome::TimedOut),
+            InspectionDisposition::Monitor
+        );
+        assert_eq!(
+            InspectionPolicy::open().disposition(InspectionOutcome::BudgetExceeded),
+            InspectionDisposition::Deny
+        );
     }
 
     #[test]

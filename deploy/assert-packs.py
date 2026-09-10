@@ -66,6 +66,8 @@ def main() -> None:
                 if "PROXY_PROTOCOL=true" not in text:
                     errors.append(f"{rel}: caminho Caddy/nginx sem PROXY_PROTOCOL=true")
             if path.name in (".env.example", ".env.caddy.example"):
+                if "WAF_ENGINE=coraza" in text:
+                    errors.append(f"{rel}: pack liga Coraza por default (sidecar é opt-in)")
                 if "DLP_ACTION=monitor" not in text:
                     errors.append(f"{rel}: pack de produção sem DLP_ACTION=monitor")
                 if "ORIGIN_SECRET_HEADER=" not in text:

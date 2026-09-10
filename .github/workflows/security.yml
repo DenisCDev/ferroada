@@ -22,6 +22,12 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+      - run: cargo tree -p ferroada
+      - run: |
+          if cargo tree -p ferroada | grep -qi coraza; then
+            echo "crate ferroada must not depend on Coraza"
+            exit 1
+          fi
       - run: cargo install cargo-audit --locked
       - run: cargo audit --deny warnings
 
@@ -47,6 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build --tag ferroada:ci .
+      - run: docker build --tag ferroada-coraza:ci deploy/coraza
 
   packs:
     runs-on: ubuntu-latest

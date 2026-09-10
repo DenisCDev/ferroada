@@ -69,6 +69,8 @@ fn main() {
     info!("Ferroada starting");
     waf::validate_config();
     ferroada::dlp::validate_config();
+    let waf_engine = ferroada::waf_engine::WafEngine::from_env();
+    waf_engine.boot();
 
     // Load config: ferroada.toml (multi-site) or TARGET_URL (single-site)
     let config = Arc::new(Config::load());
@@ -114,7 +116,8 @@ fn main() {
         trusted_proxies,
         client_ip,
         proxy_protocol,
-    );
+    )
+    .with_waf_engine(waf_engine);
 
     let proxy_app = http_proxy(&server.configuration, proxy.clone());
     let connection_filter = ConnectionRateFilter::from_env();
