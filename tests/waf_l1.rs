@@ -240,7 +240,8 @@ fn sidecar_deny_puts_rule_id_in_event_detail() {
     let engine = WafEngine::coraza(&socket, Duration::from_millis(500));
     spawn_proxy(listen, fail_closed_config(stub.addr), engine);
 
-    let response = send_until_http(listen, &get("/api/payment?q=1%27%20OR%201%3D1"));
+    // Query must not match L0 regex; this test is the sidecar deny, not SQLi.
+    let response = send_until_http(listen, &get("/api/payment?q=catalog"));
     let _ = std::fs::remove_file(&socket);
     assert!(
         response.starts_with(b"HTTP/1.1 403"),
