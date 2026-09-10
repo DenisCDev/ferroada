@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::protocol::{ProtocolMatrix, ProtocolsSection};
 use crate::waf::{self, InspectionOutcome, WafProfile};
+use crate::waf_l1::{self, L1Exclusion, L1ExclusionFile, L1File, L1RequestPolicy, L1Settings};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +20,15 @@ struct ConfigFile {
     default_waf_profile: Option<String>,
     #[serde(default)]
     protocols: ProtocolsSection,
+    #[serde(default)]
+    waf: WafSection,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct WafSection {
+    #[serde(default)]
+    l1: L1File,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +42,8 @@ struct SiteEntry {
     waf_profile: Option<String>,
     #[serde(default)]
     routes: Vec<SiteRouteEntry>,
+    #[serde(default)]
+    l1: L1File,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +52,8 @@ struct SiteRouteEntry {
     prefix: String,
     #[serde(default)]
     inspection: InspectionPolicyFile,
+    #[serde(default)]
+    l1: L1File,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -146,6 +160,22 @@ impl From<InspectionAction> for InspectionDisposition {
 struct RouteInspection {
     prefix: String,
     patch: InspectionPolicyFile,
+    l1: L1File,
+}
+
+#[derive(Clone)]
+struct SiteL1 {
+    settings: L1Settings,
+    exclusions: Vec<L1Exclusion>,
+}
+
+impl Default for SiteL1 {
+    fn default() -> Self {
+        Self {
+            settings: L1Settings::default_crs(),
+            exclusions: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -157,6 +187,7 @@ pub struct Backend {
     pub tls: bool,
     pub waf_profile: WafProfile,
     routes: Vec<RouteInspection>,
+    l1: SiteL1,
 }
 
 impl Backend {
@@ -197,6 +228,23 @@ impl Backend {
                 .is_some()
         })
     }
+
+    pub fn l1_for(&self, uri: &str, content_type: Option<&str>) -> L1RequestPolicy {
+        let path = uri.split('?').next().unwrap_or(uri);
+        let path = canonical_route_path(path);
+        let patches: Vec<(String, L1File)> = self
+            .routes
+            .iter()
+            .map(|route| (route.prefix.clone(), route.l1.clone()))
+            .collect();
+        waf_l1::resolve(
+            self.l1.settings,
+            &patches,
+            &self.l1.exclusions,
+            path.as_deref(),
+            content_type,
+        )
+    }
 }
 
 pub struct Config {
@@ -226,7 +274,12 @@ impl Config {
             .ok()
             .map(|value| parse_path_prefixes(value.split(',')))
             .unwrap_or_default();
-        let backend = resolve_url(target_url, complete_waf_paths, waf::default_profile());
+        let backend = resolve_url(
+            target_url,
+            complete_waf_paths,
+            waf::default_profile(),
+            SiteL1::default(),
+        );
         info!(
             backend = %target_url,
             "Single-site mode (TARGET_URL)"
@@ -244,12 +297,21 @@ impl Config {
             .unwrap_or_else(|error| panic!("Invalid ferroada.toml: {error}"));
         let protocols =
             ProtocolMatrix::from_section(file.protocols).unwrap_or_else(|error| panic!("{error}"));
+        let l1_defaults = L1Settings::default_crs().overlay(&file.waf.l1).validated();
+        let global_exclusions = parse_l1_exclusions(file.waf.l1.exclusions);
 
         let mut backends = Vec::new();
         let mut route_table = HashMap::new();
         let site_count = file.sites.len();
 
         for site in file.sites {
+            let site_l1 = SiteL1 {
+                settings: l1_defaults.overlay(&site.l1).validated(),
+                exclusions: merge_l1_exclusions(
+                    global_exclusions.clone(),
+                    parse_l1_exclusions(site.l1.exclusions),
+                ),
+            };
             let mut backend = resolve_site(
                 &site.backend,
                 parse_path_prefixes(site.require_complete_waf_inspection.iter()),
@@ -258,6 +320,7 @@ impl Config {
                     .as_deref()
                     .map(WafProfile::parse)
                     .unwrap_or_else(waf::default_profile),
+                site_l1,
             );
             backend.site_scope = site
                 .hosts
@@ -273,6 +336,7 @@ impl Config {
                 "Site configured"
             );
             validate_spool_routes(&backend);
+            validate_l1_routes(&backend);
             backends.push(backend);
 
             for host in &site.hosts {
@@ -291,11 +355,21 @@ impl Config {
             .map(WafProfile::parse)
             .unwrap_or_else(waf::default_profile);
         let default_idx = file.default_backend.map(|url| {
-            let mut backend = resolve_site(&url, default_paths, Vec::new(), default_profile);
+            let mut backend = resolve_site(
+                &url,
+                default_paths,
+                Vec::new(),
+                default_profile,
+                SiteL1 {
+                    settings: l1_defaults,
+                    exclusions: global_exclusions,
+                },
+            );
             backend.site_scope = "__default__".to_string();
             let idx = backends.len();
             info!(backend = %url, "Default backend configured");
             validate_spool_routes(&backend);
+            validate_l1_routes(&backend);
             backends.push(backend);
             idx
         });
@@ -360,12 +434,14 @@ fn resolve_url(
     url: &str,
     require_complete_waf_inspection: Vec<String>,
     waf_profile: WafProfile,
+    l1: SiteL1,
 ) -> Backend {
     resolve_site(
         url,
         require_complete_waf_inspection,
         Vec::new(),
         waf_profile,
+        l1,
     )
 }
 
@@ -374,6 +450,7 @@ fn resolve_site(
     require_complete_waf_inspection: Vec<String>,
     route_entries: Vec<SiteRouteEntry>,
     waf_profile: WafProfile,
+    l1: SiteL1,
 ) -> Backend {
     let tls = url.starts_with("https://");
     let without_scheme = url
@@ -407,6 +484,7 @@ fn resolve_site(
         tls,
         waf_profile,
         routes: merge_inspection_routes(require_complete_waf_inspection, route_entries),
+        l1,
     }
 }
 
@@ -428,6 +506,58 @@ fn merge_patches(
         on_truncated: overlay.on_truncated.or(base.on_truncated),
         on_parse_error: overlay.on_parse_error.or(base.on_parse_error),
         max_decoded_body: overlay.max_decoded_body.or(base.max_decoded_body),
+    }
+}
+
+fn merge_l1_files(base: L1File, overlay: L1File) -> L1File {
+    L1File {
+        blocking_paranoia: overlay.blocking_paranoia.or(base.blocking_paranoia),
+        executing_paranoia: overlay.executing_paranoia.or(base.executing_paranoia),
+        shadow: overlay.shadow.or(base.shadow),
+        anomaly_score_threshold: overlay
+            .anomaly_score_threshold
+            .or(base.anomaly_score_threshold),
+        exclude: overlay.exclude.or(base.exclude),
+        exclusions: if overlay.exclusions.is_empty() {
+            base.exclusions
+        } else {
+            overlay.exclusions
+        },
+    }
+}
+
+fn parse_l1_exclusions(files: Vec<L1ExclusionFile>) -> Vec<L1Exclusion> {
+    files
+        .into_iter()
+        .map(|file| {
+            let prefix = file.prefix.as_ref().map(|raw| {
+                parse_path_prefixes(std::iter::once(raw))
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| {
+                        panic!("exclusão L1 precisa de um prefixo de path absoluto: {raw}")
+                    })
+            });
+            L1Exclusion::from_file(file, prefix)
+        })
+        .collect()
+}
+
+fn merge_l1_exclusions(mut base: Vec<L1Exclusion>, overlay: Vec<L1Exclusion>) -> Vec<L1Exclusion> {
+    base.extend(overlay);
+    base
+}
+
+fn validate_l1_routes(backend: &Backend) {
+    let _ = backend.l1.settings.validated();
+    for route in &backend.routes {
+        let _ = backend.l1.settings.overlay(&route.l1).validated();
+        if !route.l1.exclusions.is_empty() {
+            panic!(
+                "exclusões L1 na rota {} devem usar [[sites.l1.exclusions]] com prefix",
+                route.prefix
+            );
+        }
     }
 }
 
@@ -488,6 +618,7 @@ fn merge_inspection_routes(
         .map(|prefix| RouteInspection {
             prefix,
             patch: fail_closed_patch(),
+            l1: L1File::default(),
         })
         .collect();
     for entry in route_entries {
@@ -497,10 +628,12 @@ fn merge_inspection_routes(
             .unwrap_or_else(|| panic!("Rota de inspeção precisa de um prefixo de path"));
         if let Some(existing) = routes.iter_mut().find(|route| route.prefix == prefix) {
             existing.patch = merge_patches(existing.patch.clone(), entry.inspection);
+            existing.l1 = merge_l1_files(existing.l1.clone(), entry.l1);
         } else {
             routes.push(RouteInspection {
                 prefix,
                 patch: entry.inspection,
+                l1: entry.l1,
             });
         }
     }
@@ -648,6 +781,7 @@ mod tests {
             "http://127.0.0.1:8080",
             vec!["/api/payment".to_string()],
             WafProfile::Generic,
+            SiteL1::default(),
         );
         assert!(backend.requires_complete_waf_inspection("/api/payment?id=1"));
     }
@@ -658,6 +792,7 @@ mod tests {
             "http://127.0.0.1:8080",
             vec!["/api/payment".to_string()],
             WafProfile::Generic,
+            SiteL1::default(),
         );
         assert!(backend.requires_complete_waf_inspection("/api/%70ayment"));
         assert!(backend.requires_complete_waf_inspection("/api/x/../payment"));
@@ -1021,5 +1156,71 @@ inspection.on_parse_error = "deny"
             .unwrap()
             .inspection_policy("/api/payment");
         assert_eq!(policy, InspectionPolicy::fail_closed());
+    }
+
+    #[test]
+    fn l1_toml_executing_differs_from_blocking_and_excludes_login() {
+        let config = Config::from_toml(
+            r#"
+[waf.l1]
+blocking_paranoia = 1
+executing_paranoia = 4
+shadow = true
+anomaly_score_threshold = 5
+
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.l1.exclusions]]
+prefix = "/login"
+
+[[sites.l1.exclusions]]
+parameters = ["token"]
+
+[[sites.l1.exclusions]]
+content_types = ["application/pdf"]
+"#,
+        );
+        let backend = config.resolve("api.example").unwrap();
+        let login = backend.l1_for("/login", None);
+        let api = backend.l1_for("/api", None);
+        assert!(login.skip);
+        assert!(!api.skip);
+        assert!(api.settings.shadow);
+        assert_eq!(api.settings.blocking_paranoia, 1);
+        assert_eq!(api.settings.executing_paranoia, 4);
+        assert_eq!(api.settings.anomaly_score_threshold, 5);
+        assert_eq!(api.exclude_parameters, vec!["token"]);
+        let pdf = backend.l1_for("/api", Some("application/pdf"));
+        assert!(pdf.skip);
+    }
+
+    #[test]
+    fn l1_route_can_turn_shadow_off() {
+        let config = Config::from_toml(
+            r#"
+[waf.l1]
+shadow = true
+executing_paranoia = 4
+
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/api"
+l1.shadow = false
+l1.blocking_paranoia = 4
+"#,
+        );
+        let backend = config.resolve("api.example").unwrap();
+        let open = backend.l1_for("/health", None);
+        assert!(open.settings.shadow);
+        assert_eq!(open.settings.blocking_paranoia, 1);
+        let api = backend.l1_for("/api/payment", None);
+        assert!(!api.settings.shadow);
+        assert_eq!(api.settings.blocking_paranoia, 4);
+        assert_eq!(api.settings.executing_paranoia, 4);
     }
 }

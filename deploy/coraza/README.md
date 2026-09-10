@@ -31,7 +31,36 @@ Timeout e queda do sidecar no pedido: `InspectionOutcome::TimedOut`, métrica
 ## Contrato HTTP no socket
 
 - `GET /readyz` → 200 quando o CRS carregou
-- `POST /inspect` corpo JSON `{ method, uri, protocol, headers, body_b64, client_ip }`
-  → `{ "action": "allow" }` ou `{ "action": "deny", "rule_ids": [942100], "msg": "..." }`
+- `POST /inspect` corpo JSON `{ method, uri, protocol, headers, body_b64, client_ip, policy }`
+  → `{ "action": "allow"|"deny", "rule_ids": [942100], "score": 15, "msg": "..." }`
 
-Paranoia, shadow e exclusão por rota são o PR 12 — não estão aqui.
+`policy` (opcional): `blocking_paranoia` (1–4), `executing_paranoia` (1–4, ≥ blocking),
+`anomaly_score_threshold` (default 5), `exclude_parameters`. Executing ≠ blocking:
+regras do nível executing correm; só o blocking entra no score que decide o deny.
+
+No TOML do proxy:
+
+```toml
+[waf.l1]
+blocking_paranoia = 1
+executing_paranoia = 4
+shadow = true
+anomaly_score_threshold = 5
+
+[[sites]]
+hosts = ["api.exemplo.com"]
+backend = "http://app:8080"
+
+[[sites.l1.exclusions]]
+prefix = "/login"
+
+[[sites.l1.exclusions]]
+parameters = ["password", "token"]
+
+[[sites.l1.exclusions]]
+content_types = ["application/octet-stream"]
+```
+
+Shadow: o sidecar avalia, o proxy grava rule ID + score em `waf_l1_shadow` e
+responde 200. A mesma regra com `shadow = false` responde 403. Timeout e
+sidecar down continuam `TimedOut` + fail_closed — shadow não abre o WAF.

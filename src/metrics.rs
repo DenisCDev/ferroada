@@ -47,6 +47,7 @@ pub struct Metrics {
     pub waf_inspection_budget_exceeded: AtomicU64,
     pub waf_inspection_timed_out: AtomicU64,
     pub waf_engine_unavailable: AtomicU64,
+    pub waf_l1_shadow: AtomicU64,
     pub waf_monitored: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
@@ -113,6 +114,7 @@ impl Metrics {
             waf_inspection_budget_exceeded: AtomicU64::new(0),
             waf_inspection_timed_out: AtomicU64::new(0),
             waf_engine_unavailable: AtomicU64::new(0),
+            waf_l1_shadow: AtomicU64::new(0),
             waf_monitored: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
@@ -326,6 +328,10 @@ pub fn record_waf_engine_unavailable(site_scope: &str, client_ip: &str, uri: &st
     record_observation_in(site_scope, "waf_engine_unavailable", client_ip, uri, detail);
 }
 
+pub fn record_l1_shadow(site_scope: &str, client_ip: &str, uri: &str, detail: &str) {
+    record_observation_in(site_scope, "waf_l1_shadow", client_ip, uri, detail);
+}
+
 pub fn record_observation(event_type: &str, client_ip: &str, uri: &str, detail: &str) {
     record_observation_in(UNSCOPED_SITE, event_type, client_ip, uri, detail);
 }
@@ -338,6 +344,9 @@ pub fn record_observation_in(
     detail: &str,
 ) {
     if event_type == "waf_monitor" {
+        METRICS.waf_monitored.fetch_add(1, Ordering::Relaxed);
+    } else if event_type == "waf_l1_shadow" {
+        METRICS.waf_l1_shadow.fetch_add(1, Ordering::Relaxed);
         METRICS.waf_monitored.fetch_add(1, Ordering::Relaxed);
     } else if !matches!(
         event_type,
@@ -433,6 +442,7 @@ pub fn snapshot_json() -> String {
             "timed_out": m.waf_inspection_timed_out.load(Ordering::Relaxed)
         },
         "waf_engine_unavailable": m.waf_engine_unavailable.load(Ordering::Relaxed),
+        "waf_l1_shadow": m.waf_l1_shadow.load(Ordering::Relaxed),
         "waf_monitored": m.waf_monitored.load(Ordering::Relaxed),
         "https_redirect": m.https_redirect.load(Ordering::Relaxed),
         "dlp": {
@@ -521,6 +531,10 @@ pub fn snapshot_prometheus() -> String {
         "# TYPE ferroada_waf_engine_unavailable_total counter\nferroada_waf_engine_unavailable_total {}\n",
         metrics.waf_engine_unavailable.load(Ordering::Relaxed)
     ));
+    output.push_str(&format!(
+        "# TYPE ferroada_waf_l1_shadow_total counter\nferroada_waf_l1_shadow_total {}\n",
+        metrics.waf_l1_shadow.load(Ordering::Relaxed)
+    ));
     output.push_str("# TYPE ferroada_protocol_total counter\n");
     for (action, counter) in [
         ("deny", &metrics.protocol_deny),
@@ -557,6 +571,7 @@ mod tests {
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"parse_error\"}"));
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"timed_out\"}"));
         assert!(snapshot.contains("ferroada_waf_engine_unavailable_total"));
+        assert!(snapshot.contains("ferroada_waf_l1_shadow_total"));
         assert!(snapshot.contains("ferroada_protocol_total{action=\"quarantine\"}"));
     }
 
@@ -640,9 +655,14 @@ mod tests {
         let snapshot = snapshot_json();
         assert!(snapshot.contains("waf_engine_unavailable"), "{snapshot}");
         assert!(snapshot.contains("TimedOut"), "{snapshot}");
+        record_l1_shadow(&site, "192.0.2.4", "/search", "CRS 942100 score=8: SQLi");
+        let snapshot = snapshot_json();
+        assert!(snapshot.contains("waf_l1_shadow"), "{snapshot}");
+        assert!(snapshot.contains("942100"), "{snapshot}");
         let prometheus = snapshot_prometheus();
         assert!(prometheus.contains("ferroada_blocks_total{type=\"waf_l1\"}"));
         assert!(prometheus.contains("ferroada_waf_engine_unavailable_total"));
+        assert!(prometheus.contains("ferroada_waf_l1_shadow_total"));
     }
 
     #[test]

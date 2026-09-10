@@ -32,4 +32,5 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 h2 = "0.4"
 http = "1"
 pingora = { version = "=0.8.1", features = ["proxy", "openssl", "connection_filter"] }
+serde_json = "1"
 tokio = { version = "1", features = ["net", "rt", "time", "io-util", "fs", "macros"] }

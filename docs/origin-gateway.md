@@ -1004,8 +1004,10 @@ Ordem de produto (packs primeiro) é consciente: o txt pedia Pingora → identid
 
 #### PR 12 — `feat: CRS paranoia, shadow mode, and per-route exclusions`
 
+- **Ficheiros:** `src/waf_l1.rs`, `src/config.rs`, `src/waf_engine.rs`, `src/proxy.rs`, `src/metrics.rs`, `deploy/coraza/main.go`, `ferroada.toml.example`, `tests/waf_l1.rs`
 - **Deps:** PR 11
-- **Onda tardia.**
+- **Descrição:** executing paranoia ≠ blocking. Shadow avalia L1, grava rule ID + score, não bloqueia. Exclusão TOML por site, rota, parâmetro e content-type. Anomaly score + threshold configurável. Timeout 500 ms e L0 sempre-on. Crate ferroada sem Coraza.
+- **Exit:** paranoia 4 em shadow + tráfego limpo → 200 + evento com rule ID; a mesma regra em blocking → 403; exclusão `/login` não dispara, `/api` dispara; sidecar down continua TimedOut + fail_closed.
 
 ### Onda 3 — Level 2 (placeholders; depois de 1–10 em `main`)
 
