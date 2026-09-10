@@ -724,7 +724,8 @@ mod unix_tests {
             }
             other => panic!("expected block, got {other:?}"),
         }
-        let sent = String::from_utf8_lossy(&seen.lock().unwrap());
+        let seen = seen.lock().unwrap();
+        let sent = String::from_utf8_lossy(&seen);
         assert!(sent.contains("/inspect"), "{sent}");
         assert!(sent.contains("/search"), "{sent}");
     }
