@@ -50,9 +50,7 @@ impl Algorithm {
             "HS256" => Ok(Self::Hs256),
             "HS384" => Ok(Self::Hs384),
             "HS512" => Ok(Self::Hs512),
-            "none" | "None" | "NONE" => {
-                Err("alg none é recusado; não entra na allowlist".into())
-            }
+            "none" | "None" | "NONE" => Err("alg none é recusado; não entra na allowlist".into()),
             other if other.to_ascii_uppercase().starts_with("HS") => Err(format!(
                 "alg {other} exige listagem explícita (HS256/HS384/HS512)"
             )),
@@ -196,9 +194,8 @@ impl JwtPolicy {
                 .ok_or_else(|| {
                     "HS* na allowlist exige hmac_secret_env apontando para o segredo".to_string()
                 })?;
-            let value = std::env::var(name).map_err(|_| {
-                format!("hmac_secret_env {name} não está definido no ambiente")
-            })?;
+            let value = std::env::var(name)
+                .map_err(|_| format!("hmac_secret_env {name} não está definido no ambiente"))?;
             if value.is_empty() {
                 return Err(format!("hmac_secret_env {name} está vazio"));
             }
@@ -212,15 +209,13 @@ impl JwtPolicy {
         let path_templates = parse_path_templates(spec.paths)?;
         let source = JwksSource::parse(spec.jwks, base_dir)?;
         let mut cache = JwksCache::new(source, JWKS_TIMEOUT, JWKS_TTL, JWKS_MIN_REFRESH);
-        cache
-            .refresh()
-            .map_err(|error| {
-                format!(
-                    "JWKS inicial falhou para {} ({}): {error}",
-                    site.unwrap_or("site"),
-                    spec.jwks
-                )
-            })?;
+        cache.refresh().map_err(|error| {
+            format!(
+                "JWKS inicial falhou para {} ({}): {error}",
+                site.unwrap_or("site"),
+                spec.jwks
+            )
+        })?;
         Ok(Self {
             inner: std::sync::Arc::new(JwtInner {
                 issuer: issuer.to_string(),
@@ -250,9 +245,8 @@ impl JwtPolicy {
     ) -> Result<JwtPrincipal, JwtFailure> {
         let token = bearer(authorization)?;
         let (header_json, payload_json, signing_input, signature) = split_token(token)?;
-        let header: JwtHeader = serde_json::from_slice(&header_json).map_err(|_| {
-            JwtFailure::Unauthorized("malformed")
-        })?;
+        let header: JwtHeader = serde_json::from_slice(&header_json)
+            .map_err(|_| JwtFailure::Unauthorized("malformed"))?;
         if let Some(crit) = header.crit.as_ref() {
             if !crit.is_empty() {
                 return Err(JwtFailure::Unauthorized("crit"));
@@ -276,7 +270,13 @@ impl JwtPolicy {
         let payload: Value = serde_json::from_slice(&payload_json)
             .map_err(|_| JwtFailure::Unauthorized("malformed"))?;
         verify_signature(self, alg, kid, signing_input, &signature)?;
-        let claims = validate_claims(&payload, &self.inner.issuer, &self.inner.audience, now, self.inner.leeway)?;
+        let claims = validate_claims(
+            &payload,
+            &self.inner.issuer,
+            &self.inner.audience,
+            now,
+            self.inner.leeway,
+        )?;
         remember_jti(
             &self.inner.jti,
             &claims.jti,
@@ -328,7 +328,8 @@ impl JwtPolicy {
         if body.iter().all(u8::is_ascii_whitespace) {
             return Ok(());
         }
-        let json: Value = serde_json::from_slice(body).map_err(|_| JwtFailure::Forbidden("binding"))?;
+        let json: Value =
+            serde_json::from_slice(body).map_err(|_| JwtFailure::Forbidden("binding"))?;
         for binding in needed {
             let BindSource::Body(pointer) = &binding.source else {
                 continue;
@@ -379,9 +380,7 @@ fn parse_algorithms(raw: &[String]) -> Result<HashSet<Algorithm>, String> {
 }
 
 fn parse_bindings(raw: &[String]) -> Result<Vec<Binding>, String> {
-    raw.iter()
-        .map(|item| parse_binding(item))
-        .collect()
+    raw.iter().map(|item| parse_binding(item)).collect()
 }
 
 fn parse_binding(raw: &str) -> Result<Binding, String> {
@@ -422,9 +421,7 @@ fn parse_binding(raw: &str) -> Result<Binding, String> {
 }
 
 fn parse_path_templates(raw: &[String]) -> Result<Vec<PathTemplate>, String> {
-    raw.iter()
-        .map(|item| parse_path_template(item))
-        .collect()
+    raw.iter().map(|item| parse_path_template(item)).collect()
 }
 
 fn parse_path_template(raw: &str) -> Result<PathTemplate, String> {
@@ -434,7 +431,10 @@ fn parse_path_template(raw: &str) -> Result<PathTemplate, String> {
     }
     let mut segments = Vec::new();
     for part in path.split('/').filter(|part| !part.is_empty()) {
-        if let Some(name) = part.strip_prefix('{').and_then(|part| part.strip_suffix('}')) {
+        if let Some(name) = part
+            .strip_prefix('{')
+            .and_then(|part| part.strip_suffix('}'))
+        {
             if name.is_empty() || name.contains('{') {
                 return Err(format!("parâmetro de path inválido em {path}"));
             }
@@ -529,7 +529,10 @@ fn value_as_string(value: &Value) -> Option<String> {
 }
 
 fn bearer(authorization: Option<&str>) -> Result<&str, JwtFailure> {
-    let Some(value) = authorization.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(value) = authorization
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return Err(JwtFailure::Unauthorized("missing"));
     };
     let Some((scheme, rest)) = value.split_once(' ') else {
@@ -643,8 +646,7 @@ fn verify_rsa(n: &[u8], e: &[u8], input: &[u8], signature: &[u8]) -> Result<(), 
         return Err(JwtFailure::Unauthorized("sig"));
     }
     let e = BigNum::from_slice(e).map_err(|_| JwtFailure::Unauthorized("sig"))?;
-    let rsa =
-        Rsa::from_public_components(n, e).map_err(|_| JwtFailure::Unauthorized("sig"))?;
+    let rsa = Rsa::from_public_components(n, e).map_err(|_| JwtFailure::Unauthorized("sig"))?;
     let pkey = PKey::from_rsa(rsa).map_err(|_| JwtFailure::Unauthorized("sig"))?;
     let mut verifier = Verifier::new(MessageDigest::sha256(), &pkey)
         .map_err(|_| JwtFailure::Unauthorized("sig"))?;
@@ -663,16 +665,14 @@ fn verify_es256(x: &[u8], y: &[u8], input: &[u8], signature: &[u8]) -> Result<()
     }
     let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)
         .map_err(|_| JwtFailure::Unauthorized("sig"))?;
-    let mut ctx =
-        openssl::bn::BigNumContext::new().map_err(|_| JwtFailure::Unauthorized("sig"))?;
+    let mut ctx = openssl::bn::BigNumContext::new().map_err(|_| JwtFailure::Unauthorized("sig"))?;
     let mut uncompressed = Vec::with_capacity(65);
     uncompressed.push(0x04);
     uncompressed.extend_from_slice(&left_pad(x, 32).ok_or(JwtFailure::Unauthorized("sig"))?);
     uncompressed.extend_from_slice(&left_pad(y, 32).ok_or(JwtFailure::Unauthorized("sig"))?);
     let point = EcPoint::from_bytes(&group, &uncompressed, &mut ctx)
         .map_err(|_| JwtFailure::Unauthorized("sig"))?;
-    let ec =
-        EcKey::from_public_key(&group, &point).map_err(|_| JwtFailure::Unauthorized("sig"))?;
+    let ec = EcKey::from_public_key(&group, &point).map_err(|_| JwtFailure::Unauthorized("sig"))?;
     let pkey = PKey::from_ec_key(ec).map_err(|_| JwtFailure::Unauthorized("sig"))?;
     let der = ecdsa_raw_to_der(signature).ok_or(JwtFailure::Unauthorized("sig"))?;
     let mut verifier = Verifier::new(MessageDigest::sha256(), &pkey)
@@ -869,7 +869,10 @@ impl JwksSource {
                 let bytes = std::fs::read(path)
                     .map_err(|error| format!("não leu JWKS {}: {error}", path.display()))?;
                 if bytes.len() > JWKS_MAX_BODY {
-                    return Err(format!("JWKS {} excede {JWKS_MAX_BODY} bytes", path.display()));
+                    return Err(format!(
+                        "JWKS {} excede {JWKS_MAX_BODY} bytes",
+                        path.display()
+                    ));
                 }
                 String::from_utf8(bytes).map_err(|_| "JWKS não é UTF-8".into())
             }
@@ -927,7 +930,10 @@ impl JwksCache {
         if keys.is_empty() {
             return Err("JWKS sem chaves utilizáveis".into());
         }
-        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         state.keys = keys;
         let now = Instant::now();
         state.fetched_at = Some(now);
@@ -938,7 +944,10 @@ impl JwksCache {
     fn key(&self, kid: &str) -> Option<CachedJwk> {
         let now = Instant::now();
         {
-            let state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             if let Some(cached) = fresh_key(&state, kid, now, self.ttl) {
                 return Some(cached);
             }
@@ -954,19 +963,31 @@ impl JwksCache {
                 return state.keys.get(kid).cloned();
             }
         }
-        let _fetch = self.fetch.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _fetch = self
+            .fetch
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         {
-            let state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             if let Some(cached) = fresh_key(&state, kid, Instant::now(), self.ttl) {
                 return Some(cached);
             }
         }
         {
-            let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             state.last_attempt = Some(Instant::now());
         }
         let fetched = self.source.fetch(self.timeout);
-        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         match fetched {
             Ok(body) => match parse_jwks(&body) {
                 Ok(keys) if !keys.is_empty() => {
@@ -1007,7 +1028,12 @@ fn parse_jwks(body: &str) -> Result<HashMap<String, CachedJwk>, String> {
         if jwk.use_.as_deref() == Some("enc") {
             continue;
         }
-        let Some(kid) = jwk.kid.as_deref().map(str::trim).filter(|kid| !kid.is_empty()) else {
+        let Some(kid) = jwk
+            .kid
+            .as_deref()
+            .map(str::trim)
+            .filter(|kid| !kid.is_empty())
+        else {
             continue;
         };
         let alg = match jwk.alg.as_deref() {
@@ -1328,11 +1354,7 @@ fn seed_rand() {
 }
 
 #[cfg(test)]
-pub(crate) fn sign_rs256(
-    rsa: &Rsa<openssl::pkey::Private>,
-    kid: &str,
-    claims: &Value,
-) -> String {
+pub(crate) fn sign_rs256(rsa: &Rsa<openssl::pkey::Private>, kid: &str, claims: &Value) -> String {
     seed_rand();
     sign_with(Algorithm::Rs256, kid, claims, |input| {
         let pkey = PKey::from_rsa(rsa.clone()).unwrap();
@@ -1365,7 +1387,12 @@ fn sign_hs256(secret: &[u8], kid: &str, claims: &Value) -> String {
 }
 
 #[cfg(test)]
-fn sign_with(alg: Algorithm, kid: &str, claims: &Value, sign: impl FnOnce(&str) -> Vec<u8>) -> String {
+fn sign_with(
+    alg: Algorithm,
+    kid: &str,
+    claims: &Value,
+    sign: impl FnOnce(&str) -> Vec<u8>,
+) -> String {
     let header = serde_json::json!({"alg": alg.as_str(), "typ": "JWT", "kid": kid});
     let header_b64 = b64url_encode(&serde_json::to_vec(&header).unwrap());
     let payload_b64 = b64url_encode(&serde_json::to_vec(claims).unwrap());
@@ -1652,10 +1679,7 @@ n5LKC4fKIpFKBXjMNiu/w68QS62SvhQ0gA==
     fn body_binding_compares_tenant() {
         let key = rsa();
         let jwks = serde_json::json!({"keys": [rsa_jwk(&key, "k1")]});
-        let policy = policy_from_jwks(
-            &jwks,
-            &[("bindings", "jwt.tenant_id == body.tenant_id")],
-        );
+        let policy = policy_from_jwks(&jwks, &[("bindings", "jwt.tenant_id == body.tenant_id")]);
         let now = unix_now();
         let token = sign_rs256(&key, "k1", &default_claims("user-1", now));
         let principal = policy
@@ -1784,9 +1808,7 @@ n5LKC4fKIpFKBXjMNiu/w68QS62SvhQ0gA==
         let token = sign_rs256(&key, "k1", &claims);
         let header = format!("Bearer {token}");
         policy.authenticate(Some(&header), now).unwrap();
-        let err = policy
-            .authenticate(Some(&header), now + 1)
-            .unwrap_err();
+        let err = policy.authenticate(Some(&header), now + 1).unwrap_err();
         assert_eq!(err, JwtFailure::Unauthorized("jti"));
     }
 

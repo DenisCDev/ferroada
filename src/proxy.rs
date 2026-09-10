@@ -2169,11 +2169,7 @@ impl FerroadaProxy {
         ctx: &mut FerroadaCtx,
         uri: &str,
     ) -> Result<bool> {
-        let Some(policy) = ctx
-            .backend
-            .as_ref()
-            .and_then(|backend| backend.jwt.clone())
-        else {
+        let Some(policy) = ctx.backend.as_ref().and_then(|backend| backend.jwt.clone()) else {
             return Ok(false);
         };
         let authorization = session
@@ -2221,7 +2217,10 @@ impl FerroadaProxy {
         };
         match policy.bind_body(principal, body) {
             Ok(()) => Ok(false),
-            Err(failure) => self.reject_jwt(session, ctx, &ctx.request_uri, failure).await,
+            Err(failure) => {
+                self.reject_jwt(session, ctx, &ctx.request_uri, failure)
+                    .await
+            }
         }
     }
 

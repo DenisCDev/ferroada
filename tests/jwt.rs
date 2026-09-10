@@ -381,10 +381,7 @@ fn valid_jwt_and_binding_is_200() {
 
     let now = unix_now();
     let token = sign_rs256(&key, "k1", &claims("user-1", now, &[]));
-    let response = send_until_http(
-        listen,
-        &bearer_get("api.test", "/accounts/user-1", &token),
-    );
+    let response = send_until_http(listen, &bearer_get("api.test", "/accounts/user-1", &token));
     assert!(
         response.starts_with(b"HTTP/1.1 200"),
         "valid jwt + binding must pass, got {}",
@@ -422,8 +419,7 @@ fn alg_none_is_401_zero_stub() {
     let events = events_for("/none-alg");
     assert!(
         events.iter().any(|event| {
-            event["event_type"].as_str() == Some("jwt")
-                && event["detail"].as_str() == Some("alg")
+            event["event_type"].as_str() == Some("jwt") && event["detail"].as_str() == Some("alg")
         }),
         "expected jwt alg event, got {events:?}"
     );
