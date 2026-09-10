@@ -54,6 +54,8 @@ pub struct Metrics {
     pub openapi_observed: AtomicU64,
     pub waf_monitored: AtomicU64,
     pub dlp_cpf_masked: AtomicU64,
+    pub dlp_cnpj_masked: AtomicU64,
+    pub dlp_card_masked: AtomicU64,
     pub dlp_tokens_masked: AtomicU64,
     pub protocol_deny: AtomicU64,
     pub protocol_monitor: AtomicU64,
@@ -125,6 +127,8 @@ impl Metrics {
             openapi_observed: AtomicU64::new(0),
             waf_monitored: AtomicU64::new(0),
             dlp_cpf_masked: AtomicU64::new(0),
+            dlp_cnpj_masked: AtomicU64::new(0),
+            dlp_card_masked: AtomicU64::new(0),
             dlp_tokens_masked: AtomicU64::new(0),
             protocol_deny: AtomicU64::new(0),
             protocol_monitor: AtomicU64::new(0),
@@ -386,18 +390,42 @@ pub fn record_observation_in(
     );
 }
 
-pub fn record_dlp(cpf_count: u64, token_count: u64, verb: &str) {
+pub fn record_dlp(
+    cpf_count: u64,
+    cnpj_count: u64,
+    card_count: u64,
+    token_count: u64,
+    verb: &str,
+    fields: &[String],
+) {
     if cpf_count > 0 {
         METRICS
             .dlp_cpf_masked
             .fetch_add(cpf_count, Ordering::Relaxed);
+    }
+    if cnpj_count > 0 {
+        METRICS
+            .dlp_cnpj_masked
+            .fetch_add(cnpj_count, Ordering::Relaxed);
+    }
+    if card_count > 0 {
+        METRICS
+            .dlp_card_masked
+            .fetch_add(card_count, Ordering::Relaxed);
     }
     if token_count > 0 {
         METRICS
             .dlp_tokens_masked
             .fetch_add(token_count, Ordering::Relaxed);
     }
-    if cpf_count > 0 || token_count > 0 {
+    if cpf_count > 0 || cnpj_count > 0 || card_count > 0 || token_count > 0 {
+        let mut detail = format!(
+            "{verb} {cpf_count} CPFs, {cnpj_count} CNPJs, {card_count} cards, {token_count} tokens"
+        );
+        if !fields.is_empty() {
+            detail.push_str("; campos ");
+            detail.push_str(&fields.join(", "));
+        }
         METRICS.push_event(
             UNSCOPED_SITE,
             SecurityEvent {
@@ -405,7 +433,7 @@ pub fn record_dlp(cpf_count: u64, token_count: u64, verb: &str) {
                 event_type: "dlp".to_string(),
                 client_ip: "-".to_string(),
                 uri: "-".to_string(),
-                detail: format!("{verb} {cpf_count} CPFs, {token_count} tokens"),
+                detail,
                 site_scope: String::new(),
             },
         );
@@ -464,6 +492,8 @@ pub fn snapshot_json() -> String {
         "https_redirect": m.https_redirect.load(Ordering::Relaxed),
         "dlp": {
             "cpf_masked": m.dlp_cpf_masked.load(Ordering::Relaxed),
+            "cnpj_masked": m.dlp_cnpj_masked.load(Ordering::Relaxed),
+            "card_masked": m.dlp_card_masked.load(Ordering::Relaxed),
             "tokens_masked": m.dlp_tokens_masked.load(Ordering::Relaxed)
         },
         "protocol": {

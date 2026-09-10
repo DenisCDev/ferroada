@@ -23,6 +23,14 @@ fuzz_target!(|data: &[u8]| {
     let _ = dlp::can_inspect(Some(content_type), Some(encoding));
     let _ = dlp::sanitize_body(body, Some(content_type));
     let _ = dlp::sanitize_encoded_body(body, Some(content_type), Some(encoding), 256 * 1024);
+    if let Ok(field) = ferroada::dlp::DlpField::parse("$.user.cpf", "cpf") {
+        let _ = ferroada::dlp::sanitize_body_with(
+            body,
+            Some("application/json"),
+            ferroada::dlp::DlpAction::Redact,
+            &[field],
+        );
+    }
 
     let limit = usize::from(data[0]).saturating_mul(body.len().saturating_add(1)) / 255;
     let chunk_size = usize::from(data[0] & 0x1f).saturating_add(1);

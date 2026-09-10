@@ -298,7 +298,7 @@ async function tick(){
     kpi('Requisições', fmt(m.requests_total)),
     kpi('Bloqueios', fmt(blocked)),
     kpi('Tráfego limpo', new Intl.NumberFormat('pt-BR',{maximumFractionDigits:1}).format(rate)+'%'),
-    kpi('DLP', fmt((m.dlp&&m.dlp.cpf_masked||0)+(m.dlp&&m.dlp.tokens_masked||0)))
+    kpi('DLP', fmt((m.dlp&&m.dlp.cpf_masked||0)+(m.dlp&&m.dlp.cnpj_masked||0)+(m.dlp&&m.dlp.card_masked||0)+(m.dlp&&m.dlp.tokens_masked||0)))
   );
   const events = m.recent_events||[];
   const tb = document.getElementById('rows');

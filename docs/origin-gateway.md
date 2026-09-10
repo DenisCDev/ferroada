@@ -1025,7 +1025,12 @@ Ordem de produto (packs primeiro) é consciente: o txt pedia Pingora → identid
 - **Descrição:** JWT é um bloco TOML por site (`jwt = { jwks, issuer, audience, bindings, paths }`). Sem bloco o site permanece Level 1. Allowlist de alg: default RS256/ES256; `none` nunca; HS* só com `algorithms` explícito + `hmac_secret_env`. `iss` e `aud` obrigatórios. Valida `exp`, `nbf`, `iat`, `jti` (replay por site, teto no mapa). JWKS cacheado; fetch com timeout; kid novo dispara refresh; fetch falhou → last-known-good. Bindings declarativos `jwt.sub == path.account_id` e `jwt.tenant_id == body.tenant_id`. Rate/behavior usam hash de `sub`/tenant além do IP. Evento `jwt`/`jwt_binding` sem token nem payload. Sem DLP por campo, GraphQL, gRPC, OPA, Helm.
 - **Exit:** JWT válido + binding ok → 200. alg none / iss errado / exp vencido → 401, stub 0. `sub` ≠ `path.account_id` → 403, stub 0. kid novo passa depois do refresh do cache. Site sem jwt continua 200 sem Authorization.
 
-#### PR 15 — `feat: field-aware DLP and block commit-point` (tardio; amplia PR 10)
+#### PR 15 — `feat: field-aware DLP and block commit-point`
+
+- **Ficheiros:** `src/dlp.rs`, `src/config.rs`, `src/proxy.rs`, `src/metrics.rs`, `ferroada.toml.example`, packs `vps-api`/`_skeleton` (comentário opt-in), `tests/dlp_fields.rs`
+- **Deps:** PR 10 (DLP_ACTION) e PR 14 (JWT na main). Sem GraphQL, gRPC, Helm, OPA.
+- **Descrição:** detectores CPF/CNPJ com dígito verificador e cartão com Luhn (não mascara CPF inválido). DLP por campo JSON (`path = "$.user.cpf"`) opt-in no TOML por site/rota; sem fields o blob do PR 10 permanece. `block` não libera byte ao cliente antes do fim da inspeção (commit-point); overflow continua 502, nunca body parcial. Brotli inspeciona se o orçamento de inflate couber; senão skip observável, não “limpo”. Resposta assinada continua intocada. Evento DLP não loga o valor mascarado.
+- **Exit:** JSON `{"user":{"cpf":"390.533.447-05"}}` em redact → CPF mascarado, stub viu o pedido. CPF com dígito errado → não mascara. Cartão Luhn em block → 502, zero bytes do origin no cliente. `Content-Encoding: br` sem orçamento → skip observável. Site sem paths de campo continua o DLP de blob.
 
 #### PR 16 — `feat: GraphQL AST limits` (tardio)
 

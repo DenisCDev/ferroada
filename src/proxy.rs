@@ -331,6 +331,22 @@ impl FerroadaProxy {
         };
         self
     }
+
+    fn inspect_response_dlp(&self, ctx: &FerroadaCtx, body: &[u8]) -> dlp::DlpResult {
+        let fields = ctx
+            .backend
+            .as_ref()
+            .map(|backend| backend.dlp_fields_for(&ctx.request_uri))
+            .unwrap_or_default();
+        dlp::sanitize_encoded_body_with(
+            body,
+            ctx.content_type.as_deref(),
+            ctx.response_content_encoding.as_deref(),
+            *MAX_RESPONSE_BUFFER,
+            self.dlp_action,
+            &fields,
+        )
+    }
 }
 
 static MAX_RESPONSE_BUFFER: Lazy<usize> =
@@ -1396,15 +1412,8 @@ impl ProxyHttp for FerroadaProxy {
         }
 
         if end_of_stream {
-            let ct = ctx.content_type.as_deref();
             let buffered = ctx.body_buffer.take();
-            let result = dlp::sanitize_encoded_body_with(
-                &buffered,
-                ct,
-                ctx.response_content_encoding.as_deref(),
-                *MAX_RESPONSE_BUFFER,
-                self.dlp_action,
-            );
+            let result = self.inspect_response_dlp(ctx, &buffered);
             ctx.release_dlp();
             if self.dlp_action.reject_incomplete_response()
                 && (!result.inspection_complete || result.found_sensitive())
@@ -2009,21 +2018,20 @@ impl FerroadaProxy {
         let out_bytes = if ctx.skip_dlp {
             Bytes::from(origin_body)
         } else {
-            let result = dlp::sanitize_encoded_body_with(
-                &origin_body,
-                ctx.content_type.as_deref(),
-                ctx.response_content_encoding.as_deref(),
-                *MAX_RESPONSE_BUFFER,
-                self.dlp_action,
-            );
+            let result = self.inspect_response_dlp(ctx, &origin_body);
             if self.dlp_action.reject_incomplete_response()
                 && (!result.inspection_complete || result.found_sensitive())
             {
+                let detail = if !result.inspection_complete {
+                    "Compressed response could not be inspected within the configured limit"
+                } else {
+                    "DLP blocked a response with sensitive data"
+                };
                 metrics::record_block(
                     "dlp_partial_block",
                     &ctx.client_addr,
                     &ctx.request_uri,
-                    "DLP buffer limit reached",
+                    detail,
                 );
                 return self.send_502(session).await;
             }
