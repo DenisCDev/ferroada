@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 use crate::dlp::{self, DlpField};
+use crate::graphql::{GraphqlFile, GraphqlPolicy};
 use crate::jwt::{JwtPolicy, JwtSpec};
 use crate::openapi::{OpenApiPolicy, UnknownEndpoint};
 use crate::protocol::{ProtocolMatrix, ProtocolsSection};
@@ -53,6 +54,8 @@ struct SiteEntry {
     #[serde(default)]
     jwt: Option<JwtFile>,
     #[serde(default)]
+    graphql: Option<GraphqlFile>,
+    #[serde(default)]
     dlp: DlpFile,
 }
 
@@ -97,6 +100,8 @@ struct SiteRouteEntry {
     inspection: InspectionPolicyFile,
     #[serde(default)]
     l1: L1File,
+    #[serde(default)]
+    graphql: Option<GraphqlFile>,
     #[serde(default)]
     dlp: DlpFile,
 }
@@ -220,6 +225,7 @@ struct RouteInspection {
     prefix: String,
     patch: InspectionPolicyFile,
     l1: L1File,
+    graphql: Option<GraphqlPolicy>,
     dlp_fields: Vec<DlpField>,
 }
 
@@ -250,6 +256,7 @@ pub struct Backend {
     l1: SiteL1,
     pub openapi: Option<OpenApiPolicy>,
     pub jwt: Option<JwtPolicy>,
+    graphql: Option<GraphqlPolicy>,
     dlp_fields: Vec<DlpField>,
 }
 
@@ -327,6 +334,30 @@ impl Backend {
             fields.extend(route.dlp_fields.iter().cloned());
         }
         fields
+    }
+
+    pub fn graphql_for(&self, uri: &str) -> Option<GraphqlPolicy> {
+        let mut policy = self.graphql.clone();
+        let path = uri.split('?').next().unwrap_or(uri);
+        let Some(path) = canonical_route_path(path) else {
+            return policy;
+        };
+        let mut matching: Vec<&RouteInspection> = self
+            .routes
+            .iter()
+            .filter(|route| route.graphql.is_some() && path_matches_prefix(&path, &route.prefix))
+            .collect();
+        matching.sort_by_key(|route| route.prefix.len());
+        for route in matching {
+            let Some(overlay) = route.graphql.as_ref() else {
+                continue;
+            };
+            policy = Some(match policy {
+                Some(base) => base.overlay(overlay),
+                None => overlay.clone(),
+            });
+        }
+        policy
     }
 }
 
@@ -411,6 +442,7 @@ impl Config {
                 .jwt
                 .as_ref()
                 .map(|file| load_jwt(file, base_dir, site_host));
+            let graphql = site.graphql.map(|file| load_graphql(file, None));
             let mut backend = resolve_site(
                 &site.backend,
                 parse_path_prefixes(site.require_complete_waf_inspection.iter()),
@@ -423,6 +455,7 @@ impl Config {
                 openapi,
                 jwt,
             );
+            backend.graphql = graphql;
             backend.dlp_fields = parse_dlp_fields(site.dlp.fields);
             backend.site_scope = site
                 .hosts
@@ -644,8 +677,19 @@ fn resolve_site(
         l1,
         openapi,
         jwt,
+        graphql: None,
         dlp_fields: Vec::new(),
     }
+}
+
+fn load_graphql(file: GraphqlFile, route_prefix: Option<&str>) -> GraphqlPolicy {
+    let mut paths = parse_path_prefixes(file.paths.iter());
+    if paths.is_empty() {
+        if let Some(prefix) = route_prefix {
+            paths = vec![prefix.to_string()];
+        }
+    }
+    GraphqlPolicy::from_file(file, paths)
 }
 
 fn fail_closed_patch() -> InspectionPolicyFile {
@@ -779,6 +823,7 @@ fn merge_inspection_routes(
             prefix,
             patch: fail_closed_patch(),
             l1: L1File::default(),
+            graphql: None,
             dlp_fields: Vec::new(),
         })
         .collect();
@@ -788,15 +833,25 @@ fn merge_inspection_routes(
             .next()
             .unwrap_or_else(|| panic!("Rota de inspeção precisa de um prefixo de path"));
         let dlp_fields = parse_dlp_fields(entry.dlp.fields);
+        let graphql = entry
+            .graphql
+            .map(|file| load_graphql(file, Some(prefix.as_str())));
         if let Some(existing) = routes.iter_mut().find(|route| route.prefix == prefix) {
             existing.patch = merge_patches(existing.patch.clone(), entry.inspection);
             existing.l1 = merge_l1_files(existing.l1.clone(), entry.l1);
             existing.dlp_fields.extend(dlp_fields);
+            if let Some(overlay) = graphql {
+                existing.graphql = Some(match existing.graphql.take() {
+                    Some(base) => base.overlay(&overlay),
+                    None => overlay,
+                });
+            }
         } else {
             routes.push(RouteInspection {
                 prefix,
                 patch: entry.inspection,
                 l1: entry.l1,
+                graphql,
                 dlp_fields,
             });
         }
@@ -1302,6 +1357,32 @@ max_decoded_body = "2MiB"
         )
         .unwrap_err();
         assert!(error.to_string().contains("max_decoded_body"));
+    }
+
+    #[test]
+    fn graphql_block_is_opt_in_per_site() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["gql.example"]
+backend = "http://127.0.0.1:8080"
+graphql = { max_depth = 8, introspection = false }
+
+[[sites]]
+hosts = ["plain.example"]
+backend = "http://127.0.0.1:8081"
+"#,
+        );
+        assert!(config
+            .resolve("gql.example")
+            .unwrap()
+            .graphql_for("/graphql")
+            .is_some());
+        assert!(config
+            .resolve("plain.example")
+            .unwrap()
+            .graphql_for("/graphql")
+            .is_none());
     }
 
     #[test]

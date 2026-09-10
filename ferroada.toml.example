@@ -81,6 +81,10 @@ backend = "http://backend-b:3000"
 # alg default: RS256 e ES256. none é recusado. HS* só com algorithms explícito
 # e hmac_secret_env. iss e aud obrigatórios. Bindings declarativos.
 # jwt = { jwks = "https://auth.exemplo.com/.well-known/jwks.json", issuer = "https://auth.exemplo.com", audience = "api.meusite.com", paths = ["/accounts/{account_id}"], bindings = ["jwt.sub == path.account_id", "jwt.tenant_id == body.tenant_id"] }
+# GraphQL AST (opt-in). Sem bloco o POST /graphql continua HTTP/WAF/OpenAPI.
+# Limites no AST, não regex. Introspection default off em produção.
+# Quota usa jwt.sub se o site tem jwt, senão o IP. Parse falhou = ParseError da rota.
+# graphql = { max_depth = 8, max_complexity = 200, max_aliases = 15, max_fragments = 10, max_operations = 5, introspection = false, persisted_only = false, persisted_queries = ["<sha256 hex>"], quota = 1000 }
 # DLP por campo JSON (opt-in). Sem isto o site continua o DLP de blob
 # (CPF/CNPJ com dígito, cartão com Luhn, Bearer). Path tipo $.user.cpf.
 # [[sites.dlp.fields]]

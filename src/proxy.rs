@@ -63,6 +63,7 @@ use crate::behavioral::{self, BehavioralVerdict};
 use crate::client_ip::{ClientIpConfig, RiskIdentity, TrustedProxies};
 use crate::config::{Config, InspectionDisposition, InspectionPolicy};
 use crate::dlp::{self, DlpAction};
+use crate::graphql::{GraphqlFailure, GraphqlIdentity, GraphqlVerdict};
 use crate::headers;
 use crate::jwt::{self, JwtFailure, JwtPrincipal};
 use crate::metrics;
@@ -1193,12 +1194,20 @@ impl ProxyHttp for FerroadaProxy {
                 if self.apply_jwt_body(session, ctx, l1_body).await? {
                     return Ok(true);
                 }
+                if self.apply_graphql(session, ctx, l1_body).await? {
+                    return Ok(true);
+                }
             } else if ctx.openapi_match.is_some()
                 || ctx
                     .backend
                     .as_ref()
                     .and_then(|backend| backend.jwt.as_ref())
                     .is_some_and(|policy| policy.has_body_bindings())
+                || ctx
+                    .backend
+                    .as_ref()
+                    .and_then(|backend| backend.graphql_for(&ctx.request_uri))
+                    .is_some()
             {
                 let wire = if spooling {
                     match ctx
@@ -1228,6 +1237,9 @@ impl ProxyHttp for FerroadaProxy {
                 if self.apply_jwt_body(session, ctx, &wire).await? {
                     return Ok(true);
                 }
+                if self.apply_graphql(session, ctx, &wire).await? {
+                    return Ok(true);
+                }
             }
 
             // Keep the global reservation until the request finishes: Pingora now
@@ -1253,6 +1265,9 @@ impl ProxyHttp for FerroadaProxy {
                 return Ok(true);
             }
             if self.apply_jwt_body(session, ctx, &[]).await? {
+                return Ok(true);
+            }
+            if self.apply_graphql(session, ctx, &[]).await? {
                 return Ok(true);
             }
         }
@@ -2305,6 +2320,83 @@ impl FerroadaProxy {
                     &detail,
                 );
                 self.send_403(session, "requisição fora do contrato OpenAPI")
+                    .await
+            }
+        }
+    }
+
+    async fn apply_graphql(
+        &self,
+        session: &mut Session,
+        ctx: &FerroadaCtx,
+        body: &[u8],
+    ) -> Result<bool> {
+        let Some(backend) = ctx.backend.as_ref() else {
+            return Ok(false);
+        };
+        let Some(policy) = backend.graphql_for(&ctx.request_uri) else {
+            return Ok(false);
+        };
+        let method = session.req_header().method.as_str();
+        let identity = GraphqlIdentity {
+            sub: if backend.jwt.is_some() {
+                ctx.jwt.as_ref().map(|principal| principal.sub.as_str())
+            } else {
+                None
+            },
+            ip: ctx.client_addr.as_str(),
+        };
+        let event_uri = ctx
+            .request_uri
+            .split('?')
+            .next()
+            .unwrap_or(ctx.request_uri.as_str());
+        match policy.check(
+            method,
+            &ctx.request_uri,
+            ctx.request_content_type.as_deref(),
+            body,
+            identity,
+            &ctx.site_scope,
+        ) {
+            GraphqlVerdict::Skip | GraphqlVerdict::Allow => Ok(false),
+            GraphqlVerdict::Deny(GraphqlFailure::ParseError) => {
+                let outcome = InspectionOutcome::ParseError;
+                match ctx.inspection_policy.disposition(outcome) {
+                    InspectionDisposition::Deny => {
+                        record_inspection_outcome(
+                            outcome,
+                            &ctx.client_addr,
+                            event_uri,
+                            true,
+                            &ctx.site_scope,
+                        );
+                        self.send_403(session, "GraphQL inválido (ParseError)")
+                            .await
+                    }
+                    InspectionDisposition::Monitor => {
+                        record_inspection_outcome(
+                            outcome,
+                            &ctx.client_addr,
+                            event_uri,
+                            false,
+                            &ctx.site_scope,
+                        );
+                        Ok(false)
+                    }
+                    InspectionDisposition::Allow => Ok(false),
+                }
+            }
+            GraphqlVerdict::Deny(failure) => {
+                let detail = failure.detail();
+                metrics::record_block_in(
+                    &ctx.site_scope,
+                    "graphql",
+                    &ctx.client_addr,
+                    event_uri,
+                    detail,
+                );
+                self.send_403(session, &format!("consulta GraphQL recusada ({detail})"))
                     .await
             }
         }
