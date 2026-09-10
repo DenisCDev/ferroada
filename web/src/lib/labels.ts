@@ -30,6 +30,8 @@ export const EVENT_LABELS: Record<string, string> = {
   waf_l1: "WAF L1 (CRS)",
   waf_l1_shadow: "WAF L1 (sombra)",
   waf_engine_unavailable: "motor WAF L1 indisponível",
+  openapi: "validação OpenAPI",
+  openapi_observe: "OpenAPI (observação)",
   dlp_skip: "DLP não aplicado",
   dlp: "DLP",
   https_redirect: "redirecionamento HTTPS",

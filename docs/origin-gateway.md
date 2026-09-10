@@ -1011,7 +1011,12 @@ Ordem de produto (packs primeiro) é consciente: o txt pedia Pingora → identid
 
 ### Onda 3 — Level 2 (placeholders; depois de 1–10 em `main`)
 
-#### PR 13 — `feat: OpenAPI request validation as declarative policy` (tardio)
+#### PR 13 — `feat: OpenAPI request validation as declarative policy`
+
+- **Ficheiros:** `src/openapi.rs`, `src/config.rs`, `src/proxy.rs`, `src/metrics.rs`, `ferroada.toml.example`, packs `vps-api`/`_skeleton` (comentário opt-in), `tests/openapi.rs`, `tests/fixtures/openapi-pets.yaml`
+- **Deps:** PR 12 (esta branch). `serde_yaml` 0.9 já transitivo no Pingora; passa a direto para o spec YAML.
+- **Descrição:** spec é um path no TOML por site (`openapi = "./openapi.yaml"` ou `openapi = { spec = "...", unknown_endpoint = "observe"|"deny" }`). Compila no load, não a cada request. Valida método, rota, path params, query, headers, content-type e body JSON (tipos, required, enum, additionalProperties). Extra field no objeto é deny salvo `additionalProperties: true`. unknown endpoint: observe|deny (default observe se a chave falta em rota aberta; deny em `require_complete` se a chave falta). unknown method e unknown content-type: deny. `SecurityEvent` com path/campo, sem dump do body. Sem spec o site permanece Level 1. Sem JWT, DLP de campo, GraphQL, gRPC, validação de response.
+- **Exit:** GET `/pets/1` com spec → 200. GET `/nao-existe` + unknown=deny → 403 + evento, zero request no stub. POST `/pets` JSON fora do schema → 403, stub 0. POST `/pets` content-type xml não listado → 403. Site sem spec não 403 por endpoint desconhecido.
 
 #### PR 14 — `feat: JWT/JWKS identity keys for rate and bindings` (tardio)
 

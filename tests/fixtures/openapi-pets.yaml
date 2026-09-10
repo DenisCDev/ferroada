@@ -1,0 +1,51 @@
+openapi: "3.0.3"
+info:
+  title: Pets
+  version: "1.0.0"
+paths:
+  /pets:
+    get:
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: lista
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewPet"
+      responses:
+        "201":
+          description: criado
+  /pets/{petId}:
+    get:
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: pet
+components:
+  schemas:
+    NewPet:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum:
+            - available
+            - pending
+            - sold

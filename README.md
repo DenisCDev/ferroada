@@ -117,6 +117,16 @@ anomaly score no evento, e não devolve 403. Exclusões por site, rota,
 parâmetro e content-type ficam no TOML (`[waf.l1]`, `[[sites.l1.exclusions]]`).
 Ver `deploy/coraza/`.
 
+OpenAPI 3.0/3.1 é opt-in por site: um path no TOML (`openapi = "./openapi.yaml"`
+ou `openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }`).
+O spec é compilado no arranque. Sem spec o proxy continua exatamente como
+hoje. Com spec, o Ferroada valida método, rota, path/query/header, content-type
+e o JSON do body (tipos, required, enum, campos a mais). Endpoint desconhecido
+é observe ou deny (no pack o default é observe; em rota `require_complete`
+sem a chave, deny). Método ou content-type fora do contrato: deny. O evento
+diz o path e o campo; o body não entra no log. Response body e JWT ficam
+para PRs seguintes.
+
 #### Inspeção de body
 
 O body de qualquer método permitido é inspecionado antes de chegar ao backend.
