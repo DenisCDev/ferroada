@@ -26,6 +26,7 @@ const SNAPSHOT_FORMAT: u32 = 1;
 const DEFAULT_TOML: &str = "ferroada.toml";
 const DEFAULT_SIG: &str = "ferroada.policy.sig";
 const DEFAULT_PID: &str = "ferroada.pid";
+#[cfg(windows)]
 const DEFAULT_SENTINEL: &str = "ferroada.reload";
 const ED25519_KEY_LEN: usize = 32;
 const ED25519_SIG_LEN: usize = 64;
@@ -448,6 +449,7 @@ fn pid_file_path(override_path: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_PID))
 }
 
+#[cfg(windows)]
 fn sentinel_path(pid_file: Option<&Path>) -> PathBuf {
     if let Some(path) = std::env::var("FERROADA_RELOAD_SENTINEL")
         .ok()
@@ -931,6 +933,7 @@ mod tests {
         assert!(verify_ed25519(&parsed, blob, &signature).unwrap());
     }
 
+    #[cfg(windows)]
     #[test]
     fn sentinel_defaults_next_to_pid_file() {
         let _lock = env_lock();
