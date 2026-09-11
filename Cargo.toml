@@ -10,6 +10,7 @@ resolver = "2"
 
 [dependencies]
 pingora = { version = "=0.8.1", features = ["proxy", "openssl", "connection_filter"] }
+pingora-load-balancing = { version = "=0.8.1", default-features = false, features = ["openssl"] }
 async-trait = "0.1"
 regex = "1"
 once_cell = "1"

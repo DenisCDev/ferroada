@@ -602,6 +602,7 @@ dependencies = [
  "openssl-probe",
  "openssl-sys",
  "pingora",
+ "pingora-load-balancing",
  "prost",
  "prost-reflect",
  "prost-types",
