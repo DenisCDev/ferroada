@@ -85,6 +85,7 @@ fn main() {
         .init();
 
     info!("Ferroada starting");
+    ferroada::otel::boot();
     waf::validate_config();
     ferroada::dlp::validate_config();
     let waf_engine = ferroada::waf_engine::WafEngine::from_env();

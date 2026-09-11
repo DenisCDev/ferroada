@@ -1063,6 +1063,11 @@ Ordem de produto (packs primeiro) é consciente: o txt pedia Pingora → identid
 
 #### PR 20 — `feat: optional OTLP export` (Fase 8)
 
+- **Ficheiros:** `src/otel.rs`, `src/metrics.rs`, `src/proxy.rs`, `src/main.rs`, `src/spool.rs`, `src/lib.rs`, `ferroada.toml.example`, `README.md`, `tests/otel.rs`
+- **Deps:** PR 19 (load balancing na main). Sem Helm, SBOM/cosign, OIDC. Sem crate OpenTelemetry: POST HTTP/JSON com `tokio`, timeout curto.
+- **Descrição:** Export OTLP opt-in. Liga só com `OTEL_EXPORTER_OTLP_ENDPOINT` ou `FERROADA_OTLP_ENDPOINT`. Sem endpoint, zero socket extra. Métricas: as de `src/metrics.rs` + `inspection_outcome`, `spool_bytes`, `policy_version` (resource attribute). Circuit/retry/upstream_latency do PR 19 não existem como série — não inventar. Um span por request: método, rota (path sem query), decisão allow/deny, rule id / event_type. Labels só `site_scope`, `event_type`, `inspection_outcome`, `backend`. Nunca Authorization, cookie, body, token, CPF, query crua. Falha do Collector → log + `otel_export_failed`; o proxy não cai e não deixa de inspecionar. Ring buffer e JSON do dashboard permanecem.
+- **Exit:** sem endpoint → `cargo test` e um GET passam, zero tentativa de socket OTLP. Com Collector mock → recebe metric/span sem header Authorization. Collector down → request 200, `otel_export_failed` sobe. Dashboard JSON local igual.
+
 #### PR 21 — `feat: Helm chart and rootless manifests` (Fase 7; **não** antes dos packs systemd)
 
 #### PR 22 — `chore: SBOM, cosign, SECURITY.md, fuzz on PR CI` (Fase 9)

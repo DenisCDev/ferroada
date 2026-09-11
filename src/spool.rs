@@ -53,16 +53,22 @@ impl ByteBudget {
     }
 
     fn reserve(&self, bytes: usize) -> bool {
-        self.current
+        let ok = self
+            .current
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_add(bytes).filter(|next| *next <= self.max)
             })
-            .is_ok()
+            .is_ok();
+        if ok {
+            crate::metrics::set_spool_bytes(self.current.load(Ordering::Relaxed) as u64);
+        }
+        ok
     }
 
     fn release(&self, bytes: usize) {
         if bytes > 0 {
             self.current.fetch_sub(bytes, Ordering::AcqRel);
+            crate::metrics::set_spool_bytes(self.current.load(Ordering::Relaxed) as u64);
         }
     }
 }

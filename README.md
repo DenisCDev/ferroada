@@ -463,6 +463,8 @@ Toda a configuração é feita por variáveis de ambiente:
 | `FERROADA_POLICY_PUBKEY` | *(unset)* | Chave pública Ed25519 (PEM, hex ou base64). Opt-in: sem ela o TOML solto arranca. Com ela, o snapshot precisa de `ferroada.policy.sig` válida |
 | `FERROADA_POLICY_SIG` | `ferroada.policy.sig` | Assinatura Ed25519 do snapshot (`ferroada policy compile`) |
 | `FERROADA_PID_FILE` | `ferroada.pid` | Gravado no boot; `ferroada reload --pid-file` lê daqui |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `FERROADA_OTLP_ENDPOINT` | *(unset = off)* | Base HTTP do Collector OTLP (`http://127.0.0.1:4318`). Sem isto o processo não abre socket extra. HTTPS e userinfo na URL são recusados; o export nunca manda `Authorization`. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `1000` | Timeout do POST OTLP em milissegundos (teto 5s). Collector morto incrementa `ferroada_otel_export_failed_total` e o proxy continua. |
 | `TRUSTED_PROXIES` | *(vazio)* | CIDRs autorizados a enviar XFF/X-Forwarded-Proto |
 | `SECURITY_HEADERS` | `true` | Injetar headers seguros nas respostas (nosniff, X-Frame, Referrer) |
 | `FRAME_OPTIONS` | `SAMEORIGIN` | Valor de X-Frame-Options; `off` preserva o upstream |

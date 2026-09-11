@@ -66,6 +66,8 @@ pub struct Metrics {
     pub protocol_quarantine: AtomicU64,
     pub policy_reload_accepted: AtomicU64,
     pub policy_reload_rejected: AtomicU64,
+    otel_export_failed: AtomicU64,
+    spool_bytes: AtomicU64,
     policy_version: Mutex<String>,
     policy_signed: AtomicU64,
     protocol_by_id: Mutex<HashMap<(String, String), u64>>,
@@ -146,6 +148,8 @@ impl Metrics {
             protocol_quarantine: AtomicU64::new(0),
             policy_reload_accepted: AtomicU64::new(0),
             policy_reload_rejected: AtomicU64::new(0),
+            otel_export_failed: AtomicU64::new(0),
+            spool_bytes: AtomicU64::new(0),
             policy_version: Mutex::new(String::new()),
             policy_signed: AtomicU64::new(0),
             protocol_by_id: Mutex::new(HashMap::new()),
@@ -362,6 +366,32 @@ pub fn record_waf_engine_unavailable(site_scope: &str, client_ip: &str, uri: &st
 
 pub fn record_l1_shadow(site_scope: &str, client_ip: &str, uri: &str, detail: &str) {
     record_observation_in(site_scope, "waf_l1_shadow", client_ip, uri, detail);
+}
+
+pub fn record_otel_export_failed() {
+    METRICS.otel_export_failed.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn otel_export_failed() -> u64 {
+    METRICS.otel_export_failed.load(Ordering::Relaxed)
+}
+
+pub fn set_spool_bytes(bytes: u64) {
+    METRICS.spool_bytes.store(bytes, Ordering::Relaxed);
+}
+
+pub fn spool_bytes() -> u64 {
+    METRICS.spool_bytes.load(Ordering::Relaxed)
+}
+
+pub fn policy_info() -> (String, bool) {
+    let version = METRICS
+        .policy_version
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    let signed = METRICS.policy_signed.load(Ordering::Relaxed) != 0;
+    (version, signed)
 }
 
 pub fn set_policy_version(version: &str, signed: bool) {
@@ -705,6 +735,35 @@ pub fn snapshot_prometheus() -> String {
         "ferroada_policy_reload_total{{result=\"rejected\"}} {}\n",
         metrics.policy_reload_rejected.load(Ordering::Relaxed)
     ));
+    output.push_str("# TYPE ferroada_inspection_outcome_total counter\n");
+    for (outcome, counter) in [
+        ("complete", &metrics.waf_inspection_complete),
+        ("truncated", &metrics.waf_inspection_truncated),
+        (
+            "unsupported_encoding",
+            &metrics.waf_inspection_unsupported_encoding,
+        ),
+        (
+            "unsupported_content_type",
+            &metrics.waf_inspection_unsupported_content_type,
+        ),
+        ("parse_error", &metrics.waf_inspection_parse_error),
+        ("budget_exceeded", &metrics.waf_inspection_budget_exceeded),
+        ("timed_out", &metrics.waf_inspection_timed_out),
+    ] {
+        output.push_str(&format!(
+            "ferroada_inspection_outcome_total{{inspection_outcome=\"{outcome}\"}} {}\n",
+            counter.load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(&format!(
+        "# TYPE ferroada_spool_bytes gauge\nferroada_spool_bytes {}\n",
+        metrics.spool_bytes.load(Ordering::Relaxed)
+    ));
+    output.push_str(&format!(
+        "# TYPE ferroada_otel_export_failed_total counter\nferroada_otel_export_failed_total {}\n",
+        metrics.otel_export_failed.load(Ordering::Relaxed)
+    ));
     output
 }
 
@@ -724,6 +783,42 @@ mod tests {
         assert!(snapshot.contains("ferroada_protocol_total{action=\"quarantine\"}"));
         assert!(snapshot.contains("ferroada_policy_info"));
         assert!(snapshot.contains("ferroada_policy_reload_total{result=\"rejected\"}"));
+        assert!(
+            snapshot.contains("ferroada_inspection_outcome_total{inspection_outcome=\"complete\"}")
+        );
+        assert!(snapshot.contains("ferroada_spool_bytes"));
+        assert!(snapshot.contains("ferroada_otel_export_failed_total"));
+    }
+
+    #[test]
+    fn dashboard_json_keeps_local_ring_and_omits_otel() {
+        let snapshot = snapshot_json();
+        let value: serde_json::Value =
+            serde_json::from_str(&snapshot).expect("metrics snapshot is JSON");
+        let object = value.as_object().expect("object");
+        for key in [
+            "policy_version",
+            "policy_signed",
+            "policy_reload",
+            "requests_total",
+            "blocked",
+            "waf_inspection",
+            "waf_engine_unavailable",
+            "waf_l1_shadow",
+            "openapi_observed",
+            "waf_monitored",
+            "https_redirect",
+            "dlp",
+            "protocol",
+            "recent_events",
+        ] {
+            assert!(object.contains_key(key), "missing {key} in {snapshot}");
+        }
+        assert!(
+            !object.contains_key("otel_export_failed"),
+            "OTLP failure counter must stay out of the dashboard JSON"
+        );
+        assert!(object["recent_events"].is_array());
     }
 
     fn unique_sites() -> (String, String) {
