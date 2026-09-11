@@ -147,6 +147,20 @@ custo usa `jwt.sub` se o site tem JWT, senão o IP. Parse falhou vira
 `ParseError` e segue a política da rota (403 em `require_complete`). O evento
 diz o limite que estourou (`depth`, `aliases`, …), nunca a query.
 
+gRPC é opt-in por site (`grpc = { descriptor = "./api.pb", allow = ["pkg.Service/Method"], max_message_bytes = "64KiB", reflection = false }`).
+Sem o bloco, `application/grpc` (e `+proto`) segue a matriz de protocolo — hoje
+`deny`, ou `bypass-explicit` se o operador trocar; o proxy **não** passa a
+inspecionar sozinho. Com o bloco, o FileDescriptorSet é compilado no arranque.
+Método fora da allowlist devolve 403 e zero bytes no origin. Tamanho por
+message (lido no prefixo de 5 bytes do frame) acima de `max_message_bytes`
+também 403. O teto conta o payload; o frame no fio tem 5 bytes a mais, então
+64KiB de message não cabe no replay HTTP de 64KiB sem `max_decoded_body`. Reflection (`grpc.reflection.v1` / `ServerReflectionInfo`) nasce
+desligada; só passa com `reflection = true`. Se o cliente não manda
+`grpc-timeout`, o proxy injeta o teto (default 10s) ou nega se
+`require_deadline = true`. Protobuf que não casa com o descriptor vira
+`ParseError` e segue a política da rota. O evento traz service/method, nunca
+o payload. DLP em campo protobuf não existe neste recorte.
+
 #### Inspeção de body
 
 O body de qualquer método permitido é inspecionado antes de chegar ao backend.
@@ -648,6 +662,7 @@ src/
 ├── shield.rs        # Restrição de métodos + limites de tamanho + validação de Host + bad bots
 ├── dlp.rs           # DLP: identity/gzip/deflate, limites e integridade de headers
 ├── graphql.rs       # GraphQL AST: profundidade, aliases, fragments, batch, introspection
+├── grpc.rs          # gRPC: FileDescriptorSet, allowlist de método, tamanho de frame, reflection
 ├── rate_limit.rs    # Sliding window isolado por site/rede, evicção e teto de chaves
 ├── metrics.rs       # Contadores atômicos + ring buffer de eventos
 └── dashboard.rs     # API JSON /api/metrics + HTML mínimo

@@ -85,6 +85,12 @@ backend = "http://backend-b:3000"
 # Limites no AST, não regex. Introspection default off em produção.
 # Quota usa jwt.sub se o site tem jwt, senão o IP. Parse falhou = ParseError da rota.
 # graphql = { max_depth = 8, max_complexity = 200, max_aliases = 15, max_fragments = 10, max_operations = 5, introspection = false, persisted_only = false, persisted_queries = ["<sha256 hex>"], quota = 1000 }
+# gRPC (opt-in). Sem bloco o tráfego application/grpc segue a matriz (default deny).
+# Descriptor = FileDescriptorSet compilado no load. Método fora da allowlist → 403.
+# Reflection (ServerReflectionInfo) nasce desligada. Parse falhou = ParseError da rota.
+# max_message_bytes é o payload da message (o frame no fio tem +5 bytes); 64KiB de
+# message pede max_decoded_body/spool acima de 64KiB, senão o teto HTTP corta antes.
+# grpc = { descriptor = "./api.pb", allow = ["pkg.Service/Method"], max_message_bytes = "64KiB", reflection = false }
 # DLP por campo JSON (opt-in). Sem isto o site continua o DLP de blob
 # (CPF/CNPJ com dígito, cartão com Luhn, Bearer). Path tipo $.user.cpf.
 # [[sites.dlp.fields]]

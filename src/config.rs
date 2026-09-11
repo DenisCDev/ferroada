@@ -6,6 +6,7 @@ use tracing::info;
 
 use crate::dlp::{self, DlpField};
 use crate::graphql::{GraphqlFile, GraphqlPolicy};
+use crate::grpc::{GrpcFile, GrpcPolicy};
 use crate::jwt::{JwtPolicy, JwtSpec};
 use crate::openapi::{OpenApiPolicy, UnknownEndpoint};
 use crate::protocol::{ProtocolMatrix, ProtocolsSection};
@@ -55,6 +56,8 @@ struct SiteEntry {
     jwt: Option<JwtFile>,
     #[serde(default)]
     graphql: Option<GraphqlFile>,
+    #[serde(default)]
+    grpc: Option<GrpcFile>,
     #[serde(default)]
     dlp: DlpFile,
 }
@@ -257,6 +260,7 @@ pub struct Backend {
     pub openapi: Option<OpenApiPolicy>,
     pub jwt: Option<JwtPolicy>,
     graphql: Option<GraphqlPolicy>,
+    pub grpc: Option<GrpcPolicy>,
     dlp_fields: Vec<DlpField>,
 }
 
@@ -443,6 +447,10 @@ impl Config {
                 .as_ref()
                 .map(|file| load_jwt(file, base_dir, site_host));
             let graphql = site.graphql.map(|file| load_graphql(file, None));
+            let grpc = site
+                .grpc
+                .as_ref()
+                .map(|file| load_grpc(file, base_dir, site_host));
             let mut backend = resolve_site(
                 &site.backend,
                 parse_path_prefixes(site.require_complete_waf_inspection.iter()),
@@ -456,6 +464,7 @@ impl Config {
                 jwt,
             );
             backend.graphql = graphql;
+            backend.grpc = grpc;
             backend.dlp_fields = parse_dlp_fields(site.dlp.fields);
             backend.site_scope = site
                 .hosts
@@ -678,8 +687,32 @@ fn resolve_site(
         openapi,
         jwt,
         graphql: None,
+        grpc: None,
         dlp_fields: Vec::new(),
     }
+}
+
+fn load_grpc(file: &GrpcFile, base_dir: &Path, site_host: Option<&str>) -> GrpcPolicy {
+    let path = Path::new(&file.descriptor);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    };
+    let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "gRPC descriptor não encontrado para {} ({}): {error}",
+            site_host.unwrap_or("site"),
+            path.display()
+        )
+    });
+    let policy = GrpcPolicy::from_bytes(&bytes, file).unwrap_or_else(|error| panic!("{error}"));
+    info!(
+        descriptor = %path.display(),
+        host = site_host.unwrap_or("-"),
+        "gRPC descriptor compiled"
+    );
+    policy
 }
 
 fn load_graphql(file: GraphqlFile, route_prefix: Option<&str>) -> GraphqlPolicy {
@@ -1085,6 +1118,7 @@ backend = "http://127.0.0.1:8080"
             content_encoding: None,
             content_type: Some("application/grpc"),
             require_complete: false,
+            grpc_policy: false,
         });
         assert_eq!(grpc.event_type(), Some("quarantine"));
         assert_eq!(grpc.blocked_status(), Some(403));
@@ -1094,6 +1128,7 @@ backend = "http://127.0.0.1:8080"
             content_encoding: None,
             content_type: None,
             require_complete: false,
+            grpc_policy: false,
         });
         assert_eq!(websocket.blocked_status(), Some(403));
     }
@@ -1383,6 +1418,65 @@ backend = "http://127.0.0.1:8081"
             .unwrap()
             .graphql_for("/graphql")
             .is_none());
+    }
+
+    #[test]
+    fn grpc_block_is_opt_in_per_site() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferroada-grpc-cfg-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pb = dir.join("api.pb");
+        std::fs::write(&pb, crate::grpc::test_hello_descriptor_bytes()).unwrap();
+        let pb_path = pb.to_string_lossy().replace('\\', "/");
+        let dir_path = dir.to_string_lossy().replace('\\', "/");
+        let config = Config::from_toml_in(
+            &format!(
+                r#"
+[[sites]]
+hosts = ["grpc.example"]
+backend = "http://127.0.0.1:8080"
+grpc = {{ descriptor = "{pb_path}", allow = ["pkg.Service/Allowed"], reflection = false }}
+
+[[sites]]
+hosts = ["plain.example"]
+backend = "http://127.0.0.1:8081"
+"#
+            ),
+            std::path::Path::new(&dir_path),
+        );
+        assert!(config.resolve("grpc.example").unwrap().grpc.is_some());
+        assert!(config.resolve("plain.example").unwrap().grpc.is_none());
+    }
+
+    #[test]
+    fn missing_grpc_descriptor_is_a_load_error() {
+        let result = std::panic::catch_unwind(|| {
+            Config::from_toml(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+grpc = { descriptor = "./nao-existe.pb", allow = ["pkg.Service/Allowed"] }
+"#,
+            )
+        });
+        let Err(payload) = result else {
+            panic!("load must fail when the descriptor file is missing");
+        };
+        let message = payload
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("gRPC"),
+            "expected gRPC load error, got {message}"
+        );
     }
 
     #[test]

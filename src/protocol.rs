@@ -162,6 +162,9 @@ pub struct RequestFacts<'a> {
     pub content_encoding: Option<&'a str>,
     pub content_type: Option<&'a str>,
     pub require_complete: bool,
+    /// Site opted into a gRPC descriptor allowlist. Does not change the
+    /// matrix default: without a block, gRPC stays an unsupported line.
+    pub grpc_policy: bool,
 }
 
 /// Process-wide protocol matrix. Missing TOML keys keep the documented defaults.
@@ -328,12 +331,17 @@ impl ProtocolMatrix {
         }
 
         if let Some(protocol) = classify_content_type(facts.content_type) {
-            let action = match protocol {
-                ProtocolId::Grpc => self.grpc,
-                ProtocolId::Multipart => contextual(self.multipart, facts.require_complete),
-                _ => contextual(self.unknown_content_type, facts.require_complete),
-            };
-            matches.push((protocol, action));
+            if protocol == ProtocolId::Grpc && facts.grpc_policy {
+                // Descriptor allowlist is inspecting this request. The matrix
+                // line stays deny/bypass for sites without the block.
+            } else {
+                let action = match protocol {
+                    ProtocolId::Grpc => self.grpc,
+                    ProtocolId::Multipart => contextual(self.multipart, facts.require_complete),
+                    _ => contextual(self.unknown_content_type, facts.require_complete),
+                };
+                matches.push((protocol, action));
+            }
         }
 
         matches
@@ -501,6 +509,7 @@ mod tests {
             content_encoding: encoding,
             content_type,
             require_complete,
+            grpc_policy: false,
         }
     }
 
@@ -1000,5 +1009,43 @@ mod tests {
                 "silent inspect for {case:?}"
             );
         }
+    }
+
+    #[test]
+    fn grpc_policy_does_not_invent_matrix_inspect_without_the_block() {
+        assert_deny(
+            default_eval(
+                Version::HTTP_11,
+                None,
+                None,
+                Some("application/grpc"),
+                false,
+            ),
+            ProtocolId::Grpc,
+        );
+        let mut opted = facts(
+            Version::HTTP_11,
+            None,
+            None,
+            Some("application/grpc"),
+            false,
+        );
+        opted.grpc_policy = true;
+        assert_eq!(
+            ProtocolMatrix::default().evaluate(&opted),
+            ProtocolVerdict::Inspect
+        );
+        let mut plus_proto = facts(
+            Version::HTTP_2,
+            None,
+            None,
+            Some("application/grpc+proto"),
+            true,
+        );
+        plus_proto.grpc_policy = true;
+        assert_eq!(
+            ProtocolMatrix::default().evaluate(&plus_proto),
+            ProtocolVerdict::Inspect
+        );
     }
 }

@@ -11,6 +11,8 @@ require_complete_waf_inspection = ["/api/payment", "/api/admin", "/auth", "/logi
 # jwt = { jwks = "https://auth.exemplo.com/.well-known/jwks.json", issuer = "https://auth.exemplo.com", audience = "{{PUBLIC_HOST}}", paths = ["/accounts/{account_id}"], bindings = ["jwt.sub == path.account_id"] }
 # GraphQL AST (opt-in). Sem bloco o POST /graphql continua HTTP/WAF/OpenAPI.
 # graphql = { max_depth = 8, max_operations = 5, introspection = false }
+# gRPC (opt-in). Sem bloco o application/grpc segue a matriz (default deny).
+# grpc = { descriptor = "./api.pb", allow = ["pkg.Service/Method"], max_message_bytes = "64KiB", reflection = false }
 # DLP por campo JSON (opt-in). Sem isto o DLP de blob do processo permanece.
 # [[sites.dlp.fields]]
 # path = "$.user.cpf"
