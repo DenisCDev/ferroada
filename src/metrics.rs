@@ -63,6 +63,10 @@ pub struct Metrics {
     pub protocol_monitor: AtomicU64,
     pub protocol_bypass: AtomicU64,
     pub protocol_quarantine: AtomicU64,
+    pub policy_reload_accepted: AtomicU64,
+    pub policy_reload_rejected: AtomicU64,
+    policy_version: Mutex<String>,
+    policy_signed: AtomicU64,
     protocol_by_id: Mutex<HashMap<(String, String), u64>>,
     events_by_site: Mutex<HashMap<String, VecDeque<StoredEvent>>>,
     event_seq: AtomicU64,
@@ -138,6 +142,10 @@ impl Metrics {
             protocol_monitor: AtomicU64::new(0),
             protocol_bypass: AtomicU64::new(0),
             protocol_quarantine: AtomicU64::new(0),
+            policy_reload_accepted: AtomicU64::new(0),
+            policy_reload_rejected: AtomicU64::new(0),
+            policy_version: Mutex::new(String::new()),
+            policy_signed: AtomicU64::new(0),
             protocol_by_id: Mutex::new(HashMap::new()),
             events_by_site: Mutex::new(HashMap::new()),
             event_seq: AtomicU64::new(0),
@@ -353,6 +361,43 @@ pub fn record_l1_shadow(site_scope: &str, client_ip: &str, uri: &str, detail: &s
     record_observation_in(site_scope, "waf_l1_shadow", client_ip, uri, detail);
 }
 
+pub fn set_policy_version(version: &str, signed: bool) {
+    if let Ok(mut current) = METRICS.policy_version.lock() {
+        *current = version.to_string();
+    }
+    METRICS
+        .policy_signed
+        .store(u64::from(signed), Ordering::Relaxed);
+}
+
+pub fn record_policy_reload(accepted: bool, detail: &str) {
+    if accepted {
+        METRICS
+            .policy_reload_accepted
+            .fetch_add(1, Ordering::Relaxed);
+    } else {
+        METRICS
+            .policy_reload_rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    let event_type = if accepted {
+        "policy_reload"
+    } else {
+        "policy_reload_rejected"
+    };
+    METRICS.push_event(
+        UNSCOPED_SITE,
+        SecurityEvent {
+            timestamp: now_iso(),
+            event_type: event_type.to_string(),
+            client_ip: "-".to_string(),
+            uri: "-".to_string(),
+            detail: detail.to_string(),
+            site_scope: String::new(),
+        },
+    );
+}
+
 pub fn record_observation(event_type: &str, client_ip: &str, uri: &str, detail: &str) {
     record_observation_in(UNSCOPED_SITE, event_type, client_ip, uri, detail);
 }
@@ -449,8 +494,20 @@ pub fn record_dlp(
 pub fn snapshot_json() -> String {
     let m = &*METRICS;
     let events = m.snapshot_events();
+    let policy_version = m
+        .policy_version
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    let policy_signed = m.policy_signed.load(Ordering::Relaxed) != 0;
 
     let json = serde_json::json!({
+        "policy_version": policy_version,
+        "policy_signed": policy_signed,
+        "policy_reload": {
+            "accepted": m.policy_reload_accepted.load(Ordering::Relaxed),
+            "rejected": m.policy_reload_rejected.load(Ordering::Relaxed)
+        },
         "requests_total": m.requests_total.load(Ordering::Relaxed),
         "blocked": {
             "sqli": m.blocked_sqli.load(Ordering::Relaxed),
@@ -620,6 +677,29 @@ pub fn snapshot_prometheus() -> String {
             ));
         }
     }
+    let policy_version = metrics
+        .policy_version
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    let signed = if metrics.policy_signed.load(Ordering::Relaxed) != 0 {
+        "true"
+    } else {
+        "false"
+    };
+    output.push_str("# TYPE ferroada_policy_info gauge\n");
+    output.push_str(&format!(
+        "ferroada_policy_info{{version=\"{policy_version}\",signed=\"{signed}\"}} 1\n"
+    ));
+    output.push_str("# TYPE ferroada_policy_reload_total counter\n");
+    output.push_str(&format!(
+        "ferroada_policy_reload_total{{result=\"accepted\"}} {}\n",
+        metrics.policy_reload_accepted.load(Ordering::Relaxed)
+    ));
+    output.push_str(&format!(
+        "ferroada_policy_reload_total{{result=\"rejected\"}} {}\n",
+        metrics.policy_reload_rejected.load(Ordering::Relaxed)
+    ));
     output
 }
 
@@ -637,6 +717,8 @@ mod tests {
         assert!(snapshot.contains("ferroada_waf_engine_unavailable_total"));
         assert!(snapshot.contains("ferroada_waf_l1_shadow_total"));
         assert!(snapshot.contains("ferroada_protocol_total{action=\"quarantine\"}"));
+        assert!(snapshot.contains("ferroada_policy_info"));
+        assert!(snapshot.contains("ferroada_policy_reload_total{result=\"rejected\"}"));
     }
 
     fn unique_sites() -> (String, String) {

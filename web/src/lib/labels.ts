@@ -36,6 +36,8 @@ export const EVENT_LABELS: Record<string, string> = {
   jwt_binding: "JWT (binding)",
   graphql: "limite GraphQL",
   grpc: "método gRPC",
+  policy_reload: "política recarregada",
+  policy_reload_rejected: "reload de política recusado",
   dlp_skip: "DLP não aplicado",
   dlp: "DLP",
   https_redirect: "redirecionamento HTTPS",

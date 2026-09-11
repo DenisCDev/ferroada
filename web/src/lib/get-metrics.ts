@@ -7,6 +7,8 @@ function allowDemo(): boolean {
 
 export function unavailableMetrics(): MetricsResult {
   return {
+    policy_version: "",
+    policy_signed: false,
     requests_total: 0,
     blocked: {},
     https_redirect: 0,

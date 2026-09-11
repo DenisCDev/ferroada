@@ -14,6 +14,7 @@ pub mod jwt;
 pub mod listen;
 pub mod metrics;
 pub mod openapi;
+pub mod policy;
 pub mod protocol;
 pub mod proxy;
 pub mod proxy_protocol;

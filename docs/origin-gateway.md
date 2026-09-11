@@ -680,6 +680,8 @@ ferroada                  # como hoje: Pingora Opt + proxy
 ferroada init [flags]     # novo; não arranca o proxy; --trusted-proxies auto = snapshot local
 ferroada healthcheck      # GET loopback /healthz; exit 0/1
 ferroada cidrs update     # operador; HTTP só aqui; nunca no proxy
+ferroada reload           # SIGHUP / sentinela: tenta o TOML novo; falha → last-known-good
+ferroada policy compile|sign  # snapshot JSON + Ed25519 opt-in
 ```
 
 Flags de `init` (lei): `--public-host`, `--origin`, `--topology`, `--out`, `--edge`, `--trusted-proxies`, `--dashboard-token`, `--static-placement`, `--supabase-host`, `--listen-mode`, `--non-interactive`. Recusa hostinger/vercel sem `--public-host`. Recusa `vps-supabase-cloud` opção 2 em `--non-interactive` sem `--supabase-host`. `--trusted-proxies auto` **não** busca rede.
@@ -700,6 +702,8 @@ Flags de `init` (lei): `--public-host`, `--origin`, `--topology`, `--out`, `--ed
 | `DLP_ACTION` | `redact` se `DLP_ENABLED=true` (compat) | 10 | `monitor` \| `redact` \| `block`; packs passam a `monitor` neste PR |
 | `SPOOL_DIR` | unset = spool off | 8 | só valida/wipe se alguma rota tem `max_decoded_body`; ficheiros `spool-*` |
 | `WAF_ENGINE` / timeout sidecar | `native` / 500 ms | 11 | `native` \| `coraza` |
+| `FERROADA_POLICY_PUBKEY` | unset | 18 | Ed25519 opt-in; sem ela o TOML solto arranca |
+| `FERROADA_POLICY_SIG` | `ferroada.policy.sig` | 18 | assinatura do snapshot compilado |
 | `[protocols]` | ver §3 | 4 | `inspect` vs ações de não-suportado |
 
 Compat: `DLP_ENABLED=false` continua a desligar. `WAF_REQUIRE_COMPLETE_PATHS` permanece. PR 1 não lista as linhas acima no `.env` gerado, salvo `TRUSTED_PROXIES` do snapshot.
@@ -1049,6 +1053,11 @@ Ordem de produto (packs primeiro) é consciente: o txt pedia Pingora → identid
 ### Onda 4 — planos, HA, assurance (placeholders)
 
 #### PR 18 — `feat: signed policy snapshots and last-known-good` (Fase 3)
+
+- **Ficheiros:** `src/policy.rs`, `src/config.rs`, `src/proxy.rs`, `src/main.rs`, `src/dashboard.rs`, `src/metrics.rs`, `ferroada.toml.example`, `README.md`, `tests/policy.rs`
+- **Deps:** openssl Ed25519 (já no crate). Sem control plane HTTP, sem consenso, sem GitOps, sem OIDC. Hot path: `RwLock` + `Arc<Config>`, zero crypto.
+- **Descrição:** Standalone last-known-good = o TOML/env que arrancou, compilado para JSON imutável `{format, source, body, attachments}` com `policy_version = sha256(blob)`. `ferroada reload` (SIGHUP / sentinela no Windows) tenta o ficheiro novo; parse ou assinatura inválidos logam, emitem `policy_reload_rejected` e seguem com o snapshot em memória. Ficheiro sumiu → a mesma recusa. `FERROADA_POLICY_PUBKEY` verifica Ed25519 no load; sem a chave o TOML solto continua válido. Dashboard/Prometheus expõem `policy_version`.
+- **Exit:** TOML válido no boot → 200. Reload com TOML quebrado → 200 com a política antiga + evento recusado. Snapshot com pubkey certa → aceita. Assinatura errada → recusa, last-known-good intacta. Sem pubkey o TOML solto arranca.
 
 #### PR 19 — `feat: pingora load balancing, health checks, circuit breaker` (Fase 7)
 

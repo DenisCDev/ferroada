@@ -13,6 +13,12 @@ type AuthState =
   | "misconfigured"
   | "unavailable";
 
+function shortPolicy(version: string | undefined): string {
+  if (!version) return "—";
+  const hex = version.replace(/^sha256:/, "");
+  return hex.length > 12 ? hex.slice(0, 12) : hex;
+}
+
 function demoMessage(reason: MetricsResult["demo_reason"]): string {
   if (reason === "unauthorized") {
     return "O token do proxy está ausente ou incorreto. Confira FERROADA_TOKEN.";
@@ -234,6 +240,10 @@ export function Dashboard({ initial }: { initial: MetricsResult }) {
         <div className="kpi">
           <dt>DLP</dt>
           <dd>{formatInt(data.dlp.cpf_masked + data.dlp.tokens_masked)}</dd>
+        </div>
+        <div className="kpi">
+          <dt>Política</dt>
+          <dd className="mono">{shortPolicy(data.policy_version)}</dd>
         </div>
       </dl>
 

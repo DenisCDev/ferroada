@@ -32,6 +32,8 @@ export const securityEventSchema = z.object({
 });
 
 export const ferroadaMetricsSchema = z.object({
+  policy_version: z.string().optional().default(""),
+  policy_signed: z.boolean().optional().default(false),
   requests_total: countSchema,
   blocked: z.record(z.string(), countSchema),
   https_redirect: countSchema,

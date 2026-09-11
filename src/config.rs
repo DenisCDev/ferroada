@@ -1,6 +1,8 @@
 use serde::Deserialize;
+use std::any::Any;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -417,6 +419,16 @@ impl Config {
         Self::from_toml_in(contents, Path::new("."))
     }
 
+    pub fn try_from_toml_in(contents: &str, base_dir: &Path) -> Result<Self, String> {
+        panic::catch_unwind(AssertUnwindSafe(|| Self::from_toml_in(contents, base_dir)))
+            .map_err(panic_payload)
+    }
+
+    pub fn try_from_target_url(target_url: &str) -> Result<Self, String> {
+        panic::catch_unwind(AssertUnwindSafe(|| Self::from_target_url(target_url)))
+            .map_err(panic_payload)
+    }
+
     pub fn from_toml_in(contents: &str, base_dir: &Path) -> Self {
         let file: ConfigFile = toml::from_str(contents)
             .unwrap_or_else(|error| panic!("Invalid ferroada.toml: {error}"));
@@ -573,6 +585,58 @@ impl Config {
 
     pub fn has_spool_routes(&self) -> bool {
         self.backends.iter().any(Backend::uses_spool)
+    }
+}
+
+/// Local files named by the TOML (OpenAPI, gRPC descriptor, JWKS on disk).
+/// Remote JWKS URLs stay out — their last-known-good is the JWT cache.
+pub fn referenced_policy_files(
+    contents: &str,
+    base_dir: &Path,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    let file: ConfigFile =
+        toml::from_str(contents).map_err(|error| format!("TOML inválido: {error}"))?;
+    let mut files = Vec::new();
+    for site in &file.sites {
+        match &site.openapi {
+            Some(OpenApiFile::Path(path)) => push_local_file(&mut files, path, base_dir),
+            Some(OpenApiFile::Table(table)) => push_local_file(&mut files, &table.spec, base_dir),
+            None => {}
+        }
+        if let Some(jwt) = &site.jwt {
+            if !looks_like_url(&jwt.jwks) {
+                push_local_file(&mut files, &jwt.jwks, base_dir);
+            }
+        }
+        if let Some(grpc) = &site.grpc {
+            push_local_file(&mut files, &grpc.descriptor, base_dir);
+        }
+    }
+    Ok(files)
+}
+
+fn looks_like_url(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with("http://") || trimmed.starts_with("https://")
+}
+
+fn push_local_file(files: &mut Vec<(String, PathBuf)>, spec: &str, base: &Path) {
+    let path = Path::new(spec);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    files.push((spec.to_string(), resolved));
+}
+
+fn panic_payload(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else {
+        "política inválida".to_string()
     }
 }
 
