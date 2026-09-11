@@ -30,6 +30,9 @@ openssl-sys = "0.9"
 openssl-probe = "0.1"
 base64 = "0.22"
 brotli = "9.0.0"
+prost = "0.13"
+prost-types = "0.13"
+prost-reflect = "0.14"
 
 [dev-dependencies]
 brotli = "9.0.0"

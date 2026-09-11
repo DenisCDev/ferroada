@@ -64,6 +64,7 @@ use crate::client_ip::{ClientIpConfig, RiskIdentity, TrustedProxies};
 use crate::config::{Config, InspectionDisposition, InspectionPolicy};
 use crate::dlp::{self, DlpAction};
 use crate::graphql::{GraphqlFailure, GraphqlIdentity, GraphqlVerdict};
+use crate::grpc::{self, GrpcFailure, GrpcVerdict};
 use crate::headers;
 use crate::jwt::{self, JwtFailure, JwtPrincipal};
 use crate::metrics;
@@ -381,6 +382,7 @@ pub struct FerroadaCtx {
     openapi_match: Option<MatchedOp>,
     jwt: Option<JwtPrincipal>,
     spool: Option<SpoolHandle>,
+    grpc_timeout: Option<String>,
     concurrency_guard: Option<ConcurrencyGuard>,
     dlp_budget: Arc<ByteBudget>,
     dlp_reserved: usize,
@@ -450,6 +452,7 @@ impl ProxyHttp for FerroadaProxy {
             openapi_match: None,
             jwt: None,
             spool: None,
+            grpc_timeout: None,
             concurrency_guard: None,
             dlp_budget: Arc::clone(&self.dlp_budget),
             dlp_reserved: 0,
@@ -877,12 +880,18 @@ impl ProxyHttp for FerroadaProxy {
             .get("Upgrade")
             .and_then(|v| v.to_str().ok());
         let inspection_policy = ctx.inspection_policy;
+        let grpc_policy = ctx
+            .backend
+            .as_ref()
+            .and_then(|backend| backend.grpc.as_ref())
+            .is_some();
         let protocol_verdict = self.config.protocols.evaluate(&RequestFacts {
             version: session.req_header().version,
             upgrade,
             content_encoding: ctx.request_content_encoding.as_deref(),
             content_type: ctx.request_content_type.as_deref(),
             require_complete: inspection_policy.require_complete,
+            grpc_policy,
         });
         protocol::record(protocol_verdict, &client_addr, &uri, &ctx.site_scope);
         if protocol_verdict.blocked_status().is_some() {
@@ -892,7 +901,8 @@ impl ProxyHttp for FerroadaProxy {
             };
             return self.send_403(session, reason).await;
         }
-        ctx.skip_body_waf = protocol_verdict.skips_body_waf();
+        ctx.skip_body_waf = protocol_verdict.skips_body_waf()
+            || (grpc_policy && grpc::is_grpc_content_type(ctx.request_content_type.as_deref()));
 
         // WAF inspection on URI + headers. Authorization is identity, not a
         // WAF input — matching it would put the token in the event detail.
@@ -925,6 +935,9 @@ impl ProxyHttp for FerroadaProxy {
             .apply_openapi_envelope(session, ctx, &method, &uri)
             .await?
         {
+            return Ok(true);
+        }
+        if self.apply_grpc_headers(session, ctx, &method, &uri).await? {
             return Ok(true);
         }
 
@@ -1197,6 +1210,9 @@ impl ProxyHttp for FerroadaProxy {
                 if self.apply_graphql(session, ctx, l1_body).await? {
                     return Ok(true);
                 }
+                if self.apply_grpc_body(session, ctx, l1_body).await? {
+                    return Ok(true);
+                }
             } else if ctx.openapi_match.is_some()
                 || ctx
                     .backend
@@ -1207,6 +1223,11 @@ impl ProxyHttp for FerroadaProxy {
                     .backend
                     .as_ref()
                     .and_then(|backend| backend.graphql_for(&ctx.request_uri))
+                    .is_some()
+                || ctx
+                    .backend
+                    .as_ref()
+                    .and_then(|backend| backend.grpc.as_ref())
                     .is_some()
             {
                 let wire = if spooling {
@@ -1240,6 +1261,9 @@ impl ProxyHttp for FerroadaProxy {
                 if self.apply_graphql(session, ctx, &wire).await? {
                     return Ok(true);
                 }
+                if self.apply_grpc_body(session, ctx, &wire).await? {
+                    return Ok(true);
+                }
             }
 
             // Keep the global reservation until the request finishes: Pingora now
@@ -1268,6 +1292,9 @@ impl ProxyHttp for FerroadaProxy {
                 return Ok(true);
             }
             if self.apply_graphql(session, ctx, &[]).await? {
+                return Ok(true);
+            }
+            if self.apply_grpc_body(session, ctx, &[]).await? {
                 return Ok(true);
             }
         }
@@ -1920,6 +1947,10 @@ fn stamp_upstream_request(
         );
     }
     apply_origin_secret(upstream_request, origin_secret);
+    if let Some(timeout) = &ctx.grpc_timeout {
+        upstream_request.remove_header("grpc-timeout");
+        let _ = upstream_request.insert_header("grpc-timeout", timeout.clone());
+    }
 }
 
 fn strip_hop_by_hop_headers(request: &mut RequestHeader) {
@@ -2322,6 +2353,132 @@ impl FerroadaProxy {
                 self.send_403(session, "requisição fora do contrato OpenAPI")
                     .await
             }
+        }
+    }
+
+    async fn apply_grpc_headers(
+        &self,
+        session: &mut Session,
+        ctx: &mut FerroadaCtx,
+        method: &str,
+        uri: &str,
+    ) -> Result<bool> {
+        let Some(policy) = ctx
+            .backend
+            .as_ref()
+            .and_then(|backend| backend.grpc.as_ref())
+        else {
+            return Ok(false);
+        };
+        let grpc_timeout = session
+            .req_header()
+            .headers
+            .get("grpc-timeout")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let event_uri = uri.split('?').next().unwrap_or(uri);
+        match policy.check_headers(
+            method,
+            uri,
+            ctx.request_content_type.as_deref(),
+            grpc_timeout.as_deref(),
+        ) {
+            GrpcVerdict::Skip => Ok(false),
+            GrpcVerdict::Allow { timeout } => {
+                ctx.grpc_timeout = timeout.or(grpc_timeout);
+                Ok(false)
+            }
+            GrpcVerdict::Deny(GrpcFailure::ParseError) => {
+                self.deny_grpc_parse(session, ctx, event_uri).await
+            }
+            GrpcVerdict::Deny(failure) => {
+                let detail = failure.detail().to_string();
+                metrics::record_block_in(
+                    &ctx.site_scope,
+                    "grpc",
+                    &ctx.client_addr,
+                    event_uri,
+                    &detail,
+                );
+                self.send_403(session, &format!("método gRPC recusado ({detail})"))
+                    .await
+            }
+        }
+    }
+
+    async fn apply_grpc_body(
+        &self,
+        session: &mut Session,
+        ctx: &FerroadaCtx,
+        body: &[u8],
+    ) -> Result<bool> {
+        let Some(policy) = ctx
+            .backend
+            .as_ref()
+            .and_then(|backend| backend.grpc.as_ref())
+        else {
+            return Ok(false);
+        };
+        let method = session.req_header().method.as_str();
+        let event_uri = ctx
+            .request_uri
+            .split('?')
+            .next()
+            .unwrap_or(ctx.request_uri.as_str());
+        match policy.check_body(
+            method,
+            &ctx.request_uri,
+            ctx.request_content_type.as_deref(),
+            body,
+        ) {
+            GrpcVerdict::Skip | GrpcVerdict::Allow { .. } => Ok(false),
+            GrpcVerdict::Deny(GrpcFailure::ParseError) => {
+                self.deny_grpc_parse(session, ctx, event_uri).await
+            }
+            GrpcVerdict::Deny(failure) => {
+                let detail = failure.detail().to_string();
+                metrics::record_block_in(
+                    &ctx.site_scope,
+                    "grpc",
+                    &ctx.client_addr,
+                    event_uri,
+                    &detail,
+                );
+                self.send_403(session, &format!("método gRPC recusado ({detail})"))
+                    .await
+            }
+        }
+    }
+
+    async fn deny_grpc_parse(
+        &self,
+        session: &mut Session,
+        ctx: &FerroadaCtx,
+        event_uri: &str,
+    ) -> Result<bool> {
+        let outcome = InspectionOutcome::ParseError;
+        match ctx.inspection_policy.disposition(outcome) {
+            InspectionDisposition::Deny => {
+                record_inspection_outcome(
+                    outcome,
+                    &ctx.client_addr,
+                    event_uri,
+                    true,
+                    &ctx.site_scope,
+                );
+                self.send_403(session, "gRPC inválido (ParseError)").await
+            }
+            InspectionDisposition::Monitor => {
+                record_inspection_outcome(
+                    outcome,
+                    &ctx.client_addr,
+                    event_uri,
+                    false,
+                    &ctx.site_scope,
+                );
+                Ok(false)
+            }
+            InspectionDisposition::Allow => Ok(false),
         }
     }
 

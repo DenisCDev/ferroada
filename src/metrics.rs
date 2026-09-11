@@ -41,6 +41,7 @@ pub struct Metrics {
     pub blocked_jwt: AtomicU64,
     pub blocked_jwt_binding: AtomicU64,
     pub blocked_graphql: AtomicU64,
+    pub blocked_grpc: AtomicU64,
     pub blocked_dlp_partial: AtomicU64,
     pub https_redirect: AtomicU64,
     pub waf_inspection_complete: AtomicU64,
@@ -115,6 +116,7 @@ impl Metrics {
             blocked_jwt: AtomicU64::new(0),
             blocked_jwt_binding: AtomicU64::new(0),
             blocked_graphql: AtomicU64::new(0),
+            blocked_grpc: AtomicU64::new(0),
             blocked_dlp_partial: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
             waf_inspection_complete: AtomicU64::new(0),
@@ -259,6 +261,7 @@ pub fn record_block_in(
         "jwt" => &METRICS.blocked_jwt,
         "jwt_binding" => &METRICS.blocked_jwt_binding,
         "graphql" => &METRICS.blocked_graphql,
+        "grpc" => &METRICS.blocked_grpc,
         "dlp_partial_block" => &METRICS.blocked_dlp_partial,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
@@ -478,6 +481,7 @@ pub fn snapshot_json() -> String {
             "jwt": m.blocked_jwt.load(Ordering::Relaxed),
             "jwt_binding": m.blocked_jwt_binding.load(Ordering::Relaxed),
             "graphql": m.blocked_graphql.load(Ordering::Relaxed),
+            "grpc": m.blocked_grpc.load(Ordering::Relaxed),
             "dlp_partial_block": m.blocked_dlp_partial.load(Ordering::Relaxed)
         },
         "waf_inspection": {
@@ -549,6 +553,7 @@ pub fn snapshot_prometheus() -> String {
         ("jwt", &metrics.blocked_jwt),
         ("jwt_binding", &metrics.blocked_jwt_binding),
         ("graphql", &metrics.blocked_graphql),
+        ("grpc", &metrics.blocked_grpc),
         ("dlp_partial_block", &metrics.blocked_dlp_partial),
     ];
     let mut output = format!(
