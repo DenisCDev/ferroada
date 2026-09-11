@@ -94,18 +94,37 @@ impl DashboardService {
 
     async fn upstreams_ready(&self) -> bool {
         let deadline = Instant::now() + Duration::from_secs(1);
-        let upstreams = self.backend_addresses();
-        if upstreams.is_empty() {
+        let groups = if let Some(policy) = &self.policy {
+            policy.config().origin_groups()
+        } else {
+            let addrs = self.backend_addresses();
+            if addrs.is_empty() {
+                Vec::new()
+            } else {
+                vec![addrs]
+            }
+        };
+        if groups.is_empty() {
             return false;
         }
-        for address in upstreams {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        for group in groups {
+            if group.is_empty() {
                 return false;
-            };
-            let timeout = remaining.min(Duration::from_millis(250));
-            let result =
-                tokio::time::timeout(timeout, tokio::net::TcpStream::connect(address)).await;
-            if !matches!(result, Ok(Ok(_))) {
+            }
+            let mut any_up = false;
+            for address in group {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return false;
+                };
+                let timeout = remaining.min(Duration::from_millis(250));
+                let result =
+                    tokio::time::timeout(timeout, tokio::net::TcpStream::connect(address)).await;
+                if matches!(result, Ok(Ok(_))) {
+                    any_up = true;
+                    break;
+                }
+            }
+            if !any_up {
                 return false;
             }
         }

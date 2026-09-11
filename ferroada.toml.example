@@ -53,6 +53,12 @@ unknown_upgrade = "deny"
 [[sites]]
 hosts = ["meusite.com", "www.meusite.com"]
 backend = "http://backend-a:8080"
+# Vários origins: round-robin + health GET (default /health/ready).
+# String única = o comportamento de sempre, sem discovery.
+# backend = ["http://backend-a:8080", "http://backend-a-b:8080"]
+# health_path = "/health/ready"
+# origin_client_cert = "./origin-client.pem"
+# origin_client_key = "./origin-client-key.pem"
 waf_profile = "wordpress"
 require_complete_waf_inspection = ["/api/payment", "/api/admin/"]
 # l1.shadow = true

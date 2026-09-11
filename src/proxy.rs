@@ -69,6 +69,7 @@ use crate::headers;
 use crate::jwt::{self, JwtFailure, JwtPrincipal};
 use crate::metrics;
 use crate::openapi::{BodyVerdict, EnvelopeVerdict, MatchedOp};
+use crate::origin::{self, OriginPools, PickedOrigin};
 use crate::policy::PolicyStore;
 use crate::protocol::{self, ProtocolVerdict, RequestFacts};
 use crate::rate_limit::RateLimiter;
@@ -162,6 +163,8 @@ pub struct FerroadaProxy {
     dlp_action: DlpAction,
     origin_secret: OriginSecretConfig,
     waf_engine: WafEngine,
+    origins: OriginPools,
+    extra_retries: u32,
 }
 
 pub struct BoundedBodyBuffer {
@@ -307,7 +310,7 @@ impl FerroadaProxy {
             );
         }
         Self {
-            policy,
+            policy: Arc::clone(&policy),
             rate_limiter,
             trusted_proxies,
             client_ip,
@@ -324,6 +327,8 @@ impl FerroadaProxy {
             dlp_action: dlp::action(),
             origin_secret,
             waf_engine: WafEngine::native(),
+            origins: OriginPools::from_policy(&policy),
+            extra_retries: origin::configured_extra_retries(),
         }
     }
 
@@ -393,6 +398,13 @@ pub struct FerroadaCtx {
     pub request_https: bool,
     pub backend: Option<crate::config::Backend>,
     pub risk_identity: Option<RiskIdentity>,
+    method: String,
+    balanced_origin: bool,
+    request_has_body: bool,
+    upstream_retries: u32,
+    tried_origins: Vec<std::net::SocketAddr>,
+    selected_origin: Option<std::net::SocketAddr>,
+    origin_host: Option<String>,
     inspection_policy: InspectionPolicy,
     openapi_match: Option<MatchedOp>,
     jwt: Option<JwtPrincipal>,
@@ -463,6 +475,13 @@ impl ProxyHttp for FerroadaProxy {
             request_https: false,
             backend: None,
             risk_identity: None,
+            method: String::new(),
+            balanced_origin: false,
+            request_has_body: false,
+            upstream_retries: 0,
+            tried_origins: Vec::new(),
+            selected_origin: None,
+            origin_host: None,
             inspection_policy: InspectionPolicy::open(),
             openapi_match: None,
             jwt: None,
@@ -643,6 +662,7 @@ impl ProxyHttp for FerroadaProxy {
                 return Ok(true);
             }
         }
+        self.origins.sync(&self.policy);
         let site = ctx
             .backend
             .as_ref()
@@ -650,6 +670,10 @@ impl ProxyHttp for FerroadaProxy {
             .site_scope
             .clone();
         ctx.site_scope = site.clone();
+        ctx.balanced_origin = ctx
+            .backend
+            .as_ref()
+            .is_some_and(|backend| backend.is_balanced());
         ctx.inspection_policy = ctx
             .backend
             .as_ref()
@@ -800,6 +824,8 @@ impl ProxyHttp for FerroadaProxy {
 
         // Method restriction check
         let method = session.req_header().method.as_str().to_string();
+        ctx.method = method.clone();
+        ctx.request_has_body = !session.as_mut().is_body_empty();
         if matches!(
             shield::check_method(&method, &uri, &client_addr, &ctx.site_scope),
             ShieldVerdict::BlockMethod
@@ -1362,17 +1388,43 @@ impl ProxyHttp for FerroadaProxy {
         }
     }
 
+    async fn proxy_upstream_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<bool> {
+        if self.shed_unhealthy_origin(session, ctx).await? {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     async fn fail_to_proxy(
         &self,
         session: &mut Session,
         e: &Error,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> FailToProxy {
         let code = match e.etype() {
             ErrorType::HTTPStatus(code) => *code,
             _ => 502,
         };
         if session.response_written().is_none() {
+            if code == 503 {
+                metrics::record_block_in(
+                    &ctx.site_scope,
+                    "503",
+                    &ctx.client_addr,
+                    &ctx.request_uri,
+                    "Nenhum origin saudável",
+                );
+                if self.send_503(session).await.is_ok() {
+                    return FailToProxy {
+                        error_code: 503,
+                        can_reuse_downstream: false,
+                    };
+                }
+            }
             if let Err(err) = session.respond_error(code).await {
                 tracing::warn!(error = %err, status = code, "failed to write error response");
             }
@@ -1384,7 +1436,7 @@ impl ProxyHttp for FerroadaProxy {
     }
 
     fn suppress_error_log(&self, _session: &Session, _ctx: &Self::CTX, error: &Error) -> bool {
-        matches!(error.etype(), ErrorType::HTTPStatus(403 | 413))
+        matches!(error.etype(), ErrorType::HTTPStatus(403 | 413 | 503))
     }
 
     async fn upstream_peer(
@@ -1392,16 +1444,56 @@ impl ProxyHttp for FerroadaProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let backend = ctx
-            .backend
-            .as_ref()
-            .expect("backend must be resolved in request_filter");
-        info!(addr = %backend.addr, tls = backend.tls, host = %backend.host, "Connecting to upstream");
-        let mut peer = HttpPeer::new(backend.addr, backend.tls, backend.host.clone());
-        peer.options.connection_timeout = Some(*UPSTREAM_CONNECT_TIMEOUT);
-        peer.options.read_timeout = Some(*UPSTREAM_READ_TIMEOUT);
-        peer.options.write_timeout = Some(*UPSTREAM_WRITE_TIMEOUT);
-        Ok(Box::new(peer))
+        let Some(picked) = self.pick_origin(ctx) else {
+            return Error::e_explain(ErrorType::HTTPStatus(503), "nenhum origin saudável");
+        };
+        info!(
+            addr = %picked.addr,
+            tls = picked.tls,
+            host = %picked.host,
+            "Connecting to upstream"
+        );
+        ctx.selected_origin = Some(picked.addr);
+        ctx.origin_host = Some(picked.host.clone());
+        if !ctx.tried_origins.contains(&picked.addr) {
+            ctx.tried_origins.push(picked.addr);
+        }
+        Ok(Box::new(picked.http_peer(
+            *UPSTREAM_CONNECT_TIMEOUT,
+            *UPSTREAM_READ_TIMEOUT,
+            *UPSTREAM_WRITE_TIMEOUT,
+        )))
+    }
+
+    fn fail_to_connect(
+        &self,
+        session: &mut Session,
+        _peer: &HttpPeer,
+        ctx: &mut Self::CTX,
+        mut e: Box<Error>,
+    ) -> Box<Error> {
+        self.mark_origin_failure(ctx);
+        if self.should_retry_upstream(session, ctx) {
+            ctx.upstream_retries += 1;
+            e.set_retry(true);
+        }
+        e
+    }
+
+    fn error_while_proxy(
+        &self,
+        _peer: &HttpPeer,
+        session: &mut Session,
+        mut e: Box<Error>,
+        ctx: &mut Self::CTX,
+        _client_reused: bool,
+    ) -> Box<Error> {
+        self.mark_origin_failure(ctx);
+        if self.should_retry_upstream(session, ctx) {
+            ctx.upstream_retries += 1;
+            e.set_retry(true);
+        }
+        e
     }
 
     async fn upstream_request_filter(
@@ -1420,6 +1512,7 @@ impl ProxyHttp for FerroadaProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        self.mark_origin_outcome(ctx, upstream_response.status.as_u16());
         self.decorate_origin_response(upstream_response, ctx)
     }
 
@@ -1938,9 +2031,8 @@ fn stamp_upstream_request(
     let backend = ctx.backend.as_ref().expect("backend must be resolved");
     strip_hop_by_hop_headers(upstream_request);
     strip_untrusted_forwarding_headers(upstream_request);
-    upstream_request
-        .insert_header("Host", &backend.host)
-        .unwrap();
+    let host = ctx.origin_host.as_ref().unwrap_or(&backend.host);
+    upstream_request.insert_header("Host", host).unwrap();
     upstream_request
         .insert_header("X-Real-IP", &ctx.client_addr)
         .unwrap();
@@ -2002,6 +2094,79 @@ fn strip_untrusted_forwarding_headers(request: &mut RequestHeader) {
 }
 
 impl FerroadaProxy {
+    fn pick_origin(&self, ctx: &FerroadaCtx) -> Option<PickedOrigin> {
+        ctx.backend
+            .as_ref()
+            .and_then(|backend| self.origins.pick(backend, &ctx.tried_origins))
+    }
+
+    fn retry_budget(&self, ctx: &FerroadaCtx) -> u32 {
+        origin::extra_retry_budget(self.extra_retries, ctx.balanced_origin)
+    }
+
+    fn should_retry_upstream(&self, session: &Session, ctx: &FerroadaCtx) -> bool {
+        if ctx.upstream_retries >= self.retry_budget(ctx) {
+            return false;
+        }
+        if session.response_written().is_some() {
+            return false;
+        }
+        if !origin::method_is_idempotent(session.req_header().method.as_str()) {
+            return false;
+        }
+        if ctx.request_has_body && session.retry_buffer_truncated() {
+            return false;
+        }
+        true
+    }
+
+    fn mark_origin_failure(&self, ctx: &FerroadaCtx) {
+        let Some(backend) = ctx.backend.as_ref() else {
+            return;
+        };
+        if let Some(addr) = ctx.selected_origin {
+            self.origins.record_failure(backend, addr);
+        }
+    }
+
+    fn mark_origin_outcome(&self, ctx: &FerroadaCtx, status: u16) {
+        let Some(backend) = ctx.backend.as_ref() else {
+            return;
+        };
+        let Some(addr) = ctx.selected_origin else {
+            return;
+        };
+        if status >= 500 {
+            self.origins.record_failure(backend, addr);
+        } else {
+            self.origins.record_success(backend, addr);
+        }
+    }
+
+    async fn shed_unhealthy_origin(
+        &self,
+        session: &mut Session,
+        ctx: &mut FerroadaCtx,
+    ) -> Result<bool> {
+        let Some(backend) = ctx.backend.as_ref() else {
+            return Ok(false);
+        };
+        if !backend.is_balanced() {
+            return Ok(false);
+        }
+        if self.origins.has_ready(backend) {
+            return Ok(false);
+        }
+        metrics::record_block_in(
+            &ctx.site_scope,
+            "503",
+            &ctx.client_addr,
+            &ctx.request_uri,
+            "Nenhum origin saudável",
+        );
+        self.send_503(session).await
+    }
+
     async fn replay_spool_to_origin(
         &self,
         session: &mut Session,
@@ -2031,18 +2196,28 @@ impl FerroadaProxy {
         ctx: &mut FerroadaCtx,
         body: Vec<u8>,
     ) -> Result<bool> {
-        let backend = ctx
-            .backend
-            .as_ref()
-            .expect("backend must be resolved")
-            .clone();
+        if self.shed_unhealthy_origin(session, ctx).await? {
+            return Ok(true);
+        }
+        let Some(picked) = self.pick_origin(ctx) else {
+            metrics::record_block_in(
+                &ctx.site_scope,
+                "503",
+                &ctx.client_addr,
+                &ctx.request_uri,
+                "Nenhum origin saudável",
+            );
+            return self.send_503(session).await;
+        };
+        ctx.selected_origin = Some(picked.addr);
+        ctx.origin_host = Some(picked.host.clone());
         let mut req = session.req_header().clone();
         stamp_upstream_request(&mut req, ctx, &self.origin_secret);
         req.remove_header("Transfer-Encoding");
         req.insert_header("Content-Length", body.len().to_string())?;
         let head = http11_request_head(&req);
-        let addr = backend.addr;
-        let tls_sni = backend.tls.then_some(backend.host.clone());
+        let addr = picked.addr;
+        let tls_sni = picked.tls.then_some(picked.host.clone());
         let max_response = *MAX_RESPONSE_BUFFER;
         let roundtrip = tokio::task::spawn_blocking(move || {
             origin_roundtrip_blocking(addr, tls_sni, &head, &body, max_response)
@@ -2052,10 +2227,26 @@ impl FerroadaProxy {
             Ok(Ok(parsed)) => parsed,
             Ok(Err(error)) => {
                 tracing::warn!(error = %error, "origin roundtrip failed");
+                self.mark_origin_failure(ctx);
+                metrics::record_block_in(
+                    &ctx.site_scope,
+                    "503",
+                    &ctx.client_addr,
+                    &ctx.request_uri,
+                    "Origin recusou a conexão",
+                );
                 return self.send_503(session).await;
             }
             Err(error) => {
                 tracing::warn!(error = %error, "origin roundtrip task failed");
+                self.mark_origin_failure(ctx);
+                metrics::record_block_in(
+                    &ctx.site_scope,
+                    "503",
+                    &ctx.client_addr,
+                    &ctx.request_uri,
+                    "Origin recusou a conexão",
+                );
                 return self.send_503(session).await;
             }
         };

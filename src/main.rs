@@ -110,8 +110,12 @@ fn main() {
         info!("PROXY protocol v2 obrigatório neste listener; prefixo inválido recusa a conexão");
     }
 
+    // Cap is MAX_UPSTREAM_RETRIES ≤ 3 extra; Pingora only retries when we
+    // mark the error. Keep headroom so a later reload to several origins
+    // can fail over without restarting the process.
     let server_conf = ServerConf {
-        max_retries: total_upstream_attempts(std::env::var("MAX_UPSTREAM_RETRIES").ok().as_deref()),
+        max_retries: total_upstream_attempts(std::env::var("MAX_UPSTREAM_RETRIES").ok().as_deref())
+            .max(4),
         grace_period_seconds: Some(env_u64("GRACE_PERIOD_SECS", 5)),
         graceful_shutdown_timeout_seconds: Some(env_u64("GRACEFUL_SHUTDOWN_TIMEOUT_SECS", 30)),
         threads: std::env::var("PROXY_THREADS")

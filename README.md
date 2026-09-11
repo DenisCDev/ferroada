@@ -448,7 +448,7 @@ Toda a configuração é feita por variáveis de ambiente:
 | `MAX_ACTIVE_CONNECTIONS` | `10000` | Teto de sessões downstream ativas, incluindo espera por headers HTTP/1 |
 | `MAX_HEADER_COUNT` | `100` | Máximo de headers por request |
 | `MAX_HEADER_BYTES` | `65536` | Soma máxima de nomes e valores dos headers |
-| `MAX_UPSTREAM_RETRIES` | `0` | Novas tentativas após a primeira; limitado a no máximo 3 |
+| `MAX_UPSTREAM_RETRIES` | `0` | Novas tentativas após a primeira; limitado a no máximo 3. Com vários origins, GET/HEAD/OPTIONS ganha ao menos 1 retry se o origin resetar antes de responder. POST/PATCH não retentam. |
 | `PROXY_THREADS` | CPUs disponíveis (máx. 64) | Threads por serviço |
 | `GRACE_PERIOD_SECS` | `5` | Espera antes da fase final de shutdown gracioso |
 | `GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `30` | Limite da fase final de shutdown gracioso |
@@ -509,6 +509,7 @@ Para proteger vários backends com um único deploy, crie um arquivo `ferroada.t
 [[sites]]
 hosts = ["meusite.com", "www.meusite.com"]
 backend = "http://backend-a:8080"
+# backend = ["http://a:8080", "http://b:8080"]  # round-robin + health GET /health/ready
 waf_profile = "wordpress"
 require_complete_waf_inspection = ["/api/payment", "/api/admin/"]
 

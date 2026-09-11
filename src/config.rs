@@ -1,9 +1,14 @@
+use pingora::tls::pkey::PKey;
+use pingora::tls::x509::X509;
+use pingora::utils::tls::CertKey;
 use serde::Deserialize;
 use std::any::Any;
 use std::collections::HashMap;
+use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::info;
 
 use crate::dlp::{self, DlpField};
@@ -43,7 +48,13 @@ struct WafSection {
 #[serde(deny_unknown_fields)]
 struct SiteEntry {
     hosts: Vec<String>,
-    backend: String,
+    backend: BackendSpec,
+    #[serde(default)]
+    health_path: Option<String>,
+    #[serde(default)]
+    origin_client_cert: Option<String>,
+    #[serde(default)]
+    origin_client_key: Option<String>,
     #[serde(default)]
     require_complete_waf_inspection: Vec<String>,
     #[serde(default)]
@@ -63,6 +74,33 @@ struct SiteEntry {
     #[serde(default)]
     dlp: DlpFile,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BackendSpec {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl BackendSpec {
+    fn urls(&self) -> Vec<&str> {
+        match self {
+            Self::One(url) => vec![url.as_str()],
+            Self::Many(urls) => urls.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+impl fmt::Display for BackendSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::One(url) => f.write_str(url),
+            Self::Many(urls) => write!(f, "{}", urls.join(", ")),
+        }
+    }
+}
+
+pub const DEFAULT_HEALTH_PATH: &str = "/health/ready";
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -249,6 +287,13 @@ impl Default for SiteL1 {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct OriginEndpoint {
+    pub addr: SocketAddr,
+    pub host: String,
+    pub tls: bool,
+}
+
 #[derive(Clone)]
 pub struct Backend {
     pub addr: SocketAddr,
@@ -256,6 +301,9 @@ pub struct Backend {
     pub site_scope: String,
     pub redirect_host: Option<String>,
     pub tls: bool,
+    pub origins: Vec<OriginEndpoint>,
+    pub health_path: String,
+    pub origin_mtls: Option<Arc<CertKey>>,
     pub waf_profile: WafProfile,
     routes: Vec<RouteInspection>,
     l1: SiteL1,
@@ -340,6 +388,10 @@ impl Backend {
             fields.extend(route.dlp_fields.iter().cloned());
         }
         fields
+    }
+
+    pub fn is_balanced(&self) -> bool {
+        self.origins.len() > 1
     }
 
     pub fn graphql_for(&self, uri: &str) -> Option<GraphqlPolicy> {
@@ -463,8 +515,9 @@ impl Config {
                 .grpc
                 .as_ref()
                 .map(|file| load_grpc(file, base_dir, site_host));
+            let origin_urls = site.backend.urls();
             let mut backend = resolve_site(
-                &site.backend,
+                &origin_urls,
                 parse_path_prefixes(site.require_complete_waf_inspection.iter()),
                 site.routes,
                 site.waf_profile
@@ -474,6 +527,13 @@ impl Config {
                 site_l1,
                 openapi,
                 jwt,
+            );
+            backend.health_path = parse_health_path(site.health_path.as_deref());
+            backend.origin_mtls = load_origin_mtls(
+                site.origin_client_cert.as_deref(),
+                site.origin_client_key.as_deref(),
+                base_dir,
+                site_host,
             );
             backend.graphql = graphql;
             backend.grpc = grpc;
@@ -512,7 +572,7 @@ impl Config {
             .unwrap_or_else(waf::default_profile);
         let default_idx = file.default_backend.map(|url| {
             let mut backend = resolve_site(
-                &url,
+                &[url.as_str()],
                 default_paths,
                 Vec::new(),
                 default_profile,
@@ -580,7 +640,25 @@ impl Config {
     }
 
     pub fn backend_addresses(&self) -> Vec<SocketAddr> {
-        self.backends.iter().map(|backend| backend.addr).collect()
+        self.backends
+            .iter()
+            .flat_map(|backend| backend.origins.iter().map(|origin| origin.addr))
+            .collect()
+    }
+
+    pub fn all_backends(&self) -> &[Backend] {
+        &self.backends
+    }
+
+    pub fn has_multi_origin(&self) -> bool {
+        self.backends.iter().any(Backend::is_balanced)
+    }
+
+    pub fn origin_groups(&self) -> Vec<Vec<SocketAddr>> {
+        self.backends
+            .iter()
+            .map(|backend| backend.origins.iter().map(|origin| origin.addr).collect())
+            .collect()
     }
 
     pub fn has_spool_routes(&self) -> bool {
@@ -610,6 +688,12 @@ pub fn referenced_policy_files(
         }
         if let Some(grpc) = &site.grpc {
             push_local_file(&mut files, &grpc.descriptor, base_dir);
+        }
+        if let Some(cert) = &site.origin_client_cert {
+            push_local_file(&mut files, cert, base_dir);
+        }
+        if let Some(key) = &site.origin_client_key {
+            push_local_file(&mut files, key, base_dir);
         }
     }
     Ok(files)
@@ -649,7 +733,7 @@ fn resolve_url(
     jwt: Option<JwtPolicy>,
 ) -> Backend {
     resolve_site(
-        url,
+        &[url],
         require_complete_waf_inspection,
         Vec::new(),
         waf_profile,
@@ -707,7 +791,7 @@ fn load_jwt(file: &JwtFile, base_dir: &Path, site_host: Option<&str>) -> JwtPoli
 }
 
 fn resolve_site(
-    url: &str,
+    urls: &[&str],
     require_complete_waf_inspection: Vec<String>,
     route_entries: Vec<SiteRouteEntry>,
     waf_profile: WafProfile,
@@ -715,6 +799,49 @@ fn resolve_site(
     openapi: Option<OpenApiPolicy>,
     jwt: Option<JwtPolicy>,
 ) -> Backend {
+    if urls.is_empty() {
+        panic!("Cada site precisa de ao menos um backend");
+    }
+    let mut origins = Vec::new();
+    for url in urls {
+        let origin = parse_origin_url(url);
+        if origins
+            .iter()
+            .any(|existing: &OriginEndpoint| existing.addr == origin.addr)
+        {
+            panic!("backend duplicado no site: {url}");
+        }
+        origins.push(origin);
+    }
+    if origins.is_empty() {
+        panic!("Cada site precisa de ao menos um backend");
+    }
+    let tls = origins[0].tls;
+    if origins.iter().any(|origin| origin.tls != tls) {
+        panic!("Todos os backends de um site precisam usar o mesmo esquema http/https");
+    }
+    let first = origins[0].clone();
+    Backend {
+        addr: first.addr,
+        site_scope: first.host.to_ascii_lowercase(),
+        redirect_host: None,
+        host: first.host,
+        tls: first.tls,
+        origins,
+        health_path: DEFAULT_HEALTH_PATH.to_string(),
+        origin_mtls: None,
+        waf_profile,
+        routes: merge_inspection_routes(require_complete_waf_inspection, route_entries),
+        l1,
+        openapi,
+        jwt,
+        graphql: None,
+        grpc: None,
+        dlp_fields: Vec::new(),
+    }
+}
+
+fn parse_origin_url(url: &str) -> OriginEndpoint {
     let tls = url.starts_with("https://");
     let without_scheme = url
         .strip_prefix("https://")
@@ -739,20 +866,75 @@ fn resolve_site(
         .next()
         .unwrap_or_else(|| panic!("No addresses for {addr_str}"));
 
-    Backend {
-        addr,
-        site_scope: host.to_ascii_lowercase(),
-        redirect_host: None,
-        host,
-        tls,
-        waf_profile,
-        routes: merge_inspection_routes(require_complete_waf_inspection, route_entries),
-        l1,
-        openapi,
-        jwt,
-        graphql: None,
-        grpc: None,
-        dlp_fields: Vec::new(),
+    OriginEndpoint { addr, host, tls }
+}
+
+fn parse_health_path(raw: Option<&str>) -> String {
+    let path = raw.unwrap_or(DEFAULT_HEALTH_PATH).trim();
+    if path.is_empty()
+        || !path.starts_with('/')
+        || path.contains('?')
+        || path.contains('#')
+        || path.contains(char::is_whitespace)
+    {
+        panic!("health_path deve ser um path absoluto sem query: {path:?}");
+    }
+    path.to_string()
+}
+
+fn load_origin_mtls(
+    cert: Option<&str>,
+    key: Option<&str>,
+    base_dir: &Path,
+    site_host: Option<&str>,
+) -> Option<Arc<CertKey>> {
+    match (cert, key) {
+        (None, None) => None,
+        (Some(cert), Some(key)) => Some(read_origin_mtls(cert, key, base_dir, site_host)),
+        _ => panic!(
+            "origin_client_cert e origin_client_key precisam ser declarados juntos ({})",
+            site_host.unwrap_or("site")
+        ),
+    }
+}
+
+fn read_origin_mtls(
+    cert: &str,
+    key: &str,
+    base_dir: &Path,
+    site_host: Option<&str>,
+) -> Arc<CertKey> {
+    let site = site_host.unwrap_or("site");
+    let cert_path = resolve_policy_path(cert, base_dir);
+    let key_path = resolve_policy_path(key, base_dir);
+    let cert_pem = std::fs::read(&cert_path).unwrap_or_else(|error| {
+        panic!(
+            "certificado mTLS do origin não encontrado para {site} ({}): {error}",
+            cert_path.display()
+        )
+    });
+    let key_pem = std::fs::read(&key_path).unwrap_or_else(|error| {
+        panic!(
+            "chave mTLS do origin não encontrada para {site} ({}): {error}",
+            key_path.display()
+        )
+    });
+    let certificates = X509::stack_from_pem(&cert_pem)
+        .unwrap_or_else(|error| panic!("certificado mTLS do origin inválido para {site}: {error}"));
+    if certificates.is_empty() {
+        panic!("certificado mTLS do origin vazio para {site}");
+    }
+    let private_key = PKey::private_key_from_pem(&key_pem)
+        .unwrap_or_else(|error| panic!("chave mTLS do origin inválida para {site}: {error}"));
+    Arc::new(CertKey::new(certificates, private_key))
+}
+
+fn resolve_policy_path(spec: &str, base: &Path) -> PathBuf {
+    let path = Path::new(spec);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
     }
 }
 
@@ -1765,5 +1947,96 @@ backend = "http://127.0.0.1:8081"
         assert_eq!(pay[1].detector, crate::dlp::Detector::Card);
         let plain = config.resolve("plain.example").unwrap();
         assert!(plain.dlp_fields_for("/pay").is_empty());
+    }
+
+    #[test]
+    fn backend_string_stays_a_single_origin() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+"#,
+        );
+        let backend = config.resolve("api.example").unwrap();
+        assert_eq!(backend.origins.len(), 1);
+        assert!(!backend.is_balanced());
+        assert_eq!(backend.health_path, DEFAULT_HEALTH_PATH);
+        assert!(backend.origin_mtls.is_none());
+    }
+
+    #[test]
+    fn backend_array_keeps_two_origins_and_custom_health_path() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = ["http://127.0.0.1:8080", "http://127.0.0.1:8081"]
+health_path = "/ready"
+"#,
+        );
+        let backend = config.resolve("api.example").unwrap();
+        assert!(backend.is_balanced());
+        assert_eq!(backend.origins.len(), 2);
+        assert_eq!(backend.health_path, "/ready");
+        assert_eq!(backend.addr, backend.origins[0].addr);
+        assert!(config.has_multi_origin());
+    }
+
+    #[test]
+    fn origin_mtls_requires_cert_and_key_together() {
+        let result = std::panic::catch_unwind(|| {
+            Config::from_toml(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+origin_client_cert = "./client.pem"
+"#,
+            )
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_backend_array_is_a_load_error() {
+        let result = std::panic::catch_unwind(|| {
+            Config::from_toml(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = []
+"#,
+            )
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn duplicate_backend_urls_are_a_load_error() {
+        let result = std::panic::catch_unwind(|| {
+            Config::from_toml(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = ["http://127.0.0.1:8080", "http://127.0.0.1:8080"]
+"#,
+            )
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mixed_http_https_origins_are_a_load_error() {
+        let result = std::panic::catch_unwind(|| {
+            Config::from_toml(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = ["http://127.0.0.1:8080", "https://127.0.0.1:8443"]
+"#,
+            )
+        });
+        assert!(result.is_err());
     }
 }
