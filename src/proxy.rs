@@ -69,10 +69,11 @@ use crate::headers;
 use crate::jwt::{self, JwtFailure, JwtPrincipal};
 use crate::metrics;
 use crate::openapi::{BodyVerdict, EnvelopeVerdict, MatchedOp};
+use crate::policy::PolicyStore;
 use crate::protocol::{self, ProtocolVerdict, RequestFacts};
 use crate::rate_limit::RateLimiter;
 use crate::shield::{self, ShieldVerdict};
-use crate::spool::{SpoolError, SpoolHandle, SpoolRuntime};
+use crate::spool::{SpoolError, SpoolHandle};
 use crate::waf::{self, InspectionOutcome, WafVerdict};
 use crate::waf_engine::{self, InspectRequest, L1Verdict, WafEngine};
 use crate::waf_l1;
@@ -150,7 +151,7 @@ fn reserves_inflated_body(content_encoding: Option<&str>) -> bool {
 
 #[derive(Clone)]
 pub struct FerroadaProxy {
-    pub config: Arc<Config>,
+    policy: Arc<PolicyStore>,
     pub rate_limiter: Arc<RateLimiter>,
     pub trusted_proxies: TrustedProxies,
     client_ip: ClientIpConfig,
@@ -158,7 +159,6 @@ pub struct FerroadaProxy {
     concurrency: Arc<ConcurrencyState>,
     dlp_budget: Arc<ByteBudget>,
     request_budget: Arc<ByteBudget>,
-    spool: Arc<SpoolRuntime>,
     dlp_action: DlpAction,
     origin_secret: OriginSecretConfig,
     waf_engine: WafEngine,
@@ -283,6 +283,22 @@ impl FerroadaProxy {
         client_ip: ClientIpConfig,
         proxy_protocol: bool,
     ) -> Self {
+        Self::from_policy(
+            Arc::new(PolicyStore::pinned(config)),
+            rate_limiter,
+            trusted_proxies,
+            client_ip,
+            proxy_protocol,
+        )
+    }
+
+    pub fn from_policy(
+        policy: Arc<PolicyStore>,
+        rate_limiter: Arc<RateLimiter>,
+        trusted_proxies: TrustedProxies,
+        client_ip: ClientIpConfig,
+        proxy_protocol: bool,
+    ) -> Self {
         let origin_secret = origin_secret_from_env();
         if origin_secret.value.is_some() {
             info!(
@@ -291,8 +307,7 @@ impl FerroadaProxy {
             );
         }
         Self {
-            spool: Arc::new(SpoolRuntime::from_config(&config)),
-            config,
+            policy,
             rate_limiter,
             trusted_proxies,
             client_ip,
@@ -599,9 +614,11 @@ impl ProxyHttp for FerroadaProxy {
             return Ok(true);
         }
 
-        // Multi-site routing: resolve backend by Host header
+        // Multi-site routing: resolve backend by Host header.
+        // One snapshot for the whole request so reload cannot split resolve vs matrix.
+        let config = self.policy.config();
         let host_for_resolve = host_val.as_deref().unwrap_or("");
-        match self.config.resolve(host_for_resolve) {
+        match config.resolve(host_for_resolve) {
             Some(backend) => {
                 ctx.backend = Some(backend.clone());
             }
@@ -885,7 +902,7 @@ impl ProxyHttp for FerroadaProxy {
             .as_ref()
             .and_then(|backend| backend.grpc.as_ref())
             .is_some();
-        let protocol_verdict = self.config.protocols.evaluate(&RequestFacts {
+        let protocol_verdict = config.protocols.evaluate(&RequestFacts {
             version: session.req_header().version,
             upgrade,
             content_encoding: ctx.request_content_encoding.as_deref(),
@@ -997,7 +1014,7 @@ impl ProxyHttp for FerroadaProxy {
             }
 
             if spooling {
-                ctx.spool = Some(SpoolHandle::new(max_body, Arc::clone(&self.spool)));
+                ctx.spool = Some(SpoolHandle::new(max_body, self.policy.spool()));
             } else {
                 session.as_downstream_mut().enable_retry_buffering();
             }

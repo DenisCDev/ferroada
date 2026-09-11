@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::metrics;
+use crate::policy::PolicyStore;
 
 /// `FERROADA_PRODUCTION=true` (exact match, same as `FORCE_HTTPS`). Unset is off.
 pub fn production_enabled() -> bool {
@@ -62,6 +63,7 @@ fn classify_dashboard_get(path: &str, authorized: bool) -> DashboardGet {
 
 pub struct DashboardService {
     token: Option<Arc<str>>,
+    policy: Option<Arc<PolicyStore>>,
     upstreams: Arc<[SocketAddr]>,
 }
 
@@ -69,13 +71,34 @@ impl DashboardService {
     pub fn new(token: Option<String>, upstreams: Vec<SocketAddr>) -> Self {
         Self {
             token: token.map(Arc::from),
+            policy: None,
             upstreams: upstreams.into(),
+        }
+    }
+
+    pub fn with_policy(token: Option<String>, policy: Arc<PolicyStore>) -> Self {
+        Self {
+            token: token.map(Arc::from),
+            policy: Some(policy),
+            upstreams: Arc::from([]),
+        }
+    }
+
+    fn backend_addresses(&self) -> Vec<SocketAddr> {
+        if let Some(policy) = &self.policy {
+            policy.config().backend_addresses()
+        } else {
+            self.upstreams.iter().copied().collect()
         }
     }
 
     async fn upstreams_ready(&self) -> bool {
         let deadline = Instant::now() + Duration::from_secs(1);
-        for address in self.upstreams.iter().copied() {
+        let upstreams = self.backend_addresses();
+        if upstreams.is_empty() {
+            return false;
+        }
+        for address in upstreams {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return false;
             };
@@ -86,7 +109,7 @@ impl DashboardService {
                 return false;
             }
         }
-        !self.upstreams.is_empty()
+        true
     }
 }
 
@@ -241,7 +264,7 @@ fn dashboard_html() -> String {
 <body>
 <main>
   <h1>Visão geral</h1>
-  <p class="lede">O que o proxy viu. Esta página atualiza a cada cinco segundos. O painel Next fica em <code>web/</code>.</p>
+  <p class="lede">O que o proxy viu. Esta página atualiza a cada cinco segundos. O painel Next fica em <code>web/</code>. Política <code id="policy-version">—</code>.</p>
   <form class="auth notice" id="auth" hidden>
     <label for="token">Token do dashboard</label>
     <input id="token" type="password" autocomplete="current-password" required>
@@ -257,7 +280,7 @@ fn dashboard_html() -> String {
   </div>
 </main>
 <script>
-const labels = { sqli:'injeção SQL', xss:'XSS', path_traversal:'path traversal', rate_limit:'limite de taxa', sensitive_path:'caminho sensível', body_sqli:'SQL no corpo', body_xss:'XSS no corpo', method:'método HTTP', size_limit:'tamanho', header_limit:'limite de headers', concurrency_limit:'limite de concorrência', connection_limit:'limite de conexões', request_buffer_limit:'memória de inspeção de entrada', spool_limit:'limite de spool', dlp_partial_block:'resposta parcial bloqueada pelo DLP', host:'host', crlf:'CRLF', smuggling:'smuggling', jndi:'JNDI', bad_bot:'bot', behavioral_throttle:'comportamento (freio)', behavioral_block:'comportamento (ban)', waf_incomplete:'inspeção WAF incompleta', waf_monitor:'monitoramento WAF', waf_l1:'WAF L1 (CRS)', waf_l1_shadow:'WAF L1 (sombra)', waf_engine_unavailable:'motor WAF L1 indisponível', dlp_skip:'DLP não aplicado', range_removed:'range removido para inspeção DLP', dlp:'DLP', inspection_parse_error:'JSON inválido', inspection_timeout:'tempo esgotado na inspeção', inspection_budget:'orçamento de inspeção esgotado', openapi:'validação OpenAPI', openapi_observe:'OpenAPI (observação)', jwt:'JWT inválido', jwt_binding:'JWT (binding)', graphql:'limite GraphQL', grpc:'método gRPC' };
+const labels = { sqli:'injeção SQL', xss:'XSS', path_traversal:'path traversal', rate_limit:'limite de taxa', sensitive_path:'caminho sensível', body_sqli:'SQL no corpo', body_xss:'XSS no corpo', method:'método HTTP', size_limit:'tamanho', header_limit:'limite de headers', concurrency_limit:'limite de concorrência', connection_limit:'limite de conexões', request_buffer_limit:'memória de inspeção de entrada', spool_limit:'limite de spool', dlp_partial_block:'resposta parcial bloqueada pelo DLP', host:'host', crlf:'CRLF', smuggling:'smuggling', jndi:'JNDI', bad_bot:'bot', behavioral_throttle:'comportamento (freio)', behavioral_block:'comportamento (ban)', waf_incomplete:'inspeção WAF incompleta', waf_monitor:'monitoramento WAF', waf_l1:'WAF L1 (CRS)', waf_l1_shadow:'WAF L1 (sombra)', waf_engine_unavailable:'motor WAF L1 indisponível', dlp_skip:'DLP não aplicado', range_removed:'range removido para inspeção DLP', dlp:'DLP', inspection_parse_error:'JSON inválido', inspection_timeout:'tempo esgotado na inspeção', inspection_budget:'orçamento de inspeção esgotado', openapi:'validação OpenAPI', openapi_observe:'OpenAPI (observação)', jwt:'JWT inválido', jwt_binding:'JWT (binding)', graphql:'limite GraphQL', grpc:'método gRPC', policy_reload:'política recarregada', policy_reload_rejected:'reload de política recusado' };
 const auth = document.getElementById('auth');
 const status = document.getElementById('status');
 const tokenInput = document.getElementById('token');
@@ -291,6 +314,8 @@ async function tick(){
   const m = await res.json();
   auth.hidden = true;
   status.hidden = true;
+  const policyEl = document.getElementById('policy-version');
+  if (policyEl) policyEl.textContent = m.policy_version || '—';
   const blocked = Object.values(m.blocked||{}).reduce((s,n)=>s+n,0);
   const rate = m.requests_total===0?0:(1-blocked/Math.max(m.requests_total,blocked))*100;
   const kpis = document.getElementById('kpis');
@@ -391,6 +416,7 @@ mod tests {
         let html = dashboard_html();
         assert!(html.contains("Token do dashboard"));
         assert!(html.contains("id=\"auth\""));
+        assert!(html.contains("id=\"policy-version\""));
     }
 
     #[test]

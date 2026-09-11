@@ -23,6 +23,8 @@ export function demoMetrics(): FerroadaMetrics {
   }));
 
   return {
+    policy_version: "",
+    policy_signed: false,
     requests_total: 12840,
     blocked: {
       sqli: 42,

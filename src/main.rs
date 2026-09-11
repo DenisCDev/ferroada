@@ -1,7 +1,7 @@
 use ferroada::client_ip::{ClientIpConfig, TrustedProxies};
-use ferroada::config::Config;
 use ferroada::connection::ConnectionRateFilter;
 use ferroada::dashboard::{production_enabled, validate_exposure, DashboardService};
+use ferroada::policy::PolicyStore;
 use ferroada::proxy::FerroadaProxy;
 use ferroada::proxy_protocol;
 use ferroada::rate_limit::RateLimiter;
@@ -29,6 +29,24 @@ fn main() {
         Some("cidrs") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             if let Err(error) = ferroada::cidrs::run(&args) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("reload") => {
+            let _ = dotenvy::dotenv();
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            if let Err(error) = ferroada::policy::run_reload(&args) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("policy") => {
+            let _ = dotenvy::dotenv();
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            if let Err(error) = ferroada::policy::run_policy(&args) {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
@@ -72,9 +90,12 @@ fn main() {
     let waf_engine = ferroada::waf_engine::WafEngine::from_env();
     waf_engine.boot();
 
-    // Load config: ferroada.toml (multi-site) or TARGET_URL (single-site)
-    let config = Arc::new(Config::load());
-    ferroada::spool::boot(&config).unwrap_or_else(|error| panic!("{error}"));
+    // Load config: ferroada.toml (multi-site) or TARGET_URL (single-site).
+    // Last-known-good is this snapshot; reload never replaces it with empty.
+    let policy = Arc::new(PolicyStore::boot().unwrap_or_else(|error| panic!("{error}")));
+    ferroada::spool::boot(&policy.config()).unwrap_or_else(|error| panic!("{error}"));
+    ferroada::policy::write_pid_file();
+    ferroada::policy::spawn_reload_listener(Arc::clone(&policy));
 
     // Initialize rate limiter
     let rate_limiter = Arc::new(RateLimiter::from_env());
@@ -110,8 +131,8 @@ fn main() {
     server.bootstrap();
 
     // --- Proxy service ---
-    let proxy = FerroadaProxy::new(
-        Arc::clone(&config),
+    let proxy = FerroadaProxy::from_policy(
+        Arc::clone(&policy),
         rate_limiter,
         trusted_proxies,
         client_ip,
@@ -193,7 +214,7 @@ fn main() {
 
     let mut dashboard_svc = http_proxy_service(
         &server.configuration,
-        DashboardService::new(dashboard_token, config.backend_addresses()),
+        DashboardService::with_policy(dashboard_token, Arc::clone(&policy)),
     );
     dashboard_svc.add_tcp(&dashboard_addr.to_string());
 

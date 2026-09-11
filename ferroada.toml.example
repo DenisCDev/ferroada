@@ -1,5 +1,11 @@
 # Ferroada Multi-Site Configuration
 #
+# Política versionada: no boot o TOML vira um snapshot JSON em memória
+# (policy_version = sha256). `ferroada reload` (SIGHUP) tenta o ficheiro
+# novo; parse ou assinatura inválidos mantêm a last-known-good. Sem
+# FERROADA_POLICY_PUBKEY o TOML solto continua válido. Com a chave Ed25519,
+# assine o output de `ferroada policy compile` e grave ferroada.policy.sig.
+#
 # Packs de produção (dashboard em loopback, sem publicar a porta 9000):
 #   deploy/topologies/
 #

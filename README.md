@@ -410,6 +410,9 @@ Comece pelo `CHECKLIST.md` do modo. TLS: o Ferroada termina se houver `fullchain
 ferroada init --topology vps-api --origin http://127.0.0.1:8080 --public-host api.exemplo.com --non-interactive
 ferroada init --topology cdn-edge --origin http://127.0.0.1:8080 --public-host api.exemplo.com --trusted-proxies auto --non-interactive
 ferroada healthcheck   # GET 127.0.0.1:9000/healthz; exit 0/1. Distroless não tem curl.
+ferroada reload        # SIGHUP: tenta o TOML novo; se falhar, last-known-good
+ferroada policy compile --config ferroada.toml -o ferroada.policy.json
+ferroada policy sign --key priv.pem --in ferroada.policy.json -o ferroada.policy.sig
 ```
 
 `--trusted-proxies auto` copia o snapshot em `deploy/cidrs/` (embutido no binário). Zero HTTP. Para actualizar a lista: `ferroada cidrs update` (HTTP só neste comando; `--cidrs-from-network` não existe no `init`). `--listen-mode privileged` emite :80/:443 **e** `CAP_NET_BIND_SERVICE`; `proxied` deixa o processo em 127.0.0.1:3000 com Caddy na frente.
@@ -457,6 +460,9 @@ Toda a configuração é feita por variáveis de ambiente:
 | `DASHBOARD_BIND` | `127.0.0.1` | IP do dashboard; bind não-loopback exige token |
 | `DASHBOARD_TOKEN` | *(vazio em loopback)* | Token Bearer; obrigatório fora de loopback e com `FERROADA_PRODUCTION=true` |
 | `FERROADA_PRODUCTION` | *(unset)* | Se `true`, o token é obrigatório mesmo em 127.0.0.1. O HTML continua público (formulário); `/api/metrics` e `/metrics` exigem Bearer |
+| `FERROADA_POLICY_PUBKEY` | *(unset)* | Chave pública Ed25519 (PEM, hex ou base64). Opt-in: sem ela o TOML solto arranca. Com ela, o snapshot precisa de `ferroada.policy.sig` válida |
+| `FERROADA_POLICY_SIG` | `ferroada.policy.sig` | Assinatura Ed25519 do snapshot (`ferroada policy compile`) |
+| `FERROADA_PID_FILE` | `ferroada.pid` | Gravado no boot; `ferroada reload --pid-file` lê daqui |
 | `TRUSTED_PROXIES` | *(vazio)* | CIDRs autorizados a enviar XFF/X-Forwarded-Proto |
 | `SECURITY_HEADERS` | `true` | Injetar headers seguros nas respostas (nosniff, X-Frame, Referrer) |
 | `FRAME_OPTIONS` | `SAMEORIGIN` | Valor de X-Frame-Options; `off` preserva o upstream |

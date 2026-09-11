@@ -596,6 +596,7 @@ dependencies = [
  "flate2",
  "h2",
  "http",
+ "libc",
  "once_cell",
  "openssl",
  "openssl-probe",
