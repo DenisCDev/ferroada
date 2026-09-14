@@ -34,7 +34,7 @@ brotli = "9.0.0"
 prost = "0.13"
 prost-types = "0.13"
 prost-reflect = "0.14"
-maxminddb = "0.25"
+maxminddb = "0.27"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

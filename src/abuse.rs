@@ -127,7 +127,8 @@ impl AsnDb {
     }
 
     pub fn lookup(&self, ip: IpAddr) -> Option<u32> {
-        let asn: maxminddb::geoip2::Asn = self.reader.lookup(ip).ok()?;
+        let result = self.reader.lookup(ip).ok()?;
+        let asn = result.decode::<maxminddb::geoip2::Asn>().ok()??;
         asn.autonomous_system_number
     }
 }
