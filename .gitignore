@@ -34,3 +34,9 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# SBOM gerado localmente — o CI publica como artefacto, não no git
+*.cdx.json
+*.cdx.xml
+bom.json
+bom.xml

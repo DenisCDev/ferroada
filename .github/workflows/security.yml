@@ -3,6 +3,7 @@ name: Segurança e qualidade
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -54,6 +55,28 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build --tag ferroada:ci .
       - run: docker build --tag ferroada-coraza:ci deploy/coraza
+      # Sem registry neste repositório: o job constrói ferroada:ci localmente
+      # e não faz push. Cosign keyless (OIDC do GitHub, id-token: write) fica
+      # para quando o operador publicar a imagem — não inventamos GHCR/Hub.
+      - name: Cosign (sem registry)
+        run: |
+          cat <<'EOF'
+          Este repositório não publica a imagem num registry (GHCR, Docker Hub
+          ou outro). O job constrói ferroada:ci localmente e para aí.
+
+          Quando existir registry, assinar com cosign keyless via OIDC do
+          GitHub (sem chave longa no repo):
+
+            permissions:
+              id-token: write
+              contents: read
+            - uses: sigstore/cosign-installer@v3
+            - docker push "$IMAGE"
+            - cosign sign --yes "$IMAGE@$DIGEST"
+
+          Identidade: https://token.actions.githubusercontent.com
+          Subject: repo:DenisCDev/ferroada:*
+          EOF
 
   packs:
     runs-on: ubuntu-latest
@@ -72,14 +95,52 @@ jobs:
           version: v3.17.3
       - run: python3 deploy/helm/assert-chart.py
 
-  fuzz:
-    if: github.event_name == 'workflow_dispatch'
+  sbom:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
+      - name: Gerar CycloneDX do crate ferroada
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --format json --spec-version 1.5 --describe crate
+          if [ -f ferroada.cdx.json ]; then
+            :
+          elif [ -f bom.json ]; then
+            mv bom.json ferroada.cdx.json
+          else
+            echo "SBOM JSON do crate ferroada não foi gerado" >&2
+            ls -la
+            exit 1
+          fi
+          python3 -c "import json; d=json.load(open('ferroada.cdx.json')); assert d.get('bomFormat')=='CycloneDX', d"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-ferroada-cyclonedx
+          path: ferroada.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [waf, protocol, dlp]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          shared-key: fuzz-nightly
       - run: cargo install cargo-fuzz --locked
-      - run: cargo fuzz run waf -- -max_total_time=45
-      - run: cargo fuzz run protocol -- -max_total_time=45
-      - run: cargo fuzz run dlp -- -max_total_time=45
+      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=45

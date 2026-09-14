@@ -39,6 +39,9 @@ conexão HTTP/2 a 100 streams simultâneos, rejeitando headers excessivos com 43
 antes da aplicação. O Ferroada fixa a versão exata no manifesto e no lockfile
 para que build local, container e CI usem a mesma base.
 
+O Ferroada **não** é production-grade: falta auditoria de segurança externa
+e não há linha LTS. Relatar falhas e o que isto cobre: [SECURITY.md](SECURITY.md).
+
 ```
 Internet → [Ferroada :3000] → Seu Sistema :8080
                 ↓
@@ -739,3 +742,4 @@ Cliente (resposta limpa e hardened)
 - **Rust** — binário único, sem runtime, sem garbage collector
 - **Distroless** — imagem Docker sem shell, sem package manager (~20MB)
 - **Zero dependências externas** — não precisa de Redis, banco de dados nem serviço auxiliar
+- **Ainda não é production-grade** — falta auditoria externa e LTS. Ver [SECURITY.md](SECURITY.md).
