@@ -349,6 +349,12 @@ const BAD_BOT_SIGNATURES: &[&str] = &[
     "arachni",
 ];
 
+/// Weak signal only: the 18 signatures are not the abuse defense.
+pub fn ua_is_weak(ua: &str) -> bool {
+    let ua_lower = ua.to_ascii_lowercase();
+    BAD_BOT_SIGNATURES.iter().any(|sig| ua_lower.contains(sig))
+}
+
 /// Check if the User-Agent matches known attack tool signatures.
 pub fn check_user_agent(ua: &str, uri: &str, client_addr: &str, site_scope: &str) -> ShieldVerdict {
     if !*BAD_BOT_ENABLED {

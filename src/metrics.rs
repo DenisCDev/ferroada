@@ -44,6 +44,7 @@ pub struct Metrics {
     pub blocked_grpc: AtomicU64,
     pub blocked_dlp_partial: AtomicU64,
     pub blocked_origin_unavailable: AtomicU64,
+    pub blocked_abuse: AtomicU64,
     pub https_redirect: AtomicU64,
     pub waf_inspection_complete: AtomicU64,
     pub waf_inspection_truncated: AtomicU64,
@@ -126,6 +127,7 @@ impl Metrics {
             blocked_grpc: AtomicU64::new(0),
             blocked_dlp_partial: AtomicU64::new(0),
             blocked_origin_unavailable: AtomicU64::new(0),
+            blocked_abuse: AtomicU64::new(0),
             https_redirect: AtomicU64::new(0),
             waf_inspection_complete: AtomicU64::new(0),
             waf_inspection_truncated: AtomicU64::new(0),
@@ -278,6 +280,7 @@ pub fn record_block_in(
         "grpc" => &METRICS.blocked_grpc,
         "dlp_partial_block" => &METRICS.blocked_dlp_partial,
         "503" => &METRICS.blocked_origin_unavailable,
+        "abuse" => &METRICS.blocked_abuse,
         "https_redirect" => &METRICS.https_redirect,
         _ => return,
     };
@@ -573,7 +576,8 @@ pub fn snapshot_json() -> String {
             "graphql": m.blocked_graphql.load(Ordering::Relaxed),
             "grpc": m.blocked_grpc.load(Ordering::Relaxed),
             "dlp_partial_block": m.blocked_dlp_partial.load(Ordering::Relaxed),
-            "origin_unavailable": m.blocked_origin_unavailable.load(Ordering::Relaxed)
+            "origin_unavailable": m.blocked_origin_unavailable.load(Ordering::Relaxed),
+            "abuse": m.blocked_abuse.load(Ordering::Relaxed)
         },
         "waf_inspection": {
             "complete": m.waf_inspection_complete.load(Ordering::Relaxed),
@@ -647,6 +651,7 @@ pub fn snapshot_prometheus() -> String {
         ("grpc", &metrics.blocked_grpc),
         ("dlp_partial_block", &metrics.blocked_dlp_partial),
         ("origin_unavailable", &metrics.blocked_origin_unavailable),
+        ("abuse", &metrics.blocked_abuse),
     ];
     let mut output = format!(
         "# TYPE ferroada_requests_total counter\nferroada_requests_total {}\n# TYPE ferroada_blocks_total counter\n",

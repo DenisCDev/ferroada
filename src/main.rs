@@ -7,6 +7,7 @@ use ferroada::policy::PolicyStore;
 use ferroada::proxy::FerroadaProxy;
 use ferroada::proxy_protocol;
 use ferroada::rate_limit::RateLimiter;
+use ferroada::tls_fingerprint;
 use ferroada::waf;
 use pingora::listeners::ConnectionFilter;
 use pingora::prelude::*;
@@ -185,8 +186,9 @@ fn main() {
             info!(listen = %tls_listen, "HTTPS listener ready (PROXY v2 antes do handshake)");
         } else {
             svc.set_connection_filter(Arc::new(connection_filter));
-            svc.add_tls(&tls_listen, &cert_path, &key_path)
-                .expect("Failed to load TLS certs");
+            let settings = tls_fingerprint::proxy_tls_settings(&cert_path, &key_path)
+                .unwrap_or_else(|error| panic!("{error}"));
+            svc.add_tls_with_settings(&tls_listen, None, settings);
             info!(listen = %tls_listen, "HTTPS listener ready");
         }
     } else {
@@ -255,6 +257,7 @@ fn tls_acceptor(cert_path: &str, key_path: &str) -> Result<SslAcceptor, String> 
     builder
         .set_certificate_chain_file(cert_path)
         .map_err(|error| format!("falha a ler o certificado TLS {cert_path}: {error}"))?;
+    tls_fingerprint::install_client_hello(&mut builder);
     Ok(builder.build())
 }
 

@@ -13,7 +13,12 @@ use std::time::{Duration, Instant};
 
 use crate::metrics;
 use crate::proxy_protocol::PreTlsProcess;
+use crate::tls_fingerprint::HelloFingerprint;
+use once_cell::sync::Lazy;
+use pingora::listeners::TlsAcceptCallbacks;
 use pingora::tls::ssl::SslAcceptor;
+
+static TLS_FINGERPRINT_CB: Lazy<TlsAcceptCallbacks> = Lazy::new(|| Box::new(HelloFingerprint));
 
 #[derive(Debug)]
 pub struct ConnectionRateFilter {
@@ -283,7 +288,11 @@ where
             };
             match tokio::time::timeout(
                 Duration::from_secs(60),
-                pingora::protocols::tls::server::handshake(acceptor.as_ref(), l4),
+                pingora::protocols::tls::server::handshake_with_callback(
+                    acceptor.as_ref(),
+                    l4,
+                    &TLS_FINGERPRINT_CB,
+                ),
             )
             .await
             {

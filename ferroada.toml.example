@@ -124,6 +124,14 @@ backend = "http://backend-b:3000"
 # [[sites.routes.dlp.fields]]
 # path = "$.card"
 # detector = "card"
+#
+# Abuse (opt-in). Sem o bloco o site fica como hoje. UA de scanner continua
+# sinal fraco (ua_weak), não a quota. tls_fingerprint = hash do ClientHello
+# (versão + ciphers oferecidos + compressão), não a string JA4 pública.
+# Sem mmdb, asn fica vazio e o processo arranca.
+# abuse = { stuffing_max = 10, enumeration_max = 20, signup_max = 5, recover_max = 5, window_secs = 600, challenge = "pow", challenge_score = 40 }
+# abuse.mmdb = "./GeoLite2-ASN.mmdb"
+# challenge: none | pow | external (external exige challenge_url)
 
 # [[sites]]
 # hosts = ["outrosite.com", "www.outrosite.com"]

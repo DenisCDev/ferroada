@@ -1,3 +1,4 @@
+pub mod abuse;
 pub mod behavioral;
 pub mod cidrs;
 pub mod client_ip;
@@ -27,6 +28,7 @@ mod proxy_protocol_socket;
 pub mod rate_limit;
 pub mod shield;
 pub mod spool;
+pub mod tls_fingerprint;
 pub mod waf;
 pub mod waf_engine;
 pub mod waf_l1;

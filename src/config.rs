@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
 
+use crate::abuse::{AbuseFile, AbusePolicy};
 use crate::dlp::{self, DlpField};
 use crate::graphql::{GraphqlFile, GraphqlPolicy};
 use crate::grpc::{GrpcFile, GrpcPolicy};
@@ -73,6 +74,8 @@ struct SiteEntry {
     grpc: Option<GrpcFile>,
     #[serde(default)]
     dlp: DlpFile,
+    #[serde(default)]
+    abuse: Option<AbuseFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,6 +315,7 @@ pub struct Backend {
     graphql: Option<GraphqlPolicy>,
     pub grpc: Option<GrpcPolicy>,
     dlp_fields: Vec<DlpField>,
+    pub abuse: Option<AbusePolicy>,
 }
 
 impl Backend {
@@ -538,6 +542,10 @@ impl Config {
             backend.graphql = graphql;
             backend.grpc = grpc;
             backend.dlp_fields = parse_dlp_fields(site.dlp.fields);
+            backend.abuse = site.abuse.map(|file| {
+                file.into_policy(base_dir, site_host)
+                    .unwrap_or_else(|error| panic!("{error}"))
+            });
             backend.site_scope = site
                 .hosts
                 .first()
@@ -695,6 +703,11 @@ pub fn referenced_policy_files(
         if let Some(key) = &site.origin_client_key {
             push_local_file(&mut files, key, base_dir);
         }
+        if let Some(abuse) = &site.abuse {
+            if let Some(path) = abuse.mmdb_path(base_dir) {
+                files.push((path.display().to_string(), path));
+            }
+        }
     }
     Ok(files)
 }
@@ -838,6 +851,7 @@ fn resolve_site(
         graphql: None,
         grpc: None,
         dlp_fields: Vec::new(),
+        abuse: None,
     }
 }
 
