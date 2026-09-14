@@ -6,6 +6,10 @@
 # FERROADA_POLICY_PUBKEY o TOML solto continua válido. Com a chave Ed25519,
 # assine o output de `ferroada policy compile` e grave ferroada.policy.sig.
 #
+# OTLP é opt-in por env, não por TOML: OTEL_EXPORTER_OTLP_ENDPOINT ou
+# FERROADA_OTLP_ENDPOINT (HTTP, ex. http://127.0.0.1:4318). Sem endpoint o
+# processo não abre socket extra. Falha do Collector não derruba o proxy.
+#
 # Packs de produção (dashboard em loopback, sem publicar a porta 9000):
 #   deploy/topologies/
 #

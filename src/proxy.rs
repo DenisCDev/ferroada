@@ -399,6 +399,12 @@ pub struct FerroadaCtx {
     pub backend: Option<crate::config::Backend>,
     pub risk_identity: Option<RiskIdentity>,
     method: String,
+    route: String,
+    event_type: String,
+    rule_id: String,
+    inspection_outcome: String,
+    started_at: Instant,
+    origin_responded: bool,
     balanced_origin: bool,
     request_has_body: bool,
     upstream_retries: u32,
@@ -445,6 +451,22 @@ impl FerroadaCtx {
         self.request_budget.release(self.request_reserved);
         self.request_reserved = 0;
     }
+
+    fn note_event(&mut self, event_type: &str) {
+        if !event_type.is_empty() {
+            self.event_type = event_type.to_string();
+        }
+    }
+
+    fn note_rule_ids(&mut self, ids: &[u32]) {
+        if !ids.is_empty() {
+            self.rule_id = crate::otel::format_rule_ids(ids);
+        }
+    }
+
+    fn note_outcome(&mut self, outcome: InspectionOutcome) {
+        self.inspection_outcome = outcome.as_str().to_string();
+    }
 }
 
 impl Drop for FerroadaCtx {
@@ -476,6 +498,12 @@ impl ProxyHttp for FerroadaProxy {
             backend: None,
             risk_identity: None,
             method: String::new(),
+            route: String::new(),
+            event_type: String::new(),
+            rule_id: String::new(),
+            inspection_outcome: String::new(),
+            started_at: Instant::now(),
+            origin_responded: false,
             balanced_origin: false,
             request_has_body: false,
             upstream_retries: 0,
@@ -497,6 +525,9 @@ impl ProxyHttp for FerroadaProxy {
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         metrics::increment_requests();
+        ctx.method = session.req_header().method.as_str().to_string();
+        ctx.route = crate::otel::sanitize_route(session.req_header().uri.path());
+        ctx.started_at = Instant::now();
 
         let uri = session
             .req_header()
@@ -830,6 +861,7 @@ impl ProxyHttp for FerroadaProxy {
             shield::check_method(&method, &uri, &client_addr, &ctx.site_scope),
             ShieldVerdict::BlockMethod
         ) {
+            ctx.note_event("method");
             let body = "405 Método não permitido\n";
             let mut header = ResponseHeader::build(405, None)?;
             header.insert_header("Content-Type", "text/plain")?;
@@ -890,6 +922,7 @@ impl ProxyHttp for FerroadaProxy {
         // Rate limiting check (before WAF to save CPU on floods)
         if let Some(identity) = ctx.risk_identity.as_ref() {
             if !self.rate_limiter.check(identity, &uri) {
+                ctx.note_event("rate_limit");
                 let body = "429 Muitas requisições\n";
                 let mut header = ResponseHeader::build(429, None)?;
                 header.insert_header("Content-Type", "text/plain")?;
@@ -967,6 +1000,7 @@ impl ProxyHttp for FerroadaProxy {
         ) {
             WafVerdict::Allow => {}
             WafVerdict::Block(reason) => {
+                ctx.note_event(crate::otel::event_type_from_waf_reason(&reason));
                 if let Some(identity) = ctx.risk_identity.as_ref() {
                     behavioral::record_waf_block(identity);
                 }
@@ -1213,6 +1247,8 @@ impl ProxyHttp for FerroadaProxy {
                         }
                     },
                     WafVerdict::Block(reason) => {
+                        ctx.note_outcome(inspection_status);
+                        ctx.note_event(crate::otel::event_type_from_waf_reason(&reason));
                         record_inspection_outcome(
                             inspection_status,
                             &ctx.client_addr,
@@ -1411,6 +1447,7 @@ impl ProxyHttp for FerroadaProxy {
         };
         if session.response_written().is_none() {
             if code == 503 {
+                ctx.note_event("503");
                 metrics::record_block_in(
                     &ctx.site_scope,
                     "503",
@@ -1512,6 +1549,7 @@ impl ProxyHttp for FerroadaProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        ctx.origin_responded = true;
         self.mark_origin_outcome(ctx, upstream_response.status.as_u16());
         self.decorate_origin_response(upstream_response, ctx)
     }
@@ -1537,6 +1575,7 @@ impl ProxyHttp for FerroadaProxy {
                 ctx.release_dlp();
                 if self.dlp_action.reject_incomplete_response() {
                     *body = None;
+                    ctx.note_event("dlp_partial_block");
                     metrics::record_block(
                         "dlp_partial_block",
                         &ctx.client_addr,
@@ -1576,6 +1615,7 @@ impl ProxyHttp for FerroadaProxy {
                 } else {
                     "DLP blocked a response with sensitive data"
                 };
+                ctx.note_event("dlp_partial_block");
                 metrics::record_block(
                     "dlp_partial_block",
                     &ctx.client_addr,
@@ -1601,6 +1641,50 @@ impl ProxyHttp for FerroadaProxy {
         }
 
         Ok(None)
+    }
+
+    async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX) {
+        if !crate::otel::enabled() {
+            return;
+        }
+        let status = session
+            .response_written()
+            .map(|header| header.status.as_u16());
+        // Origin 403 is still allow: WAF passed and we forwarded. Our own 4xx/5xx
+        // (method, DLP, shed, incomplete inspection) are deny.
+        let decision = if ctx.event_type == "https_redirect" {
+            "allow"
+        } else if !ctx.event_type.is_empty() {
+            "deny"
+        } else if ctx.origin_responded {
+            "allow"
+        } else {
+            match status {
+                Some(code) if code >= 400 => "deny",
+                _ => "allow",
+            }
+        };
+        let method = if ctx.method.is_empty() {
+            session.req_header().method.as_str().to_string()
+        } else {
+            ctx.method.clone()
+        };
+        let route = if ctx.route.is_empty() {
+            crate::otel::sanitize_route(session.req_header().uri.path())
+        } else {
+            ctx.route.clone()
+        };
+        crate::otel::emit_request(crate::otel::RequestSpan {
+            method,
+            route,
+            decision: decision.to_string(),
+            event_type: ctx.event_type.clone(),
+            rule_id: ctx.rule_id.clone(),
+            site_scope: ctx.site_scope.clone(),
+            inspection_outcome: ctx.inspection_outcome.clone(),
+            start: ctx.started_at,
+            end: Instant::now(),
+        });
     }
 }
 
@@ -2157,6 +2241,7 @@ impl FerroadaProxy {
         if self.origins.has_ready(backend) {
             return Ok(false);
         }
+        ctx.note_event("503");
         metrics::record_block_in(
             &ctx.site_scope,
             "503",
@@ -2224,10 +2309,14 @@ impl FerroadaProxy {
         })
         .await;
         let (mut resp, origin_body) = match roundtrip {
-            Ok(Ok(parsed)) => parsed,
+            Ok(Ok(parsed)) => {
+                ctx.origin_responded = true;
+                parsed
+            }
             Ok(Err(error)) => {
                 tracing::warn!(error = %error, "origin roundtrip failed");
                 self.mark_origin_failure(ctx);
+                ctx.note_event("503");
                 metrics::record_block_in(
                     &ctx.site_scope,
                     "503",
@@ -2240,6 +2329,7 @@ impl FerroadaProxy {
             Err(error) => {
                 tracing::warn!(error = %error, "origin roundtrip task failed");
                 self.mark_origin_failure(ctx);
+                ctx.note_event("503");
                 metrics::record_block_in(
                     &ctx.site_scope,
                     "503",
@@ -2261,6 +2351,7 @@ impl FerroadaProxy {
         let truncated = declared_len.is_some_and(|cl| cl > origin_body.len())
             || (declared_len.is_none() && origin_body.len() >= max_response);
         if self.dlp_action.reject_incomplete_response() && truncated {
+            ctx.note_event("dlp_partial_block");
             metrics::record_block(
                 "dlp_partial_block",
                 &ctx.client_addr,
@@ -2281,6 +2372,7 @@ impl FerroadaProxy {
                 } else {
                     "DLP blocked a response with sensitive data"
                 };
+                ctx.note_event("dlp_partial_block");
                 metrics::record_block(
                     "dlp_partial_block",
                     &ctx.client_addr,
@@ -2347,6 +2439,7 @@ impl FerroadaProxy {
         if dlp_capable && self.dlp_action.reject_incomplete_response() {
             if let Some(cl) = response_content_length(upstream_response) {
                 if cl > *MAX_RESPONSE_BUFFER {
+                    ctx.note_event("dlp_partial_block");
                     metrics::record_block(
                         "dlp_partial_block",
                         &ctx.client_addr,
@@ -2361,6 +2454,7 @@ impl FerroadaProxy {
             }
         }
         if partial_response && dlp_capable {
+            ctx.note_event("dlp_partial_block");
             metrics::record_block(
                 "dlp_partial_block",
                 &ctx.client_addr,
@@ -2461,7 +2555,7 @@ impl FerroadaProxy {
     async fn apply_jwt_body(
         &self,
         session: &mut Session,
-        ctx: &FerroadaCtx,
+        ctx: &mut FerroadaCtx,
         body: &[u8],
     ) -> Result<bool> {
         let Some(policy) = ctx
@@ -2480,8 +2574,8 @@ impl FerroadaProxy {
         match policy.bind_body(principal, body) {
             Ok(()) => Ok(false),
             Err(failure) => {
-                self.reject_jwt(session, ctx, &ctx.request_uri, failure)
-                    .await
+                let uri = ctx.request_uri.clone();
+                self.reject_jwt(session, ctx, &uri, failure).await
             }
         }
     }
@@ -2489,10 +2583,11 @@ impl FerroadaProxy {
     async fn reject_jwt(
         &self,
         session: &mut Session,
-        ctx: &FerroadaCtx,
+        ctx: &mut FerroadaCtx,
         uri: &str,
         failure: JwtFailure,
     ) -> Result<bool> {
+        ctx.note_event(failure.event_type());
         metrics::record_block_in(
             &ctx.site_scope,
             failure.event_type(),
@@ -2551,6 +2646,7 @@ impl FerroadaProxy {
                 Ok(false)
             }
             EnvelopeVerdict::Deny { detail } => {
+                ctx.note_event("openapi");
                 metrics::record_block_in(
                     &ctx.site_scope,
                     "openapi",
@@ -2600,6 +2696,7 @@ impl FerroadaProxy {
                 self.deny_grpc_parse(session, ctx, event_uri).await
             }
             GrpcVerdict::Deny(failure) => {
+                ctx.note_event("grpc");
                 let detail = failure.detail().to_string();
                 metrics::record_block_in(
                     &ctx.site_scope,
@@ -2795,7 +2892,7 @@ impl FerroadaProxy {
     async fn apply_l1(
         &self,
         session: &mut Session,
-        ctx: &FerroadaCtx,
+        ctx: &mut FerroadaCtx,
         method: &str,
         uri: &str,
         body: &[u8],
@@ -2853,6 +2950,8 @@ impl FerroadaProxy {
                     return Ok(false);
                 }
                 metrics::record_block_in(&ctx.site_scope, "waf_l1", &ctx.client_addr, uri, &detail);
+                ctx.note_event("waf_l1");
+                ctx.note_rule_ids(&rule_ids);
                 if let Some(identity) = ctx.risk_identity.as_ref() {
                     behavioral::record_waf_block(identity);
                 }
