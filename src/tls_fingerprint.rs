@@ -10,12 +10,12 @@
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use openssl::ex_data::Index;
+use pingora::listeners::tls::TlsSettings;
 use pingora::listeners::TlsAccept;
 use pingora::protocols::tls::TlsRef;
 use pingora::tls::ssl::{
     ClientHelloResponse, Ssl, SslAcceptorBuilder, SslAlert, SslFiletype, SslRef,
 };
-use pingora::listeners::tls::TlsSettings;
 use std::any::Any;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -69,7 +69,8 @@ impl TlsAccept for HelloFingerprint {
         &self,
         tls_ref: &TlsRef,
     ) -> Option<Arc<dyn Any + Send + Sync>> {
-        from_ssl(tls_ref).map(|fp| Arc::new(ClientHelloFingerprint(fp)) as Arc<dyn Any + Send + Sync>)
+        from_ssl(tls_ref)
+            .map(|fp| Arc::new(ClientHelloFingerprint(fp)) as Arc<dyn Any + Send + Sync>)
     }
 }
 
@@ -93,7 +94,9 @@ mod tests {
 
     #[test]
     fn hello_hash_is_defined_outside_callback_as_empty_fields() {
-        let ctx = SslContext::builder(SslMethod::tls_client()).unwrap().build();
+        let ctx = SslContext::builder(SslMethod::tls_client())
+            .unwrap()
+            .build();
         let ssl = Ssl::new(&ctx).unwrap();
         let a = hash_client_hello(&ssl);
         let b = hash_client_hello(&ssl);

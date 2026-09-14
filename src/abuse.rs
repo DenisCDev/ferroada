@@ -184,7 +184,12 @@ impl AbuseFile {
         {
             return Err("abuse.challenge = external exige challenge_url".into());
         }
-        let mmdb = match self.mmdb.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        let mmdb = match self
+            .mmdb
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
             Some(raw) => {
                 let path = Path::new(raw);
                 let path = if path.is_absolute() {
@@ -192,9 +197,8 @@ impl AbuseFile {
                 } else {
                     base_dir.join(path)
                 };
-                AsnDb::load(&path).map_err(|error| {
-                    format!("{error} ({})", site.unwrap_or("site"))
-                })?
+                AsnDb::load(&path)
+                    .map_err(|error| format!("{error} ({})", site.unwrap_or("site")))?
             }
             None => None,
         };
@@ -297,7 +301,12 @@ impl AbuseEngine {
         self.note_rotation(identity);
         let path = request.path.split('?').next().unwrap_or(request.path);
         let mut reasons = Vec::new();
-        if self.over(identity, QuotaKind::Stuffing, policy.stuffing_max, policy.window) {
+        if self.over(
+            identity,
+            QuotaKind::Stuffing,
+            policy.stuffing_max,
+            policy.window,
+        ) {
             reasons.push(AbuseReason::Stuffing);
         }
         if self.over(
@@ -308,12 +317,22 @@ impl AbuseEngine {
         ) {
             reasons.push(AbuseReason::Enumeration);
         }
-        if self.over(identity, QuotaKind::Signup, policy.signup_max, policy.window) {
+        if self.over(
+            identity,
+            QuotaKind::Signup,
+            policy.signup_max,
+            policy.window,
+        ) {
             reasons.push(AbuseReason::Signup);
         } else if is_signup_path(request.method, path) {
             self.hit(identity, QuotaKind::Signup);
         }
-        if self.over(identity, QuotaKind::Recover, policy.recover_max, policy.window) {
+        if self.over(
+            identity,
+            QuotaKind::Recover,
+            policy.recover_max,
+            policy.window,
+        ) {
             reasons.push(AbuseReason::Recover);
         } else if is_recover_path(request.method, path) {
             self.hit(identity, QuotaKind::Recover);
@@ -341,10 +360,7 @@ impl AbuseEngine {
                 request.content_type,
                 request.has_jwt,
             );
-            return AbuseVerdict::Block {
-                reasons,
-                challenge,
-            };
+            return AbuseVerdict::Block { reasons, challenge };
         }
         if skip_html_challenge(request.accept, request.content_type, request.has_jwt)
             || !request
@@ -362,7 +378,13 @@ impl AbuseEngine {
         }
     }
 
-    pub fn record_origin_status(&self, identity: &RiskIdentity, method: &str, path: &str, status: u16) {
+    pub fn record_origin_status(
+        &self,
+        identity: &RiskIdentity,
+        method: &str,
+        path: &str,
+        status: u16,
+    ) {
         let path = path.split('?').next().unwrap_or(path);
         if status == 401 && is_stuffing_path(method, path) {
             self.hit(identity, QuotaKind::Stuffing);
@@ -486,10 +508,8 @@ pub fn is_stuffing_path(method: &str, path: &str) -> bool {
     if !method.eq_ignore_ascii_case("POST") {
         return false;
     }
-    matches!(
-        path,
-        "/login" | "/auth/token" | "/auth/login" | "/session"
-    ) || path.starts_with("/login/")
+    matches!(path, "/login" | "/auth/token" | "/auth/login" | "/session")
+        || path.starts_with("/login/")
 }
 
 pub fn is_enumeration_path(path: &str) -> bool {
@@ -513,15 +533,16 @@ pub fn is_recover_path(method: &str, path: &str) -> bool {
         )
 }
 
-pub fn skip_html_challenge(accept: Option<&str>, content_type: Option<&str>, has_jwt: bool) -> bool {
+pub fn skip_html_challenge(
+    accept: Option<&str>,
+    content_type: Option<&str>,
+    has_jwt: bool,
+) -> bool {
     if has_jwt {
         return true;
     }
-    if content_type.is_some_and(|value| {
-        value
-            .to_ascii_lowercase()
-            .starts_with("application/json")
-    }) {
+    if content_type.is_some_and(|value| value.to_ascii_lowercase().starts_with("application/json"))
+    {
         return true;
     }
     let accept = accept.unwrap_or("").to_ascii_lowercase();
@@ -723,7 +744,11 @@ mod tests {
             let id = identity(ip, 42);
             engine.record_origin_status(&id, "POST", "/login", 401);
         }
-        match engine.inspect(&policy, &identity(99, 42), req("POST", "/login", None, None, false)) {
+        match engine.inspect(
+            &policy,
+            &identity(99, 42),
+            req("POST", "/login", None, None, false),
+        ) {
             AbuseVerdict::Block { reasons, challenge } => {
                 assert!(reasons.contains(&AbuseReason::Stuffing));
                 assert!(!challenge);
@@ -790,16 +815,8 @@ mod tests {
 
     #[test]
     fn jwt_skips_html_challenge() {
-        assert!(skip_html_challenge(
-            Some("text/html"),
-            None,
-            true
-        ));
-        assert!(skip_html_challenge(
-            Some("application/json"),
-            None,
-            false
-        ));
+        assert!(skip_html_challenge(Some("text/html"), None, true));
+        assert!(skip_html_challenge(Some("application/json"), None, false));
         assert!(!skip_html_challenge(
             Some("text/html,application/xhtml+xml"),
             None,

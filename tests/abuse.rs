@@ -134,7 +134,10 @@ fn spawn_proxy(listen: SocketAddr, config: Config) {
         h2c.h2c = true;
         app.server_options = Some(h2c);
         let filter = ConnectionRateFilter::from_env();
-        let mut svc = Service::new("test abuse proxy".to_string(), filter.wrap(app, false, None));
+        let mut svc = Service::new(
+            "test abuse proxy".to_string(),
+            filter.wrap(app, false, None),
+        );
         svc.set_connection_filter(Arc::new(filter));
         svc.add_tcp(&listen.to_string());
         server.add_service(svc);
@@ -188,9 +191,7 @@ fn login_post(addr: SocketAddr, host: &str, xff: &str, extra_header: Option<&str
 }
 
 fn site_toml(host: &str, origin: SocketAddr, abuse: &str) -> String {
-    format!(
-        "[[sites]]\nhosts = [\"{host}\"]\nbackend = \"http://{origin}\"\n{abuse}"
-    )
+    format!("[[sites]]\nhosts = [\"{host}\"]\nbackend = \"http://{origin}\"\n{abuse}")
 }
 
 #[test]
@@ -248,7 +249,12 @@ fn stuffing_distinct_fingerprints_do_not_share_quota() {
         let ip = format!("203.0.113.{i}");
         let extra = format!("X-Trace-{i}: 1\r\n");
         let res = login_post(listen, host, &ip, Some(&extra));
-        assert_eq!(status_of(&res), 401, "i={i} {}", String::from_utf8_lossy(&res));
+        assert_eq!(
+            status_of(&res),
+            401,
+            "i={i} {}",
+            String::from_utf8_lossy(&res)
+        );
     }
     assert_eq!(stub.hits.load(Ordering::Relaxed), 20);
 }
@@ -302,10 +308,16 @@ fn browser_over_threshold_gets_pow_without_password_in_event() {
     assert_eq!(status_of(&res), 403, "{}", String::from_utf8_lossy(&res));
     let body = String::from_utf8_lossy(&res);
     assert!(body.contains("text/html"), "{body}");
-    assert!(body.contains("SHA-256") || body.contains("crypto.subtle"), "{body}");
+    assert!(
+        body.contains("SHA-256") || body.contains("crypto.subtle"),
+        "{body}"
+    );
     assert!(!body.to_ascii_lowercase().contains("password"));
     let snapshot = metrics::snapshot_json();
-    assert!(snapshot.contains("\"abuse\"") || snapshot.contains("stuffing"), "{snapshot}");
+    assert!(
+        snapshot.contains("\"abuse\"") || snapshot.contains("stuffing"),
+        "{snapshot}"
+    );
     assert!(!snapshot.to_ascii_lowercase().contains("password=x"));
 }
 
@@ -342,16 +354,18 @@ fn json_api_does_not_get_html_challenge() {
 
 #[test]
 fn process_starts_without_mmdb_and_asn_is_none() {
-    let id = ferroada::client_ip::RiskIdentity::new(
-        "x",
-        "127.0.0.1".parse().unwrap(),
-        "/",
-        None,
-        None,
-    );
+    let id =
+        ferroada::client_ip::RiskIdentity::new("x", "127.0.0.1".parse().unwrap(), "/", None, None);
     assert!(id.asn.is_none());
     let file = ferroada::config::Config::from_toml(
         "[[sites]]\nhosts = [\"mmdb.test\"]\nbackend = \"http://127.0.0.1:9\"\nabuse = { stuffing_max = 10 }\n",
     );
-    assert!(file.resolve("mmdb.test").unwrap().abuse.as_ref().unwrap().mmdb.is_none());
+    assert!(file
+        .resolve("mmdb.test")
+        .unwrap()
+        .abuse
+        .as_ref()
+        .unwrap()
+        .mmdb
+        .is_none());
 }

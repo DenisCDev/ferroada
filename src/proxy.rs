@@ -2474,7 +2474,12 @@ impl FerroadaProxy {
         if matches!(status, 401 | 403 | 404) {
             if let Some(identity) = ctx.risk_identity.as_ref() {
                 behavioral::record_response(identity, status);
-                if ctx.backend.as_ref().and_then(|backend| backend.abuse.as_ref()).is_some() {
+                if ctx
+                    .backend
+                    .as_ref()
+                    .and_then(|backend| backend.abuse.as_ref())
+                    .is_some()
+                {
                     self.abuse.record_origin_status(
                         identity,
                         ctx.method.as_str(),

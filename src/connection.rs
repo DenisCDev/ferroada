@@ -18,8 +18,7 @@ use once_cell::sync::Lazy;
 use pingora::listeners::TlsAcceptCallbacks;
 use pingora::tls::ssl::SslAcceptor;
 
-static TLS_FINGERPRINT_CB: Lazy<TlsAcceptCallbacks> =
-    Lazy::new(|| Box::new(HelloFingerprint));
+static TLS_FINGERPRINT_CB: Lazy<TlsAcceptCallbacks> = Lazy::new(|| Box::new(HelloFingerprint));
 
 #[derive(Debug)]
 pub struct ConnectionRateFilter {

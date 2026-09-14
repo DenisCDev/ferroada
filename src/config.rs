@@ -542,12 +542,10 @@ impl Config {
             backend.graphql = graphql;
             backend.grpc = grpc;
             backend.dlp_fields = parse_dlp_fields(site.dlp.fields);
-            backend.abuse = site
-                .abuse
-                .map(|file| {
-                    file.into_policy(base_dir, site_host)
-                        .unwrap_or_else(|error| panic!("{error}"))
-                });
+            backend.abuse = site.abuse.map(|file| {
+                file.into_policy(base_dir, site_host)
+                    .unwrap_or_else(|error| panic!("{error}"))
+            });
             backend.site_scope = site
                 .hosts
                 .first()
