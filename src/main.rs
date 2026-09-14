@@ -1,6 +1,8 @@
 use ferroada::client_ip::{ClientIpConfig, TrustedProxies};
 use ferroada::connection::ConnectionRateFilter;
-use ferroada::dashboard::{production_enabled, validate_exposure, DashboardService};
+use ferroada::dashboard::{
+    production_enabled, validate_exposure, AdminAudit, AdminAuth, DashboardService,
+};
 use ferroada::policy::PolicyStore;
 use ferroada::proxy::FerroadaProxy;
 use ferroada::proxy_protocol;
@@ -204,10 +206,14 @@ fn main() {
     let dashboard_token = std::env::var("DASHBOARD_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());
+    let audit = AdminAudit::from_env().unwrap_or_else(|error| panic!("{error}"));
+    let setup =
+        AdminAuth::from_env(dashboard_token.clone()).unwrap_or_else(|error| panic!("{error}"));
     validate_exposure(
         dashboard_ip,
         dashboard_token.as_deref(),
         production_enabled(),
+        setup.auth.strong(),
     )
     .expect("Dashboard inseguro");
     let dashboard_addr = std::net::SocketAddr::new(
@@ -216,12 +222,23 @@ fn main() {
             .parse()
             .expect("DASHBOARD_PORT deve ser uma porta válida"),
     );
-
+    let tls_on = setup.tls.is_some();
     let mut dashboard_svc = http_proxy_service(
         &server.configuration,
-        DashboardService::with_policy(dashboard_token, Arc::clone(&policy)),
+        DashboardService::with_policy(Arc::clone(&policy)).with_admin(
+            Arc::clone(&setup.auth),
+            audit,
+            tls_on,
+        ),
     );
-    dashboard_svc.add_tcp(&dashboard_addr.to_string());
+    if let Some(tls) = setup.tls {
+        let settings = tls
+            .into_settings()
+            .unwrap_or_else(|error| panic!("{error}"));
+        dashboard_svc.add_tls_with_settings(&dashboard_addr.to_string(), None, settings);
+    } else {
+        dashboard_svc.add_tcp(&dashboard_addr.to_string());
+    }
 
     server.add_service(dashboard_svc);
     info!(listen = %dashboard_addr, "Dashboard ready");

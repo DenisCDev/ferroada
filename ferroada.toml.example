@@ -13,6 +13,10 @@
 # Packs de produção (dashboard em loopback, sem publicar a porta 9000):
 #   deploy/topologies/
 #
+# Admin extra (opt-in, env, não TOML): DASHBOARD_OIDC_* (authorization code +
+# PKCE) ou DASHBOARD_MTLS_CA + certs TLS do dashboard. Sem isso o token
+# DASHBOARD_TOKEN continua a valer. O HTML do dashboard não leva 401.
+#
 # Quando este arquivo existe, o Ferroada roda em modo multi-site:
 # cada request e roteado para o backend correto pelo Host header.
 #
