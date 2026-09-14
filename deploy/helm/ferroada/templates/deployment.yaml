@@ -1,0 +1,188 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ferroada.fullname" . }}
+  labels:
+    {{- include "ferroada.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "ferroada.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if and .Values.config.toml (not .Values.config.existingConfigMap) }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "ferroada.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "ferroada.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: ferroada
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            {{- range $key, $value := .Values.ferroada.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            - name: FERROADA_PRODUCTION
+              value: {{ .Values.ferroada.production | quote }}
+            - name: DASHBOARD_BIND
+              value: {{ .Values.ferroada.dashboardBind | quote }}
+            - name: DASHBOARD_PORT
+              value: {{ .Values.ferroada.dashboardPort | quote }}
+            - name: DASHBOARD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ferroada.secretName" . }}
+                  key: {{ .Values.ferroada.existingSecretKey }}
+            - name: WAF_ENGINE
+              value: {{ .Values.ferroada.wafEngine | quote }}
+            - name: DLP_ACTION
+              value: {{ .Values.ferroada.dlpAction | quote }}
+            - name: REPLICA_COUNT
+              value: {{ .Values.replicaCount | quote }}
+            - name: FERROADA_PID_FILE
+              value: /tmp/ferroada.pid
+            - name: PROXY_LISTEN
+              value: {{ printf "0.0.0.0:%v" .Values.service.port | quote }}
+            - name: WAF_REQUIRE_COMPLETE_PATHS
+              value: {{ .Values.ferroada.wafRequireCompletePaths | quote }}
+            {{- if not (include "ferroada.hasToml" .) }}
+            - name: TARGET_URL
+              value: {{ required "ferroada.origin é obrigatório quando config.toml está vazio" .Values.ferroada.origin | quote }}
+            {{- end }}
+            {{- if .Values.ferroada.publicHost }}
+            - name: ALLOWED_HOSTS
+              value: {{ printf "%s,www.%s" .Values.ferroada.publicHost .Values.ferroada.publicHost | quote }}
+            {{- end }}
+            {{- if .Values.ferroada.trustedProxies }}
+            - name: TRUSTED_PROXIES
+              value: {{ .Values.ferroada.trustedProxies | quote }}
+            {{- end }}
+            {{- if .Values.ferroada.otelEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.ferroada.otelEndpoint | quote }}
+            {{- end }}
+            {{- if .Values.spool.enabled }}
+            - name: SPOOL_DIR
+              value: /var/lib/ferroada/spool
+            {{- end }}
+            {{- if .Values.ferroada.originSecret }}
+            - name: ORIGIN_SECRET_HEADER
+              value: {{ .Values.ferroada.originSecretHeader | quote }}
+            - name: ORIGIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ferroada.secretName" . }}
+                  key: ORIGIN_SECRET
+            {{- end }}
+          workingDir: /
+          livenessProbe:
+            exec:
+              command:
+                - /ferroada
+                - healthcheck
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            exec:
+              command:
+                - /ferroada
+                - healthcheck
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.spool.enabled }}
+            - name: spool
+              mountPath: /var/lib/ferroada/spool
+            {{- end }}
+            {{- if include "ferroada.hasToml" . }}
+            - name: config
+              mountPath: /ferroada.toml
+              subPath: ferroada.toml
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 8Mi
+        {{- if .Values.spool.enabled }}
+        - name: spool
+          emptyDir:
+            sizeLimit: {{ .Values.spool.sizeLimit | quote }}
+        {{- end }}
+        {{- if include "ferroada.hasToml" . }}
+        - name: config
+          configMap:
+            name: {{ include "ferroada.configMapName" . }}
+            items:
+              - key: {{ .Values.config.existingConfigMapKey }}
+                path: ferroada.toml
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range .Values.topologySpreadConstraints }}
+        - maxSkew: {{ .maxSkew }}
+          topologyKey: {{ .topologyKey | quote }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "ferroada.selectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

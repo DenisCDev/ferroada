@@ -1,0 +1,29 @@
+Ferroada {{ .Chart.AppVersion }} no namespace {{ .Release.Namespace }}.
+
+Origin: {{ .Values.ferroada.origin }}
+O processo resolve esse host no arranque. Sem um Service real o pod CrashLoop.
+{{- if eq .Values.ferroada.origin "http://substitua-origin.invalid:8080" }}
+
+ATENÇÃO: o origin ainda é o placeholder (.invalid). Substitua:
+  --set ferroada.origin=http://<svc>.<ns>.svc:8080
+{{- end }}
+
+O Service só publica a porta {{ .Values.service.port }} (proxy). O dashboard
+escuta {{ .Values.ferroada.dashboardBind }}:{{ .Values.ferroada.dashboardPort }}
+dentro do pod — não há Service nem Ingress para ele.
+
+Túnel do dashboard:
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "ferroada.fullname" . }} {{ .Values.ferroada.dashboardPort }}:{{ .Values.ferroada.dashboardPort }}
+
+Um replica sozinho é ponto único de falha. replicaCount={{ .Values.replicaCount }};
+o estado de rate/behavior fica na memória de cada pod. Rolling sem queda
+perceptível pede replicaCount >= 2 (e REPLICA_COUNT igual, já injetado).
+
+O origin só deve aceitar o Ferroada (NetworkPolicy/firewall/header
+ORIGIN_SECRET). Não publique o backend na mesma Service que o proxy.
+
+{{- if eq .Values.ferroada.dashboardToken "substitua-por-32-bytes-hex" }}
+
+ATENÇÃO: o token ainda é o placeholder. Substitua:
+  helm upgrade {{ .Release.Name }} deploy/helm/ferroada --set ferroada.dashboardToken=$(openssl rand -hex 32)
+{{- end }}

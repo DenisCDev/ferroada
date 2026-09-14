@@ -1,0 +1,134 @@
+# Defaults fail-closed. O dashboard nunca vira Service/Ingress.
+# Token: substitua no install (`--set ferroada.dashboardToken=...` ou existingSecret).
+# Sem token o processo recusa o arranque (FERROADA_PRODUCTION=true).
+
+replicaCount: 1
+
+image:
+  repository: ferroada
+  pullPolicy: IfNotPresent
+  tag: "0.6.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+# Distroless cc-debian12: uid 65532 = nonroot. Sem CAP_NET_BIND_SERVICE:
+# o processo escuta 3000, não :80.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 3000
+  annotations: {}
+
+# Desligado. Se ligar, o backend é a porta do proxy (3000), nunca 9000.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  # - host: api.exemplo.com
+  #   paths:
+  #     - path: /
+  #       pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+  # minAvailable: 1  # um ou outro, não os dois
+
+# Vazio = omitido. Exemplo:
+# - maxSkew: 1
+#   topologyKey: kubernetes.io/hostname
+#   whenUnsatisfiable: ScheduleAnyway
+topologySpreadConstraints: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+networkPolicy:
+  enabled: true
+
+spool:
+  enabled: false
+  sizeLimit: 1Gi
+
+probes:
+  liveness:
+    initialDelaySeconds: 8
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+ferroada:
+  production: true
+  dashboardBind: "127.0.0.1"
+  dashboardPort: "9000"
+  # Obrigatório se existingSecret estiver vazio.
+  dashboardToken: "substitua-por-32-bytes-hex"
+  existingSecret: ""
+  existingSecretKey: DASHBOARD_TOKEN
+  # DNS no boot. .invalid (RFC 2606) não colide com um Service `app` alheio.
+  origin: "http://substitua-origin.invalid:8080"
+  publicHost: ""
+  wafEngine: native
+  dlpAction: monitor
+  # Vazio = OTel desligado (o processo não abre socket extra).
+  otelEndpoint: ""
+  trustedProxies: ""
+  wafRequireCompletePaths: "/api/payment,/api/admin,/auth,/login"
+  originSecret: ""
+  originSecretHeader: X-Ferroada-Origin
+  # Knobs extra (RATE_LIMIT_MAX, …). Não sobrescreve bind/token/WAF_ENGINE:
+  # essas env vêm depois e ganham.
+  extraEnv: {}
+
+config:
+  # TOML multi-site. Vazio = TARGET_URL (ferroada.origin). Não monte ficheiro vazio.
+  toml: ""
+  existingConfigMap: ""
+  existingConfigMapKey: ferroada.toml
+
+extraVolumes: []
+extraVolumeMounts: []

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: ferroada
+description: Gateway de origem Ferroada — proxy Pingora rootless; dashboard só em loopback.
+type: application
+version: 0.6.0
+appVersion: "0.6.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/DenisCDev/ferroada
+sources:
+  - https://github.com/DenisCDev/ferroada
+keywords:
+  - waf
+  - proxy
+  - pingora
+  - origin-gateway

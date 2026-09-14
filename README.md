@@ -403,6 +403,7 @@ O binário é um processo Pingora. Não corre na Hostinger nem como função na 
 | [`hostinger-origin`](deploy/topologies/hostinger-origin/) | Estático na Hostinger; Ferroada numa VPS à frente |
 | [`vercel-origin`](deploy/topologies/vercel-origin/) | App na Vercel; Ferroada numa VPS à frente |
 | [`cdn-edge`](deploy/topologies/cdn-edge/) | Internet → CDN → Ferroada → backend (recomendado) |
+| [`Helm`](deploy/helm/ferroada/) | Kubernetes (pod rootless; dashboard não é Service) |
 
 Comece pelo `CHECKLIST.md` do modo. TLS: o Ferroada termina se houver `fullchain.pem`; senão Caddy na frente. Os dois nunca publicam a 443 ao mesmo tempo. CIDRs do edge: `deploy/cidrs/` (snapshot datado, sem fetch no processo).
 

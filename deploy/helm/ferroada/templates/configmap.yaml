@@ -1,0 +1,11 @@
+{{- if and .Values.config.toml (not .Values.config.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ferroada.configMapName" . }}
+  labels:
+    {{- include "ferroada.labels" . | nindent 4 }}
+data:
+  ferroada.toml: |
+    {{- .Values.config.toml | nindent 4 }}
+{{- end }}
