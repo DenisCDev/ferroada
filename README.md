@@ -77,8 +77,17 @@ Internet
 | **JNDI / Log4Shell** | URI, headers, body | `${jndi:ldap://...}`, inclusive ofuscado |
 | **Request Smuggling** | Headers | `Content-Length` duplicado, `CL`+`TE`, `TE` inválido → 400 |
 | **Sensitive Path Access** | URI path + profile | `/.env`, `/.git/`, `/phpmyadmin`, `/.aws/credentials` |
-| **Bad Bots** | User-Agent | 18 assinaturas: sqlmap, nikto, nuclei, etc. |
+| **Bad Bots** | User-Agent | 18 assinaturas: sqlmap, nikto, nuclei, etc. (sinal fraco; a quota de abuse não depende disto) |
 | **Brute Force / DDoS básico** | Site + IPv4 ou prefixo IPv6 /64 | Rate limit sliding window (config via env) |
+| **Stuffing / enumeração / signup** | Identidade composta (opt-in `abuse`) | Mesmo fingerprint em IPs diferentes partilha o teto; site sem bloco `abuse` não muda |
+
+Abuse de aplicação é opt-in no TOML (`abuse = { stuffing_max = 10, challenge = "pow" }`).
+A identidade soma site, rede /64, fingerprint TLS (hash do ClientHello — versão,
+ciphers oferecidos e compressão; **não** é a string JA4 pública), fingerprint HTTP
+(nomes dos headers, sem valores), sessão, API key e `jwt.sub`. Sem ficheiro MMDB
+o ASN fica vazio e o processo arranca. Challenge `pow` só para browser
+(`Accept: text/html`) depois do score; API com JWT ou JSON não recebe HTML.
+Não há ML no caminho quente.
 
 A detecção de SQLi cobre cinco categorias — clássica (`UNION SELECT`, `OR 1=1`),
 stacked queries (`;DROP`), blind/time-based (`SLEEP`, `BENCHMARK`, `WAITFOR`),

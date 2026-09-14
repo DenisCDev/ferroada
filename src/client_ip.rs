@@ -24,6 +24,9 @@ pub struct RiskIdentity {
     pub api_key_hash: Option<u64>,
     pub jwt_sub_hash: Option<u64>,
     pub jwt_tenant_hash: Option<u64>,
+    pub tls_fingerprint: Option<u64>,
+    pub http_fingerprint: Option<u64>,
+    pub asn: Option<u32>,
 }
 
 impl SiteClientKey {
@@ -51,12 +54,28 @@ impl RiskIdentity {
             api_key_hash: bounded_hash(api_key),
             jwt_sub_hash: None,
             jwt_tenant_hash: None,
+            tls_fingerprint: None,
+            http_fingerprint: None,
+            asn: None,
         }
     }
 
     pub fn set_jwt(&mut self, sub: Option<&str>, tenant: Option<&str>) {
         self.jwt_sub_hash = bounded_hash(sub);
         self.jwt_tenant_hash = bounded_hash(tenant);
+    }
+
+    pub fn set_fingerprints(&mut self, tls: Option<u64>, http: Option<u64>) {
+        self.tls_fingerprint = tls.filter(|value| *value != 0);
+        self.http_fingerprint = http.filter(|value| *value != 0);
+    }
+
+    pub fn set_asn(&mut self, asn: Option<u32>) {
+        self.asn = asn.filter(|value| *value != 0);
+    }
+
+    pub fn preferred_fingerprint(&self) -> Option<u64> {
+        self.tls_fingerprint.or(self.http_fingerprint)
     }
 
     pub fn network_key(&self) -> SiteClientKey {

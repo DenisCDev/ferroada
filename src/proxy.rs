@@ -59,6 +59,7 @@ static HTTPS_REDIRECT_HOST: Lazy<Option<String>> = Lazy::new(|| {
     })
 });
 
+use crate::abuse::{self, AbuseEngine, AbuseRequest, AbuseVerdict};
 use crate::behavioral::{self, BehavioralVerdict};
 use crate::client_ip::{ClientIpConfig, RiskIdentity, TrustedProxies};
 use crate::config::{Config, InspectionDisposition, InspectionPolicy};
@@ -165,6 +166,7 @@ pub struct FerroadaProxy {
     waf_engine: WafEngine,
     origins: OriginPools,
     extra_retries: u32,
+    abuse: Arc<AbuseEngine>,
 }
 
 pub struct BoundedBodyBuffer {
@@ -329,6 +331,7 @@ impl FerroadaProxy {
             waf_engine: WafEngine::native(),
             origins: OriginPools::from_policy(&policy),
             extra_retries: origin::configured_extra_retries(),
+            abuse: Arc::new(AbuseEngine::new()),
         }
     }
 
@@ -783,8 +786,69 @@ impl ProxyHttp for FerroadaProxy {
             if let Some(principal) = ctx.jwt.as_ref() {
                 identity.set_jwt(Some(principal.sub.as_str()), principal.tenant.as_deref());
             }
+            identity.set_fingerprints(
+                crate::tls_fingerprint::from_session_digest(session.digest()),
+                Some(abuse::http_fingerprint(&session.req_header().headers)),
+            );
+            if let Some(asn) = ctx
+                .backend
+                .as_ref()
+                .and_then(|backend| backend.abuse.as_ref())
+                .and_then(|policy| policy.mmdb.as_ref())
+                .and_then(|db| db.lookup(ip))
+            {
+                identity.set_asn(Some(asn));
+            }
             identity
         });
+
+        let abuse_policy = ctx
+            .backend
+            .as_ref()
+            .and_then(|backend| backend.abuse.clone());
+        let abuse_verdict = if let (Some(identity), Some(policy)) =
+            (ctx.risk_identity.clone(), abuse_policy.as_ref())
+        {
+            let accept = session
+                .req_header()
+                .headers
+                .get("Accept")
+                .and_then(|value| value.to_str().ok());
+            let content_type = session
+                .req_header()
+                .headers
+                .get("Content-Type")
+                .and_then(|value| value.to_str().ok());
+            let ua = session
+                .req_header()
+                .headers
+                .get("User-Agent")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let path = session.req_header().uri.path().to_string();
+            let method = session.req_header().method.as_str().to_string();
+            Some(self.abuse.inspect(
+                policy,
+                &identity,
+                AbuseRequest {
+                    method: &method,
+                    path: &path,
+                    ua: ua.as_deref(),
+                    accept,
+                    content_type,
+                    has_jwt: ctx.jwt.is_some(),
+                },
+            ))
+        } else {
+            None
+        };
+        if let (Some(AbuseVerdict::Block { reasons, challenge }), Some(policy)) =
+            (abuse_verdict, abuse_policy.as_ref())
+        {
+            return self
+                .send_abuse(session, ctx, policy, &reasons, challenge)
+                .await;
+        }
 
         if let Some(identity) = ctx.risk_identity.as_ref() {
             let ua = session
@@ -1482,7 +1546,9 @@ impl ProxyHttp for FerroadaProxy {
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         let Some(picked) = self.pick_origin(ctx) else {
-            return Error::e_explain(ErrorType::HTTPStatus(503), "nenhum origin saudável");
+            let mut err = Error::explain(ErrorType::HTTPStatus(503), "nenhum origin saudável");
+            err.set_retry(false);
+            return Err(err);
         };
         info!(
             addr = %picked.addr,
@@ -1510,10 +1576,11 @@ impl ProxyHttp for FerroadaProxy {
         mut e: Box<Error>,
     ) -> Box<Error> {
         self.mark_origin_failure(ctx);
-        if self.should_retry_upstream(session, ctx) {
+        let retry = self.should_retry_upstream(session, ctx);
+        if retry {
             ctx.upstream_retries += 1;
-            e.set_retry(true);
         }
+        e.set_retry(retry);
         e
     }
 
@@ -1526,10 +1593,11 @@ impl ProxyHttp for FerroadaProxy {
         _client_reused: bool,
     ) -> Box<Error> {
         self.mark_origin_failure(ctx);
-        if self.should_retry_upstream(session, ctx) {
+        let retry = self.should_retry_upstream(session, ctx);
+        if retry {
             ctx.upstream_retries += 1;
-            e.set_retry(true);
         }
+        e.set_retry(retry);
         e
     }
 
@@ -2406,6 +2474,14 @@ impl FerroadaProxy {
         if matches!(status, 401 | 403 | 404) {
             if let Some(identity) = ctx.risk_identity.as_ref() {
                 behavioral::record_response(identity, status);
+                if ctx.backend.as_ref().and_then(|backend| backend.abuse.as_ref()).is_some() {
+                    self.abuse.record_origin_status(
+                        identity,
+                        ctx.method.as_str(),
+                        &ctx.request_uri,
+                        status,
+                    );
+                }
             }
         }
         ctx.content_type = upstream_response
@@ -3044,6 +3120,50 @@ impl FerroadaProxy {
         header.insert_header("Content-Type", "text/plain; charset=utf-8")?;
         header.insert_header("Content-Length", body.len().to_string())?;
         header.insert_header("WWW-Authenticate", "Bearer")?;
+        session
+            .write_response_header(Box::new(header), false)
+            .await?;
+        session
+            .write_response_body(Some(Bytes::from(body)), true)
+            .await?;
+        Ok(true)
+    }
+
+    async fn send_abuse(
+        &self,
+        session: &mut Session,
+        ctx: &mut FerroadaCtx,
+        policy: &crate::abuse::AbusePolicy,
+        reasons: &[crate::abuse::AbuseReason],
+        challenge: bool,
+    ) -> Result<bool> {
+        ctx.note_event("abuse");
+        abuse::record_block(
+            &ctx.site_scope,
+            &ctx.client_addr,
+            &ctx.request_uri,
+            reasons,
+            challenge,
+        );
+        let (content_type, body) = if challenge {
+            let rendered = abuse::render_challenge(policy, reasons);
+            (rendered.content_type, rendered.body)
+        } else {
+            (
+                "text/plain; charset=utf-8",
+                abuse::plain_block_body(reasons),
+            )
+        };
+        let mut header = ResponseHeader::build(403, None)?;
+        header.insert_header("Content-Type", content_type)?;
+        header.insert_header("Content-Length", body.len().to_string())?;
+        if challenge {
+            if let crate::abuse::ChallengeKind::External = policy.challenge {
+                if let Some(url) = policy.challenge_url.as_deref() {
+                    header.insert_header("Location", url)?;
+                }
+            }
+        }
         session
             .write_response_header(Box::new(header), false)
             .await?;
