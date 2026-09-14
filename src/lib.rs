@@ -4,6 +4,8 @@ pub mod client_ip;
 pub mod config;
 pub mod connection;
 pub mod dashboard;
+mod dashboard_audit;
+mod dashboard_auth;
 pub mod dlp;
 pub mod graphql;
 pub mod grpc;

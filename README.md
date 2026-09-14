@@ -288,8 +288,13 @@ inesperadas são rejeitadas, impedindo que `206` contorne o mascaramento. O buff
 </p>
 
 O binário serve JSON em `http://localhost:9000/api/metrics` e um HTML mínimo na
-mesma porta. Quando há token, o HTML pede a credencial e a mantém apenas no
-`sessionStorage` da aba; falhas de atualização ficam visíveis na página.
+mesma porta. O documento HTML **não** devolve 401: o formulário de token vive
+nele. Com `DASHBOARD_TOKEN`, o login é POST `/api/login` (token no corpo, nunca
+na query) e abre uma sessão curta em cookie HttpOnly. Fora de loopback, token
+sozinho não chega: ligue OIDC (authorization code + PKCE) ou mTLS (certificado
+cliente). `viewer` lê métricas; `operator` pode POST `/api/reload` com CSRF no
+formulário. Sem `DASHBOARD_OIDC_*` e sem CA de cliente, o comportamento atual
+(token) permanece. Isto não é production-grade.
 
 O painel Next (preto e branco, `web/`) é a interface: Visão geral e Eventos, atualização a cada 5 s. Se o proxy não estiver no ar, o painel mostra dados de demonstração.
 
@@ -461,9 +466,18 @@ Toda a configuração é feita por variáveis de ambiente:
 | `PROXY_LISTEN` | `0.0.0.0:3000` | Endereço do listener HTTP |
 | `TLS_LISTEN` | `0.0.0.0:3443` | Endereço do listener HTTPS (só se `TLS_CERT_PATH`/`TLS_KEY_PATH`) |
 | `DASHBOARD_PORT` | `9000` | Porta do dashboard de monitoramento |
-| `DASHBOARD_BIND` | `127.0.0.1` | IP do dashboard; bind não-loopback exige token |
-| `DASHBOARD_TOKEN` | *(vazio em loopback)* | Token Bearer; obrigatório fora de loopback e com `FERROADA_PRODUCTION=true` |
-| `FERROADA_PRODUCTION` | *(unset)* | Se `true`, o token é obrigatório mesmo em 127.0.0.1. O HTML continua público (formulário); `/api/metrics` e `/metrics` exigem Bearer |
+| `DASHBOARD_BIND` | `127.0.0.1` | IP do dashboard; bind não-loopback exige token (ou OIDC/mTLS) |
+| `DASHBOARD_TOKEN` | *(vazio em loopback)* | Token Bearer. `FERROADA_PRODUCTION=true` exige-o mesmo em loopback, mesmo com OIDC/mTLS. Sem production, bind fora de loopback aceita token **ou** OIDC/mTLS. Em loopback o token sozinho continua válido. |
+| `DASHBOARD_OIDC_ISSUER` / `DASHBOARD_OIDC_CLIENT_ID` / `DASHBOARD_OIDC_REDIRECT_URI` | *(unset = off)* | Opt-in OIDC (authorization code + PKCE). Sem estas e sem `DASHBOARD_MTLS_CA` o dashboard permanece só com token. |
+| `DASHBOARD_OIDC_CLIENT_SECRET` | *(opcional)* | Segredo confidencial; nunca vai na URL. PKCE corre na mesma. |
+| `DASHBOARD_OIDC_ROLE_CLAIM` | `ferroada_role` | Claim do ID token mapeada para `viewer` ou `operator`. |
+| `DASHBOARD_OIDC_OPERATORS` / `DASHBOARD_OIDC_VIEWERS` | `operator` / `viewer` | Valores da claim que dão cada papel. Sem operator, POST `/api/reload` é 403. |
+| `DASHBOARD_MTLS_CA` | *(unset)* | CA dos certificados cliente. Exige `DASHBOARD_TLS_CERT_PATH`/`DASHBOARD_TLS_KEY_PATH`. O handshake verifica o cert se o cliente o enviar; sem cert o HTML continua acessível. Fora de loopback a API exige o cert (ou sessão OIDC). |
+| `DASHBOARD_MTLS_OPERATORS` / `DASHBOARD_MTLS_VIEWERS` | *(vazio = viewer)* | CNs com papel operator/viewer. |
+| `DASHBOARD_SESSION_TTL_SECS` | `900` | Cookie `HttpOnly`, `SameSite=Strict`, `Secure` se o dashboard fala TLS. Mín. 60, máx. 8h. |
+| `DASHBOARD_AUDIT_LOG` | *(unset)* | Ficheiro JSONL append-only (login, reload, falha de auth). Não grava token nem código OIDC. |
+| `DASHBOARD_API_RATE_MAX` / `DASHBOARD_API_RATE_WINDOW` | `60` / `60` | Teto de pedidos a `/api` por IP e janela em segundos. |
+| `FERROADA_PRODUCTION` | *(unset)* | Se `true`, o token é obrigatório mesmo em 127.0.0.1. O HTML continua público (formulário); `/api/metrics` e `/metrics` exigem sessão, Bearer (loopback) ou mTLS. |
 | `FERROADA_POLICY_PUBKEY` | *(unset)* | Chave pública Ed25519 (PEM, hex ou base64). Opt-in: sem ela o TOML solto arranca. Com ela, o snapshot precisa de `ferroada.policy.sig` válida |
 | `FERROADA_POLICY_SIG` | `ferroada.policy.sig` | Assinatura Ed25519 do snapshot (`ferroada policy compile`) |
 | `FERROADA_PID_FILE` | `ferroada.pid` | Gravado no boot; `ferroada reload --pid-file` lê daqui |
