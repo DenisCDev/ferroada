@@ -60,6 +60,7 @@ static HTTPS_REDIRECT_HOST: Lazy<Option<String>> = Lazy::new(|| {
 });
 
 use crate::abuse::{self, AbuseEngine, AbuseRequest, AbuseVerdict};
+use crate::authz::{self, AuthzRequest, AuthzVerdict, FailMode};
 use crate::behavioral::{self, BehavioralVerdict};
 use crate::client_ip::{ClientIpConfig, RiskIdentity, TrustedProxies};
 use crate::config::{Config, InspectionDisposition, InspectionPolicy};
@@ -1356,6 +1357,9 @@ impl ProxyHttp for FerroadaProxy {
                 if self.apply_grpc_body(session, ctx, l1_body).await? {
                     return Ok(true);
                 }
+                if self.apply_authz(session, ctx, l1_body).await? {
+                    return Ok(true);
+                }
             } else if ctx.openapi_match.is_some()
                 || ctx
                     .backend
@@ -1372,6 +1376,11 @@ impl ProxyHttp for FerroadaProxy {
                     .as_ref()
                     .and_then(|backend| backend.grpc.as_ref())
                     .is_some()
+                || ctx
+                    .backend
+                    .as_ref()
+                    .and_then(|backend| backend.authz_for(&ctx.request_uri))
+                    .is_some_and(|policy| policy.needs_body())
             {
                 let wire = if spooling {
                     match ctx
@@ -1407,6 +1416,14 @@ impl ProxyHttp for FerroadaProxy {
                 if self.apply_grpc_body(session, ctx, &wire).await? {
                     return Ok(true);
                 }
+                if self.apply_authz(session, ctx, &wire).await? {
+                    return Ok(true);
+                }
+            } else {
+                let body = ctx.request_body.as_slice().to_vec();
+                if self.apply_authz(session, ctx, &body).await? {
+                    return Ok(true);
+                }
             }
 
             // Keep the global reservation until the request finishes: Pingora now
@@ -1438,6 +1455,9 @@ impl ProxyHttp for FerroadaProxy {
                 return Ok(true);
             }
             if self.apply_grpc_body(session, ctx, &[]).await? {
+                return Ok(true);
+            }
+            if self.apply_authz(session, ctx, &[]).await? {
                 return Ok(true);
             }
         }
@@ -2684,6 +2704,92 @@ impl FerroadaProxy {
                 self.send_403(session, "identidade não corresponde ao recurso")
                     .await
             }
+        }
+    }
+
+    async fn apply_authz(
+        &self,
+        session: &mut Session,
+        ctx: &mut FerroadaCtx,
+        body: &[u8],
+    ) -> Result<bool> {
+        let Some(policy) = ctx
+            .backend
+            .as_ref()
+            .and_then(|backend| backend.authz_for(&ctx.request_uri))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let uri = ctx.request_uri.clone();
+        let path = uri.split('?').next().unwrap_or(uri.as_str());
+        let extra = ctx
+            .backend
+            .as_ref()
+            .and_then(|backend| backend.openapi.as_ref())
+            .map(|spec| spec.path_params(path))
+            .unwrap_or_default();
+        let jwt_policy = ctx.backend.as_ref().and_then(|backend| backend.jwt.clone());
+        let Some(principal) = ctx.jwt.as_ref() else {
+            return self
+                .reject_authz_deny(session, ctx, &uri, "principal")
+                .await;
+        };
+        let sub = principal.sub.clone();
+        let tenant = principal.tenant.clone();
+        let Some(resource) = policy.extract_resource(path, body, jwt_policy.as_ref(), &extra)
+        else {
+            return self.reject_authz_deny(session, ctx, &uri, "resource").await;
+        };
+        let verdict = policy
+            .decide(&AuthzRequest {
+                principal: sub.as_str(),
+                action: policy.action(),
+                resource: resource.as_str(),
+                tenant: tenant.as_deref(),
+            })
+            .await;
+        match verdict {
+            AuthzVerdict::Allow => Ok(false),
+            AuthzVerdict::Deny => {
+                self.reject_authz_deny(session, ctx, &uri, policy.action())
+                    .await
+            }
+            AuthzVerdict::Unavailable { detail } => {
+                self.reject_authz_unavailable(session, ctx, &uri, &policy, detail)
+                    .await
+            }
+        }
+    }
+
+    async fn reject_authz_deny(
+        &self,
+        session: &mut Session,
+        ctx: &mut FerroadaCtx,
+        uri: &str,
+        detail: &str,
+    ) -> Result<bool> {
+        ctx.note_event("authz");
+        metrics::record_block_in(&ctx.site_scope, "authz", &ctx.client_addr, uri, detail);
+        self.send_403(session, "não autorizado").await
+    }
+
+    async fn reject_authz_unavailable(
+        &self,
+        session: &mut Session,
+        ctx: &mut FerroadaCtx,
+        uri: &str,
+        policy: &authz::AuthzPolicy,
+        detail: &str,
+    ) -> Result<bool> {
+        ctx.note_event("authz_unavailable");
+        metrics::record_authz_unavailable(&ctx.site_scope, &ctx.client_addr, uri, detail);
+        match policy.fail_mode() {
+            FailMode::Closed => {
+                self.send_403(session, "serviço de autorização indisponível")
+                    .await
+            }
+            FailMode::Open => Ok(false),
         }
     }
 

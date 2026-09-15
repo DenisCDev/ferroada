@@ -148,6 +148,17 @@ com timeout no fetch e last-known-good se o IdP cair. Bindings no TOML
 comportamento passam a usar o hash de `sub`/tenant, não só o IP. O token e o
 payload não entram no log.
 
+Autorização é um callback opt-in por rota (`authorization = { socket =
+"unix:///run/authz.sock", action = "transfer:create", resource =
+"path.account_id", fail_mode = "closed" }`). Sem o bloco a rota continua
+como hoje: bindings JWT se existirem, senão o proxy não decide ownership.
+Com o bloco, o Ferroada pergunta ao serviço da aplicação — só Unix socket,
+timeout 50 ms (teto 200 ms) — se aquele `jwt.sub` pode a ação naquele
+recurso. A resposta é `{ "allow": true|false }`. Socket caído ou timeout:
+`fail_mode = closed` devolve 403; `open` deixa passar e sobe a métrica.
+O Ferroada não embarca OPA/Cedar e não inventa se o objeto pertence ao
+usuário — o contrato é com o serviço da app. O evento não leva token nem body.
+
 GraphQL é opt-in por site/rota (`graphql = { max_depth = 8, max_operations = 5, introspection = false }`).
 Sem o bloco, `POST /graphql` continua só com HTTP/WAF/OpenAPI. Com o bloco, o
 proxy parseia o AST (JSON `{"query":...}`, batch em array, ou
@@ -329,7 +340,7 @@ no código do backend — um proxy que prometesse resolvê-las estaria mentindo:
 
 | Vulnerabilidade | Por que proxy não resolve |
 |----------------|--------------------------|
-| **IDOR** (Insecure Direct Object Reference) | Só o backend sabe se o user A pode acessar o recurso do user B |
+| **IDOR** (Insecure Direct Object Reference) | Bindings JWT conferem claim == path/body. Ownership (este principal pode este objeto?) só o serviço de autorização da app responde, via Unix socket opt-in. Sem o bloco, o proxy não inventa essa decisão. |
 | **Mass Assignment** | Só o backend sabe quais campos são permitidos em cada request |
 | **Race Condition** | Controle de concorrência é responsabilidade do banco/backend |
 | **JWT / secret fraco** | Configuração de autenticação do backend |
