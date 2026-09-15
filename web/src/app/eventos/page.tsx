@@ -5,8 +5,12 @@ export default function EventosPage() {
   const data = unavailableMetrics();
   return (
     <>
-      <h1>Eventos</h1>
-      <p className="lede">Eventos de segurança e observações, mais recentes primeiro.</p>
+      <section className="page-heading">
+        <div>
+          <h1>Eventos</h1>
+          <p>Eventos de segurança e observações, mais recentes primeiro.</p>
+        </div>
+      </section>
       <EventsPanel initial={data} />
     </>
   );

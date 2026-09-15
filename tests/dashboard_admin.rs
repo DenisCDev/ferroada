@@ -1,4 +1,4 @@
-//! Dashboard admin auth: token, session/CSRF, RBAC, query credentials, HTML public.
+//! Dashboard admin auth: token, session/CSRF, RBAC, query credentials. GET / is not a UI.
 
 use ferroada::dashboard::{AdminAudit, AdminAuth, DashboardService, Role};
 use ferroada::policy::PolicyStore;
@@ -113,7 +113,7 @@ fn host(addr: SocketAddr) -> String {
 }
 
 #[test]
-fn html_stays_public_metrics_need_auth() {
+fn root_is_not_html_metrics_need_auth() {
     let _lock = live_lock();
     let addr = free_bind();
     spawn_dashboard(addr, DashboardService::new(Some("segredo".into()), vec![]));
@@ -125,8 +125,9 @@ fn html_stays_public_metrics_need_auth() {
         ),
     );
     assert_eq!(page.status, 200, "{}", page.body);
-    assert!(page.body.contains("Token do dashboard"));
-    assert!(page.body.contains("id=\"auth\""));
+    assert!(page.body.contains("API do proxy"));
+    assert!(!page.body.contains("<html"));
+    assert!(!page.body.contains("Token do dashboard"));
     let metrics = request(
         addr,
         &format!(

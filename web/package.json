@@ -6,7 +6,7 @@
     "build": "next build",
     "start": "next start -p 3100",
     "screenshot": "node scripts/screenshot.mjs",
-    "test": "tsx --test src/lib/get-metrics.test.ts"
+    "test": "tsx --test src/lib/get-metrics.test.ts src/lib/labels.test.ts"
   },
   "dependencies": {
     "next": "16.3.3",

@@ -66,3 +66,24 @@ export function formatTime(iso: string): string {
 export function totalBlocked(blocked: Record<string, number>): number {
   return Object.values(blocked).reduce((s, n) => s + n, 0);
 }
+
+export type EventActionKind = "blocked" | "dlp" | "observed" | "other";
+
+export function eventAction(type: string): { label: string; kind: EventActionKind } {
+  if (type === "dlp_partial_block") return { label: "bloqueado", kind: "blocked" };
+  if (
+    type.endsWith("_monitor") ||
+    type.endsWith("_shadow") ||
+    type.endsWith("_observe") ||
+    type.endsWith("_skip")
+  ) {
+    return { label: "observado", kind: "observed" };
+  }
+  if (type === "dlp" || type.startsWith("dlp_") || type === "range_removed") {
+    return { label: "DLP", kind: "dlp" };
+  }
+  if (type === "https_redirect") return { label: "redirecionado", kind: "other" };
+  if (type === "policy_reload_rejected") return { label: "recusado", kind: "blocked" };
+  if (type.startsWith("policy_reload")) return { label: "política", kind: "other" };
+  return { label: "bloqueado", kind: "blocked" };
+}

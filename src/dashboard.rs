@@ -19,8 +19,8 @@ pub use crate::dashboard_auth::{
     production_enabled, validate_exposure, AdminAuth, DashboardAuthSetup, Role,
 };
 
-/// GET/HEAD after method checks. HTML, `/healthz` and `/readyz` stay public so
-/// the token form in the document remains reachable.
+/// GET/HEAD after method checks. `/healthz` and `/readyz` stay public.
+/// GET `/` is a plain-text API index — the operator UI lives in `web/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DashboardGet {
     Health,
@@ -28,7 +28,8 @@ enum DashboardGet {
     Unauthorized,
     MetricsJson,
     MetricsPrometheus,
-    Html,
+    Index,
+    NotFound,
 }
 
 fn classify_dashboard_get(path: &str, authorized: bool) -> DashboardGet {
@@ -38,7 +39,8 @@ fn classify_dashboard_get(path: &str, authorized: bool) -> DashboardGet {
         "/api/metrics" if authorized => DashboardGet::MetricsJson,
         "/metrics" if authorized => DashboardGet::MetricsPrometheus,
         "/api/metrics" | "/metrics" => DashboardGet::Unauthorized,
-        _ => DashboardGet::Html,
+        "/" => DashboardGet::Index,
+        _ => DashboardGet::NotFound,
     }
 }
 
@@ -309,10 +311,11 @@ impl DashboardService {
                 "text/plain; version=0.0.4; charset=utf-8",
                 metrics::snapshot_prometheus(),
             ),
-            DashboardGet::Html => (
-                200,
-                "text/html; charset=utf-8",
-                dashboard_html(self.admin.oidc_enabled()),
+            DashboardGet::Index => (200, "text/plain; charset=utf-8", api_index_body()),
+            DashboardGet::NotFound => (
+                404,
+                "text/plain; charset=utf-8",
+                "404 não encontrado\n".to_string(),
             ),
         };
         respond(session, status, content_type, &body, None, set_cookie).await?;
@@ -672,7 +675,10 @@ async fn respond(
     header.insert_header("Content-Type", content_type)?;
     header.insert_header("Content-Length", body.len().to_string())?;
     header.insert_header("Cache-Control", "no-cache")?;
-    header.insert_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")?;
+    header.insert_header(
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    )?;
     header.insert_header("Referrer-Policy", "no-referrer")?;
     header.insert_header("X-Content-Type-Options", "nosniff")?;
     header.insert_header("X-Frame-Options", "DENY")?;
@@ -701,218 +707,9 @@ async fn respond(
     Ok(())
 }
 
-fn dashboard_html(oidc: bool) -> String {
-    const TEMPLATE: &str = r##"<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ferroada</title>
-<style>
-  :root { --fg:#171717; --muted:#737373; --line:#eaeaea; --font:ui-sans-serif,system-ui,sans-serif; --mono:ui-monospace,Menlo,Consolas,monospace; }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family:var(--font); color:var(--fg); background:#fff; font-size:14px; line-height:1.5; }
-  main { max-width:880px; margin:0 auto; padding:40px 24px 80px; }
-  h1 { font-size:22px; font-weight:600; letter-spacing:-.03em; margin:0 0 8px; }
-  .lede { color:var(--muted); margin:0 0 28px; }
-  .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:8px; overflow:hidden; margin-bottom:28px; }
-  .kpi { background:#fff; padding:16px 18px; }
-  .kpi dt { color:var(--muted); font-size:12px; margin:0 0 6px; }
-  .kpi dd { margin:0; font-size:22px; font-weight:600; letter-spacing:-.03em; font-variant-numeric:tabular-nums; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
-  th { color:var(--muted); font-weight:500; font-size:12px; }
-  .wrap { border:1px solid var(--line); border-radius:8px; overflow:auto; }
-  .mono { font-family:var(--mono); font-size:12px; }
-  .empty { color:var(--muted); padding:32px; text-align:center; }
-  .notice { border:1px solid #f1c40f; background:#fffbea; border-radius:8px; padding:12px 14px; margin:0 0 20px; }
-  .auth { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .auth input { min-width:280px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; }
-  .auth button, .reload button { padding:8px 12px; border:0; border-radius:6px; background:#171717; color:#fff; cursor:pointer; }
-  .auth button:disabled, .reload button:disabled { opacity:.45; cursor:not-allowed; }
-  [hidden] { display:none !important; }
-  @media (max-width:720px) { .kpis { grid-template-columns:1fr 1fr; } }
-</style>
-</head>
-<body>
-<main>
-  <h1>Visão geral</h1>
-  <p class="lede">O que o proxy viu. Esta página atualiza a cada cinco segundos. O painel Next fica em <code>web/</code>. Política <code id="policy-version">—</code>.</p>
-  <form class="auth notice" id="auth" hidden>
-    <label for="token">Token do dashboard</label>
-    <input id="token" type="password" autocomplete="current-password" required>
-    <button id="auth-submit" type="submit" disabled>Entrar</button>
-  </form>
-  <p class="notice" id="oidc-wrap" hidden><a href="/oidc/login">Entrar com identidade</a></p>
-  <form class="reload notice" id="reload-form" hidden>
-    <button id="reload-btn" type="submit" disabled>Recarregar política</button>
-    <p id="reload-status" role="status" hidden></p>
-  </form>
-  <p class="notice" id="status" role="status">Carregando métricas...</p>
-  <dl class="kpis" id="kpis"></dl>
-  <div class="wrap">
-    <table>
-      <thead><tr><th>Hora</th><th>Tipo</th><th>IP</th><th>URI</th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-  </div>
-</main>
-<script>
-const oidcEnabled = __OIDC__;
-const labels = { sqli:'injeção SQL', xss:'XSS', path_traversal:'path traversal', rate_limit:'limite de taxa', sensitive_path:'caminho sensível', body_sqli:'SQL no corpo', body_xss:'XSS no corpo', method:'método HTTP', size_limit:'tamanho', header_limit:'limite de headers', concurrency_limit:'limite de concorrência', connection_limit:'limite de conexões', request_buffer_limit:'memória de inspeção de entrada', spool_limit:'limite de spool', dlp_partial_block:'resposta parcial bloqueada pelo DLP', host:'host', crlf:'CRLF', smuggling:'smuggling', jndi:'JNDI', bad_bot:'bot', behavioral_throttle:'comportamento (freio)', behavioral_block:'comportamento (ban)', waf_incomplete:'inspeção WAF incompleta', waf_monitor:'monitoramento WAF', waf_l1:'WAF L1 (CRS)', waf_l1_shadow:'WAF L1 (sombra)', waf_engine_unavailable:'motor WAF L1 indisponível', dlp_skip:'DLP não aplicado', range_removed:'range removido para inspeção DLP', dlp:'DLP', inspection_parse_error:'JSON inválido', inspection_timeout:'tempo esgotado na inspeção', inspection_budget:'orçamento de inspeção esgotado', openapi:'validação OpenAPI', openapi_observe:'OpenAPI (observação)', jwt:'JWT inválido', jwt_binding:'JWT (binding)', authz:'autorização', authz_unavailable:'serviço de autorização indisponível', graphql:'limite GraphQL', grpc:'método gRPC', policy_reload:'política recarregada', policy_reload_rejected:'reload de política recusado', abuse:'abuso' };
-const auth = document.getElementById('auth');
-const status = document.getElementById('status');
-const tokenInput = document.getElementById('token');
-const authSubmit = document.getElementById('auth-submit');
-const oidcWrap = document.getElementById('oidc-wrap');
-const reloadForm = document.getElementById('reload-form');
-const reloadBtn = document.getElementById('reload-btn');
-const reloadStatus = document.getElementById('reload-status');
-let token = sessionStorage.getItem('ferroada_dashboard_token') || '';
-let csrf = '';
-let role = '';
-if (oidcWrap && oidcEnabled) oidcWrap.hidden = false;
-function fmt(n){ return new Intl.NumberFormat('pt-BR').format(n); }
-function hour(iso){ const d=new Date(iso); return Number.isNaN(d.getTime())?iso:new Intl.DateTimeFormat('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(d); }
-function cell(tag, text, cls){
-  const n = document.createElement(tag);
-  if (cls) n.className = cls;
-  n.textContent = text;
-  return n;
-}
-function kpi(dt, dd){
-  const wrap = document.createElement('div');
-  wrap.className = 'kpi';
-  wrap.appendChild(cell('dt', dt));
-  wrap.appendChild(cell('dd', dd));
-  return wrap;
-}
-function syncReload(){
-  const canReload = role === 'operator';
-  if (reloadForm) reloadForm.hidden = !canReload;
-  if (reloadBtn) reloadBtn.disabled = !canReload;
-}
-async function tick(){
-  const headers = token ? { Authorization: 'Bearer ' + token } : {};
-  const res = await fetch('/api/metrics', { headers, credentials: 'same-origin', signal: AbortSignal.timeout(4000) });
-  if(res.status === 401){
-    auth.hidden = false;
-    if (oidcWrap && oidcEnabled) oidcWrap.hidden = false;
-    status.hidden = false;
-    status.textContent = 'Informe o token configurado em DASHBOARD_TOKEN.';
-    throw new Error('unauthorized');
-  }
-  if(!res.ok) throw new Error('metrics');
-  const m = await res.json();
-  auth.hidden = true;
-  if (oidcWrap) oidcWrap.hidden = true;
-  status.hidden = true;
-  csrf = (m.admin && m.admin.csrf) || '';
-  role = (m.admin && m.admin.role) || '';
-  syncReload();
-  const policyEl = document.getElementById('policy-version');
-  if (policyEl) policyEl.textContent = m.policy_version || '—';
-  const blocked = Object.values(m.blocked||{}).reduce((s,n)=>s+n,0);
-  const rate = m.requests_total===0?0:(1-blocked/Math.max(m.requests_total,blocked))*100;
-  const kpis = document.getElementById('kpis');
-  kpis.replaceChildren(
-    kpi('Requisições', fmt(m.requests_total)),
-    kpi('Bloqueios', fmt(blocked)),
-    kpi('Tráfego limpo', new Intl.NumberFormat('pt-BR',{maximumFractionDigits:1}).format(rate)+'%'),
-    kpi('DLP', fmt((m.dlp&&m.dlp.cpf_masked||0)+(m.dlp&&m.dlp.cnpj_masked||0)+(m.dlp&&m.dlp.card_masked||0)+(m.dlp&&m.dlp.tokens_masked||0)))
-  );
-  const events = m.recent_events||[];
-  const tb = document.getElementById('rows');
-  tb.replaceChildren();
-  if(!events.length){
-    const tr = document.createElement('tr');
-    const td = cell('td', 'Nenhum evento de segurança recente.', 'empty');
-    td.colSpan = 4;
-    tr.appendChild(td);
-    tb.appendChild(tr);
-    return;
-  }
-  events.forEach(function(e){
-    const tr = document.createElement('tr');
-    tr.appendChild(cell('td', hour(e.timestamp), 'mono'));
-    tr.appendChild(cell('td', labels[e.event_type]||e.event_type));
-    tr.appendChild(cell('td', e.client_ip, 'mono'));
-    tr.appendChild(cell('td', e.uri, 'mono'));
-    tb.appendChild(tr);
-  });
-}
-auth.addEventListener('submit', function(event){
-  event.preventDefault();
-  const value = tokenInput.value.trim();
-  if(!value) return;
-  token = value;
-  sessionStorage.setItem('ferroada_dashboard_token', token);
-  status.hidden = false;
-  status.textContent = 'Validando token...';
-  const body = new URLSearchParams();
-  body.set('token', value);
-  fetch('/api/login', { method: 'POST', body, credentials: 'same-origin', signal: AbortSignal.timeout(4000) })
-    .then(function(res){
-      if(res.status === 401){
-        auth.hidden = false;
-        status.hidden = false;
-        status.textContent = 'Token recusado. Confira DASHBOARD_TOKEN.';
-        throw new Error('unauthorized');
-      }
-      if(!res.ok) throw new Error('login');
-      return tick();
-    })
-    .catch(showError);
-});
-if (reloadForm) reloadForm.addEventListener('submit', function(event){
-  event.preventDefault();
-  if (role !== 'operator') return;
-  if (!csrf && !token) {
-    reloadStatus.hidden = false;
-    reloadStatus.textContent = 'A sessão expirou. Entre de novo para recarregar a política.';
-    return;
-  }
-  reloadBtn.disabled = true;
-  reloadStatus.hidden = false;
-  reloadStatus.textContent = 'Recarregando a política…';
-  const body = new URLSearchParams();
-  if (csrf) body.set('csrf', csrf);
-  const headers = token ? { Authorization: 'Bearer ' + token } : {};
-  fetch('/api/reload', { method: 'POST', headers, body, credentials: 'same-origin', signal: AbortSignal.timeout(8000) })
-    .then(function(res){
-      if (res.status === 401) {
-        reloadStatus.textContent = 'A sessão expirou. Entre de novo para recarregar a política.';
-        throw new Error('unauthorized');
-      }
-      if (res.status === 403) {
-        reloadStatus.textContent = 'Sem permissão para recarregar a política.';
-        throw new Error('forbidden');
-      }
-      if (!res.ok) throw new Error('reload');
-      reloadStatus.textContent = 'Política recarregada.';
-      return tick();
-    })
-    .catch(function(error){
-      if (error.message === 'forbidden' || error.message === 'unauthorized') return;
-      reloadStatus.textContent = 'Não foi possível recarregar a política. A versão anterior permanece.';
-    })
-    .finally(function(){ syncReload(); });
-});
-tokenInput.addEventListener('input', function(){
-  authSubmit.disabled = !tokenInput.value.trim();
-});
-function showError(error){
-  if(error.message === 'unauthorized') return;
-  status.hidden = false;
-  status.textContent = 'Não foi possível atualizar as métricas. Tentaremos novamente em cinco segundos.';
-}
-tick().catch(showError);
-setInterval(function(){ tick().catch(showError); }, 5000);
-</script>
-</body>
-</html>
-"##;
-    TEMPLATE.replace("__OIDC__", if oidc { "true" } else { "false" })
+fn api_index_body() -> String {
+    "ferroada — este porto é a API do proxy, não o painel.\n/healthz  /readyz  /api/metrics  /metrics\nO painel está em web/ (desenvolvimento: http://127.0.0.1:3100).\n"
+        .to_string()
 }
 
 #[cfg(test)]
@@ -958,23 +755,19 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_document_stays_public_without_bearer() {
-        assert_eq!(classify_dashboard_get("/", false), DashboardGet::Html);
-        assert_eq!(classify_dashboard_get("/index", false), DashboardGet::Html);
+    fn root_is_api_index_not_html() {
+        assert_eq!(classify_dashboard_get("/", false), DashboardGet::Index);
+        assert_eq!(classify_dashboard_get("/index", false), DashboardGet::NotFound);
         assert_eq!(
             classify_dashboard_get("/healthz", false),
             DashboardGet::Health
         );
-        let html = dashboard_html(false);
-        assert!(html.contains("Token do dashboard"));
-        assert!(html.contains("id=\"auth\""));
-        assert!(html.contains("id=\"policy-version\""));
-        assert!(html.contains("const oidcEnabled = false"));
-        assert!(html.contains("Entrar com identidade"));
-        assert!(html.contains("Recarregar política"));
-        assert!(!html.contains("/api/login?"));
-        let oidc_html = dashboard_html(true);
-        assert!(oidc_html.contains("const oidcEnabled = true"));
+        let body = api_index_body();
+        assert!(body.contains("API do proxy"));
+        assert!(body.contains("/api/metrics"));
+        assert!(!body.contains("<html"));
+        assert!(!body.contains("Token do dashboard"));
+        assert!(!body.contains("id=\"auth\""));
     }
 
     #[test]
@@ -995,6 +788,10 @@ mod tests {
             classify_dashboard_get("/metrics", true),
             DashboardGet::MetricsPrometheus
         );
-        assert_eq!(classify_dashboard_get("/", true), DashboardGet::Html);
+        assert_eq!(classify_dashboard_get("/", true), DashboardGet::Index);
+        assert_eq!(
+            classify_dashboard_get("/painel", false),
+            DashboardGet::NotFound
+        );
     }
 }

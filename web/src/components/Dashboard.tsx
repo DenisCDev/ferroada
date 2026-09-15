@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { eventLabel, formatInt, formatTime, totalBlocked } from "@/lib/labels";
+import { Icon } from "@/components/Icon";
+import { eventAction, eventLabel, formatInt, formatTime, totalBlocked } from "@/lib/labels";
 import { metricsResultSchema, type FerroadaMetrics, type MetricsResult } from "@/lib/types";
 
 type AuthState =
@@ -218,55 +219,150 @@ export function Dashboard({ initial }: { initial: MetricsResult }) {
     .filter(([, n]) => n > 0)
     .sort((a, b) => b[1] - a[1]);
 
+  const allowed = Math.max(data.requests_total - blocked, 0);
+  const blockRate =
+    data.requests_total === 0 ? 0 : (blocked / Math.max(data.requests_total, blocked)) * 100;
+  const maxBlocked = Math.max(...rows.map(([, n]) => n), 1);
+
   return (
     <>
       <MetricsStatus data={data} pollError={pollError} />
 
-      <dl className="kpis">
-        <div className="kpi">
-          <dt>Requisições</dt>
-          <dd>{formatInt(data.requests_total)}</dd>
-        </div>
-        <div className="kpi">
-          <dt>Bloqueios</dt>
-          <dd>{formatInt(blocked)}</dd>
-        </div>
-        <div className="kpi">
-          <dt>Tráfego limpo</dt>
-          <dd>
-            {new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(rate)}%
-          </dd>
-        </div>
-        <div className="kpi">
-          <dt>DLP</dt>
-          <dd>{formatInt(data.dlp.cpf_masked + data.dlp.tokens_masked)}</dd>
-        </div>
-        <div className="kpi">
-          <dt>Política</dt>
-          <dd className="mono">{shortPolicy(data.policy_version)}</dd>
-        </div>
-      </dl>
+      <section className="summary-grid" aria-label="Resumo da segurança">
+        <article className="metric-card">
+          <div className="metric-label">
+            <span className="metric-icon steel">
+              <span className="icon">
+                <Icon name="arrows-down-up" />
+              </span>
+            </span>
+            <h2>Requisições</h2>
+          </div>
+          <div className="metric-number">{formatInt(data.requests_total)}</div>
+          <div className="metric-context">recebidas neste período</div>
+          <div className="metric-footer">
+            <span className="icon">
+              <Icon name="pulse" />
+            </span>
+            Política <strong className="mono">{shortPolicy(data.policy_version)}</strong>
+          </div>
+        </article>
+        <article className="metric-card">
+          <div className="metric-label">
+            <span className="metric-icon mint">
+              <span className="icon">
+                <Icon name="check" />
+              </span>
+            </span>
+            <h2>Tráfego limpo</h2>
+          </div>
+          <div className="metric-number">
+            {new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(rate)}
+            <span>%</span>
+          </div>
+          <div className="metric-context">{formatInt(allowed)} requisições permitidas</div>
+          <div className={data.unavailable || blocked > 0 ? "metric-footer" : "metric-footer good"}>
+            <span className="icon">
+              <Icon name="check-circle" />
+            </span>
+            {data.unavailable
+              ? "Proxy indisponível"
+              : blocked === 0
+                ? "Nenhum bloqueio neste período"
+                : "Requisições que passaram na inspeção"}
+          </div>
+        </article>
+        <article className="metric-card">
+          <div className="metric-label">
+            <span className="metric-icon gold">
+              <span className="icon">
+                <Icon name="prohibit" />
+              </span>
+            </span>
+            <h2>Ameaças bloqueadas</h2>
+          </div>
+          <div className="metric-number">{formatInt(blocked)}</div>
+          <div className="metric-context">interceptadas antes da aplicação</div>
+          <div className="metric-footer">
+            <span className="small-dot amber" />
+            <strong>
+              {new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 2 }).format(blockRate)}%
+            </strong>{" "}
+            do tráfego recebido
+          </div>
+        </article>
+        <article className="metric-card">
+          <div className="metric-label">
+            <span className="metric-icon rose">
+              <span className="icon">
+                <Icon name="fingerprint" />
+              </span>
+            </span>
+            <h2>Eventos de DLP</h2>
+          </div>
+          <div className="metric-number">
+            {formatInt(data.dlp.cpf_masked + data.dlp.tokens_masked)}
+          </div>
+          <div className="metric-context">dados sensíveis mascarados</div>
+          <div className="metric-footer">
+            <span className="icon">
+              <Icon name="lock-key" />
+            </span>
+            Políticas de CPF e token
+          </div>
+        </article>
+      </section>
 
-      <h2 className="section-title">Por tipo</h2>
-      {rows.length === 0 ? (
-        <p className="empty">
-          {data.unavailable
-            ? "Nenhum bloqueio a mostrar enquanto o proxy não responde."
-            : "Nenhum bloqueio ainda. O proxy está escutando."}
-        </p>
-      ) : (
-        <ul className="breakdown">
-          {rows.map(([k, n]) => (
-            <li key={k}>
-              <span>{eventLabel(k)}</span>
-              <span className="count">{formatInt(n)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      <section aria-labelledby="threat-title">
+        <div className="section-heading">
+          <div>
+            <h2 id="threat-title">O que foi bloqueado</h2>
+            <span className="subtle-count">
+              {rows.length === 0 ? "nenhum tipo" : `${formatInt(rows.length)} tipos`}
+            </span>
+          </div>
+        </div>
+        {rows.length === 0 ? (
+          <p className="empty">
+            {data.unavailable
+              ? "Nenhum bloqueio a mostrar enquanto o proxy não responde."
+              : "Nenhum bloqueio ainda. O proxy está escutando."}
+          </p>
+        ) : (
+          <ul className="threat-list">
+            {rows.map(([k, n]) => (
+              <li className="threat-item" key={k}>
+                <span className="threat-name">{eventLabel(k)}</span>
+                <div className="threat-bar" aria-hidden="true">
+                  <span style={{ width: `${(n / maxBlocked) * 100}%` }} />
+                </div>
+                <span className="threat-count">{formatInt(n)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
-      <h2 className="section-title">Últimos eventos</h2>
-      <EventTable events={data.recent_events} unavailable={data.unavailable} />
+      <section className="events-section" aria-labelledby="events-title">
+        <div className="section-heading events-heading">
+          <div>
+            <h2 id="events-title">Eventos recentes</h2>
+            <span className="live-label">
+              <span
+                className={
+                  pollError || data.unavailable ? "small-dot amber" : "small-dot green"
+                }
+              />
+              {pollError
+                ? "Falha na atualização"
+                : data.unavailable
+                  ? "Proxy indisponível"
+                  : "Atualiza a cada 5 s"}
+            </span>
+          </div>
+        </div>
+        <EventTable events={data.recent_events} unavailable={data.unavailable} />
+      </section>
     </>
   );
 }
@@ -279,7 +375,26 @@ export function EventsPanel({ initial }: { initial: MetricsResult }) {
   return (
     <>
       <MetricsStatus data={data} pollError={pollError} />
-      <EventTable events={data.recent_events} unavailable={data.unavailable} />
+      <section className="events-section" aria-labelledby="events-title">
+        <div className="section-heading events-heading">
+          <div>
+            <h2 id="events-title">Eventos recentes</h2>
+            <span className="live-label">
+              <span
+                className={
+                  pollError || data.unavailable ? "small-dot amber" : "small-dot green"
+                }
+              />
+              {pollError
+                ? "Falha na atualização"
+                : data.unavailable
+                  ? "Proxy indisponível"
+                  : "Atualiza a cada 5 s"}
+            </span>
+          </div>
+        </div>
+        <EventTable events={data.recent_events} unavailable={data.unavailable} />
+      </section>
     </>
   );
 }
@@ -293,7 +408,7 @@ export function EventTable({
 }) {
   if (events.length === 0) {
     return (
-      <div className="table-wrap">
+      <div className="table-scroll">
         <p className="empty">
           {unavailable
             ? "Nenhum evento a mostrar enquanto o proxy não responde."
@@ -304,25 +419,35 @@ export function EventTable({
   }
 
   return (
-    <div className="table-wrap">
-      <table>
+    <div className="table-scroll">
+      <table className="events-table">
         <thead>
           <tr>
-            <th>Hora</th>
-            <th>Tipo</th>
-            <th>IP</th>
-            <th>URI</th>
+            <th className="time-col">Horário</th>
+            <th>Evento</th>
+            <th className="origin-col">Origem</th>
+            <th>Ação</th>
           </tr>
         </thead>
         <tbody>
-          {events.map((e, i) => (
-            <tr key={`${e.timestamp}-${e.client_ip}-${i}`}>
-              <td className="mono">{formatTime(e.timestamp)}</td>
-              <td>{eventLabel(e.event_type)}</td>
-              <td className="mono">{e.client_ip}</td>
-              <td className="mono">{e.uri}</td>
-            </tr>
-          ))}
+          {events.map((e, i) => {
+            const action = eventAction(e.event_type);
+            return (
+              <tr key={`${e.timestamp}-${e.client_ip}-${i}`}>
+                <td className="time-cell">{formatTime(e.timestamp)}</td>
+                <td>
+                  <span className="event-name">{eventLabel(e.event_type)}</span>
+                  <span className="event-route">{e.uri}</span>
+                </td>
+                <td>
+                  <span className="origin-ip">{e.client_ip}</span>
+                </td>
+                <td>
+                  <span className={`status-badge ${action.kind}`}>{action.label}</span>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

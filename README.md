@@ -305,19 +305,19 @@ inesperadas são rejeitadas, impedindo que `206` contorne o mascaramento. O buff
 ### Monitoramento
 
 <p align="center">
-  <img src="assets/dashboard.png" width="880" alt="Painel do Ferroada em preto e branco: visão geral com requisições, bloqueios, tráfego limpo e lista de eventos">
+  <img src="assets/dashboard.png" width="880" alt="Painel do Ferroada: visão geral com requisições, bloqueios, tráfego limpo e lista de eventos">
 </p>
 
-O binário serve JSON em `http://localhost:9000/api/metrics` e um HTML mínimo na
-mesma porta. O documento HTML **não** devolve 401: o formulário de token vive
-nele. Com `DASHBOARD_TOKEN`, o login é POST `/api/login` (token no corpo, nunca
-na query) e abre uma sessão curta em cookie HttpOnly. Fora de loopback, token
+O binário serve a API em `http://localhost:9000`: `/healthz`, `/readyz`,
+`/api/metrics` e `/metrics`. GET `/` não é um painel — só um índice em texto.
+Com `DASHBOARD_TOKEN`, o login é POST `/api/login` (token no corpo, nunca na
+query) e abre uma sessão curta em cookie HttpOnly. Fora de loopback, token
 sozinho não chega: ligue OIDC (authorization code + PKCE) ou mTLS (certificado
-cliente). `viewer` lê métricas; `operator` pode POST `/api/reload` com CSRF no
-formulário. Sem `DASHBOARD_OIDC_*` e sem CA de cliente, o comportamento atual
+cliente). `viewer` lê métricas; `operator` pode POST `/api/reload` com CSRF da sessão
+ou Bearer. Sem `DASHBOARD_OIDC_*` e sem CA de cliente, o comportamento atual
 (token) permanece. Isto não é production-grade.
 
-O painel Next (preto e branco, `web/`) é a interface: Visão geral e Eventos, atualização a cada 5 s. Se o proxy não estiver no ar, o painel mostra zeros e `unavailable` — não inventa tráfego. Dados de demonstração só com `FERROADA_ALLOW_DEMO=true`.
+O painel Next (`web/`) é a interface: Visão geral e Eventos, atualização a cada 5 s. Se o proxy não estiver no ar, o painel mostra zeros e `unavailable` — não inventa tráfego. Dados de demonstração só com `FERROADA_ALLOW_DEMO=true`.
 
 ```bash
 cd web
@@ -493,12 +493,12 @@ Toda a configuração é feita por variáveis de ambiente:
 | `DASHBOARD_OIDC_CLIENT_SECRET` | *(opcional)* | Segredo confidencial; nunca vai na URL. PKCE corre na mesma. |
 | `DASHBOARD_OIDC_ROLE_CLAIM` | `ferroada_role` | Claim do ID token mapeada para `viewer` ou `operator`. |
 | `DASHBOARD_OIDC_OPERATORS` / `DASHBOARD_OIDC_VIEWERS` | `operator` / `viewer` | Valores da claim que dão cada papel. Sem operator, POST `/api/reload` é 403. |
-| `DASHBOARD_MTLS_CA` | *(unset)* | CA dos certificados cliente. Exige `DASHBOARD_TLS_CERT_PATH`/`DASHBOARD_TLS_KEY_PATH`. O handshake verifica o cert se o cliente o enviar; sem cert o HTML continua acessível. Fora de loopback a API exige o cert (ou sessão OIDC). |
+| `DASHBOARD_MTLS_CA` | *(unset)* | CA dos certificados cliente. Exige `DASHBOARD_TLS_CERT_PATH`/`DASHBOARD_TLS_KEY_PATH`. O handshake verifica o cert se o cliente o enviar. Fora de loopback a API exige o cert (ou sessão OIDC). |
 | `DASHBOARD_MTLS_OPERATORS` / `DASHBOARD_MTLS_VIEWERS` | *(vazio = viewer)* | CNs com papel operator/viewer. |
 | `DASHBOARD_SESSION_TTL_SECS` | `900` | Cookie `HttpOnly`, `SameSite=Strict`, `Secure` se o dashboard fala TLS. Mín. 60, máx. 8h. |
 | `DASHBOARD_AUDIT_LOG` | *(unset)* | Ficheiro JSONL append-only (login, reload, falha de auth). Não grava token nem código OIDC. |
 | `DASHBOARD_API_RATE_MAX` / `DASHBOARD_API_RATE_WINDOW` | `60` / `60` | Teto de pedidos a `/api` por IP e janela em segundos. |
-| `FERROADA_PRODUCTION` | *(unset)* | Se `true`, o token é obrigatório mesmo em 127.0.0.1. O HTML continua público (formulário); `/api/metrics` e `/metrics` exigem sessão, Bearer (loopback) ou mTLS. |
+| `FERROADA_PRODUCTION` | *(unset)* | Se `true`, o token é obrigatório mesmo em 127.0.0.1. GET `/` na `:9000` é só o índice em texto; `/api/metrics` e `/metrics` exigem sessão, Bearer (loopback) ou mTLS. |
 | `FERROADA_POLICY_PUBKEY` | *(unset)* | Chave pública Ed25519 (PEM, hex ou base64). Opt-in: sem ela o TOML solto arranca. Com ela, o snapshot precisa de `ferroada.policy.sig` válida |
 | `FERROADA_POLICY_SIG` | `ferroada.policy.sig` | Assinatura Ed25519 do snapshot (`ferroada policy compile`) |
 | `FERROADA_PID_FILE` | `ferroada.pid` | Gravado no boot; `ferroada reload --pid-file` lê daqui |

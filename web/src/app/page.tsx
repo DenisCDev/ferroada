@@ -5,8 +5,12 @@ export default function Page() {
   const initial = unavailableMetrics();
   return (
     <>
-      <h1>Visão geral</h1>
-      <p className="lede">O que o proxy viu. Atualiza sozinho a cada cinco segundos.</p>
+      <section className="page-heading">
+        <div>
+          <h1>Visão geral</h1>
+          <p>O que o proxy viu. Atualiza sozinho a cada cinco segundos.</p>
+        </div>
+      </section>
       <Dashboard initial={initial} />
     </>
   );
