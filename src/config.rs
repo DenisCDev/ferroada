@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::abuse::{AbuseFile, AbusePolicy};
+use crate::authz::AuthzPolicy;
 use crate::dlp::{self, DlpField};
 use crate::graphql::{GraphqlFile, GraphqlPolicy};
 use crate::grpc::{GrpcFile, GrpcPolicy};
@@ -150,6 +151,19 @@ struct SiteRouteEntry {
     graphql: Option<GraphqlFile>,
     #[serde(default)]
     dlp: DlpFile,
+    #[serde(default)]
+    authorization: Option<AuthorizationFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizationFile {
+    socket: String,
+    action: String,
+    resource: String,
+    fail_mode: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -273,6 +287,7 @@ struct RouteInspection {
     l1: L1File,
     graphql: Option<GraphqlPolicy>,
     dlp_fields: Vec<DlpField>,
+    authz: Option<AuthzPolicy>,
 }
 
 #[derive(Clone)]
@@ -420,6 +435,25 @@ impl Backend {
             });
         }
         policy
+    }
+
+    pub fn authz_for(&self, uri: &str) -> Option<&AuthzPolicy> {
+        let path = uri.split('?').next().unwrap_or(uri);
+        let Some(path) = canonical_route_path(path) else {
+            // Undecodable encoding must not skip a configured callback.
+            return self
+                .routes
+                .iter()
+                .filter_map(|route| route.authz.as_ref())
+                .next();
+        };
+        let mut matching: Vec<&RouteInspection> = self
+            .routes
+            .iter()
+            .filter(|route| route.authz.is_some() && path_matches_prefix(&path, &route.prefix))
+            .collect();
+        matching.sort_by_key(|route| route.prefix.len());
+        matching.last().and_then(|route| route.authz.as_ref())
     }
 }
 
@@ -844,7 +878,11 @@ fn resolve_site(
         health_path: DEFAULT_HEALTH_PATH.to_string(),
         origin_mtls: None,
         waf_profile,
-        routes: merge_inspection_routes(require_complete_waf_inspection, route_entries),
+        routes: merge_inspection_routes(
+            require_complete_waf_inspection,
+            route_entries,
+            jwt.as_ref(),
+        ),
         l1,
         openapi,
         jwt,
@@ -1109,6 +1147,7 @@ fn patch_denies_incomplete(patch: &InspectionPolicyFile) -> bool {
 fn merge_inspection_routes(
     complete_prefixes: Vec<String>,
     route_entries: Vec<SiteRouteEntry>,
+    jwt: Option<&JwtPolicy>,
 ) -> Vec<RouteInspection> {
     let mut routes: Vec<RouteInspection> = complete_prefixes
         .into_iter()
@@ -1118,6 +1157,7 @@ fn merge_inspection_routes(
             l1: L1File::default(),
             graphql: None,
             dlp_fields: Vec::new(),
+            authz: None,
         })
         .collect();
     for entry in route_entries {
@@ -1129,6 +1169,10 @@ fn merge_inspection_routes(
         let graphql = entry
             .graphql
             .map(|file| load_graphql(file, Some(prefix.as_str())));
+        let authz = entry
+            .authorization
+            .as_ref()
+            .map(|file| load_authz(file, jwt));
         if let Some(existing) = routes.iter_mut().find(|route| route.prefix == prefix) {
             existing.patch = merge_patches(existing.patch.clone(), entry.inspection);
             existing.l1 = merge_l1_files(existing.l1.clone(), entry.l1);
@@ -1139,6 +1183,12 @@ fn merge_inspection_routes(
                     None => overlay,
                 });
             }
+            if let Some(policy) = authz {
+                if existing.authz.is_some() {
+                    panic!("authorization duplicado na rota {prefix}");
+                }
+                existing.authz = Some(policy);
+            }
         } else {
             routes.push(RouteInspection {
                 prefix,
@@ -1146,10 +1196,32 @@ fn merge_inspection_routes(
                 l1: entry.l1,
                 graphql,
                 dlp_fields,
+                authz,
             });
         }
     }
     routes
+}
+
+fn load_authz(file: &AuthorizationFile, jwt: Option<&JwtPolicy>) -> AuthzPolicy {
+    let policy = AuthzPolicy::parse(
+        &file.socket,
+        &file.action,
+        &file.resource,
+        &file.fail_mode,
+        file.timeout_ms,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    if jwt.is_none() {
+        panic!("authorization exige jwt no site (principal = jwt.sub)");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = policy;
+        panic!("authorization exige Unix socket; este sistema operacional não oferece");
+    }
+    #[cfg(unix)]
+    policy
 }
 
 fn parse_dlp_fields(files: Vec<DlpFieldFile>) -> Vec<DlpField> {
@@ -1900,6 +1972,141 @@ backend = "http://127.0.0.1:8081"
         );
         assert!(config.resolve("api.example").unwrap().jwt.is_some());
         assert!(config.resolve("plain.example").unwrap().jwt.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn undecodable_uri_still_selects_authorization() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferroada-authz-cfg-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jwks = dir.join("jwks.json");
+        std::fs::write(
+            &jwks,
+            r#"{"keys":[{"kty":"RSA","kid":"k1","n":"AQAB","e":"AQAB"}]}"#,
+        )
+        .unwrap();
+        let jwks_path = jwks.to_string_lossy().replace('\\', "/");
+        let dir_path = dir.to_string_lossy().replace('\\', "/");
+        let config = Config::from_toml_in(
+            &format!(
+                r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+jwt = {{ jwks = "{jwks_path}", issuer = "https://issuer.test", audience = "api.example", paths = ["/accounts/{{account_id}}"] }}
+
+[[sites.routes]]
+prefix = "/accounts/"
+authorization = {{ socket = "unix:///run/authz.sock", action = "transfer:create", resource = "path.account_id", fail_mode = "closed" }}
+"#
+            ),
+            std::path::Path::new(&dir_path),
+        );
+        let backend = config.resolve("api.example").unwrap();
+        assert!(backend.authz_for("/accounts/user-1").is_some());
+        assert!(
+            backend.authz_for("/accounts/1%zz").is_some(),
+            "undecodable URI must still hit the authorization block"
+        );
+        assert!(backend.authz_for("/accounts/1%").is_some());
+    }
+
+    fn catch_toml_error(toml: &str) -> String {
+        let payload = std::panic::catch_unwind(|| {
+            Config::from_toml(toml);
+        })
+        .expect_err("load must fail");
+        payload
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn authorization_rejects_http_socket() {
+        let message = catch_toml_error(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/accounts/"
+authorization = { socket = "http://127.0.0.1:9/authorize", action = "transfer:create", resource = "path.account_id", fail_mode = "closed" }
+"#,
+        );
+        assert!(
+            message.contains("HTTP") || message.contains("unix://"),
+            "expected HTTP socket rejected, got {message}"
+        );
+    }
+
+    #[test]
+    fn authorization_requires_jwt_on_the_site() {
+        let message = catch_toml_error(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/accounts/"
+authorization = { socket = "unix:///run/authz.sock", action = "transfer:create", resource = "path.account_id", fail_mode = "closed" }
+"#,
+        );
+        assert!(
+            message.contains("jwt"),
+            "expected jwt required for authorization, got {message}"
+        );
+    }
+
+    #[test]
+    fn authorization_timeout_above_cap_is_a_load_error() {
+        let message = catch_toml_error(
+            r#"
+[[sites]]
+hosts = ["api.example"]
+backend = "http://127.0.0.1:8080"
+
+[[sites.routes]]
+prefix = "/accounts/"
+authorization = { socket = "unix:///run/authz.sock", action = "transfer:create", resource = "path.account_id", fail_mode = "closed", timeout_ms = 201 }
+"#,
+        );
+        assert!(
+            message.contains("200"),
+            "expected timeout cap error, got {message}"
+        );
+    }
+
+    #[test]
+    fn route_without_authorization_does_not_require_socket() {
+        let config = Config::from_toml(
+            r#"
+[[sites]]
+hosts = ["plain.example"]
+backend = "http://127.0.0.1:8080"
+"#,
+        );
+        assert!(config
+            .resolve("plain.example")
+            .unwrap()
+            .authz_for("/accounts/user-1")
+            .is_none());
+    }
+
+    #[test]
+    fn undecodable_percent_is_not_a_canonical_path() {
+        assert!(canonical_route_path("/accounts/1%zz").is_none());
+        assert!(canonical_route_path("/accounts/1%").is_none());
     }
 
     #[test]

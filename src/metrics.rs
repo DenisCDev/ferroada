@@ -40,6 +40,7 @@ pub struct Metrics {
     pub blocked_openapi: AtomicU64,
     pub blocked_jwt: AtomicU64,
     pub blocked_jwt_binding: AtomicU64,
+    pub blocked_authz: AtomicU64,
     pub blocked_graphql: AtomicU64,
     pub blocked_grpc: AtomicU64,
     pub blocked_dlp_partial: AtomicU64,
@@ -54,6 +55,7 @@ pub struct Metrics {
     pub waf_inspection_budget_exceeded: AtomicU64,
     pub waf_inspection_timed_out: AtomicU64,
     pub waf_engine_unavailable: AtomicU64,
+    pub authz_unavailable: AtomicU64,
     pub waf_l1_shadow: AtomicU64,
     pub openapi_observed: AtomicU64,
     pub waf_monitored: AtomicU64,
@@ -123,6 +125,7 @@ impl Metrics {
             blocked_openapi: AtomicU64::new(0),
             blocked_jwt: AtomicU64::new(0),
             blocked_jwt_binding: AtomicU64::new(0),
+            blocked_authz: AtomicU64::new(0),
             blocked_graphql: AtomicU64::new(0),
             blocked_grpc: AtomicU64::new(0),
             blocked_dlp_partial: AtomicU64::new(0),
@@ -137,6 +140,7 @@ impl Metrics {
             waf_inspection_budget_exceeded: AtomicU64::new(0),
             waf_inspection_timed_out: AtomicU64::new(0),
             waf_engine_unavailable: AtomicU64::new(0),
+            authz_unavailable: AtomicU64::new(0),
             waf_l1_shadow: AtomicU64::new(0),
             openapi_observed: AtomicU64::new(0),
             waf_monitored: AtomicU64::new(0),
@@ -276,6 +280,7 @@ pub fn record_block_in(
         "openapi" => &METRICS.blocked_openapi,
         "jwt" => &METRICS.blocked_jwt,
         "jwt_binding" => &METRICS.blocked_jwt_binding,
+        "authz" => &METRICS.blocked_authz,
         "graphql" => &METRICS.blocked_graphql,
         "grpc" => &METRICS.blocked_grpc,
         "dlp_partial_block" => &METRICS.blocked_dlp_partial,
@@ -365,6 +370,15 @@ pub fn record_waf_engine_unavailable(site_scope: &str, client_ip: &str, uri: &st
         .waf_engine_unavailable
         .fetch_add(1, Ordering::Relaxed);
     record_observation_in(site_scope, "waf_engine_unavailable", client_ip, uri, detail);
+}
+
+pub fn record_authz_unavailable(site_scope: &str, client_ip: &str, uri: &str, detail: &str) {
+    METRICS.authz_unavailable.fetch_add(1, Ordering::Relaxed);
+    record_observation_in(site_scope, "authz_unavailable", client_ip, uri, detail);
+}
+
+pub fn authz_unavailable() -> u64 {
+    METRICS.authz_unavailable.load(Ordering::Relaxed)
 }
 
 pub fn record_l1_shadow(site_scope: &str, client_ip: &str, uri: &str, detail: &str) {
@@ -461,6 +475,7 @@ pub fn record_observation_in(
             | "inspection_budget"
             | "waf_incomplete"
             | "waf_engine_unavailable"
+            | "authz_unavailable"
     ) {
         return;
     }
@@ -573,6 +588,7 @@ pub fn snapshot_json() -> String {
             "openapi": m.blocked_openapi.load(Ordering::Relaxed),
             "jwt": m.blocked_jwt.load(Ordering::Relaxed),
             "jwt_binding": m.blocked_jwt_binding.load(Ordering::Relaxed),
+            "authz": m.blocked_authz.load(Ordering::Relaxed),
             "graphql": m.blocked_graphql.load(Ordering::Relaxed),
             "grpc": m.blocked_grpc.load(Ordering::Relaxed),
             "dlp_partial_block": m.blocked_dlp_partial.load(Ordering::Relaxed),
@@ -589,6 +605,7 @@ pub fn snapshot_json() -> String {
             "timed_out": m.waf_inspection_timed_out.load(Ordering::Relaxed)
         },
         "waf_engine_unavailable": m.waf_engine_unavailable.load(Ordering::Relaxed),
+        "authz_unavailable": m.authz_unavailable.load(Ordering::Relaxed),
         "waf_l1_shadow": m.waf_l1_shadow.load(Ordering::Relaxed),
         "openapi_observed": m.openapi_observed.load(Ordering::Relaxed),
         "waf_monitored": m.waf_monitored.load(Ordering::Relaxed),
@@ -647,6 +664,7 @@ pub fn snapshot_prometheus() -> String {
         ("openapi", &metrics.blocked_openapi),
         ("jwt", &metrics.blocked_jwt),
         ("jwt_binding", &metrics.blocked_jwt_binding),
+        ("authz", &metrics.blocked_authz),
         ("graphql", &metrics.blocked_graphql),
         ("grpc", &metrics.blocked_grpc),
         ("dlp_partial_block", &metrics.blocked_dlp_partial),
@@ -687,6 +705,10 @@ pub fn snapshot_prometheus() -> String {
     output.push_str(&format!(
         "# TYPE ferroada_waf_engine_unavailable_total counter\nferroada_waf_engine_unavailable_total {}\n",
         metrics.waf_engine_unavailable.load(Ordering::Relaxed)
+    ));
+    output.push_str(&format!(
+        "# TYPE ferroada_authz_unavailable_total counter\nferroada_authz_unavailable_total {}\n",
+        metrics.authz_unavailable.load(Ordering::Relaxed)
     ));
     output.push_str(&format!(
         "# TYPE ferroada_waf_l1_shadow_total counter\nferroada_waf_l1_shadow_total {}\n",
@@ -784,6 +806,7 @@ mod tests {
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"parse_error\"}"));
         assert!(snapshot.contains("ferroada_waf_inspection_total{status=\"timed_out\"}"));
         assert!(snapshot.contains("ferroada_waf_engine_unavailable_total"));
+        assert!(snapshot.contains("ferroada_authz_unavailable_total"));
         assert!(snapshot.contains("ferroada_waf_l1_shadow_total"));
         assert!(snapshot.contains("ferroada_protocol_total{action=\"quarantine\"}"));
         assert!(snapshot.contains("ferroada_policy_info"));
@@ -809,6 +832,7 @@ mod tests {
             "blocked",
             "waf_inspection",
             "waf_engine_unavailable",
+            "authz_unavailable",
             "waf_l1_shadow",
             "openapi_observed",
             "waf_monitored",

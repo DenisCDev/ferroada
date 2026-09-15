@@ -34,6 +34,8 @@ export const EVENT_LABELS: Record<string, string> = {
   openapi_observe: "OpenAPI (observação)",
   jwt: "JWT inválido",
   jwt_binding: "JWT (binding)",
+  authz: "autorização",
+  authz_unavailable: "serviço de autorização indisponível",
   graphql: "limite GraphQL",
   grpc: "método gRPC",
   policy_reload: "política recarregada",

@@ -1,4 +1,5 @@
 pub mod abuse;
+pub mod authz;
 pub mod behavioral;
 pub mod cidrs;
 pub mod client_ip;

@@ -488,7 +488,7 @@ fn metrics_payload() -> Value {
     })
 }
 
-fn block_series(m: &metrics::Metrics) -> [(&'static str, u64); 33] {
+fn block_series(m: &metrics::Metrics) -> [(&'static str, u64); 34] {
     [
         ("sqli", m.blocked_sqli.load(Ordering::Relaxed)),
         ("xss", m.blocked_xss.load(Ordering::Relaxed)),
@@ -547,6 +547,7 @@ fn block_series(m: &metrics::Metrics) -> [(&'static str, u64); 33] {
         ("openapi", m.blocked_openapi.load(Ordering::Relaxed)),
         ("jwt", m.blocked_jwt.load(Ordering::Relaxed)),
         ("jwt_binding", m.blocked_jwt_binding.load(Ordering::Relaxed)),
+        ("authz", m.blocked_authz.load(Ordering::Relaxed)),
         ("graphql", m.blocked_graphql.load(Ordering::Relaxed)),
         ("grpc", m.blocked_grpc.load(Ordering::Relaxed)),
         (

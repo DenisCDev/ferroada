@@ -238,6 +238,14 @@ impl JwtPolicy {
             .any(|binding| matches!(binding.source, BindSource::Body(_)))
     }
 
+    pub fn path_params(
+        &self,
+        path: &str,
+        extra: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        path_params(&self.inner.paths, path, extra)
+    }
+
     pub fn authenticate(
         &self,
         authorization: Option<&str>,
