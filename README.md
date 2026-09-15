@@ -200,7 +200,8 @@ limitado a 65536 bytes, **exceto** rotas `require_complete` com
 sobem juntos para esse número, o body fica num spool e o origin só recebe
 depois do outcome. Sem `max_decoded_body` o processo não cria
 `/var/lib/ferroada/spool`. A inspeção registra `complete`, `truncated`,
-`unsupported_encoding` ou `unsupported_content_type`. Um gzip gigante é
+`unsupported_encoding`, `unsupported_content_type`, `parse_error`,
+`budget_exceeded` ou `timed_out`. Um gzip gigante é
 cortado no teto de inflate da rota (256KB no default), então um zip bomb não
 estoura a memória. Rotas sensíveis podem exigir inspeção completa e rejeitar
 qualquer outro estado.
@@ -242,13 +243,13 @@ LRU, e a lógica de decay, scoring e ban tem testes unitários
 | **Request Size Limiting** | Limita o body a 64KB antes do upstream e a URI a 8KB | 413 / 414 |
 | **Host Validation** | Valida o Host header contra a allowlist `ALLOWED_HOSTS` (previne DNS rebinding) | 421 Misdirected Request |
 | **HTTPS Enforcement** | Redireciona HTTP → HTTPS quando TLS está configurado + injeta HSTS | 301 Moved Permanently |
-| **Dashboard seguro** | Escuta loopback por padrão; bind externo exige Bearer token | 401 Não autorizado |
+| **Dashboard seguro** | Escuta loopback por padrão; bind externo exige token, OIDC ou mTLS | 401 Não autorizado |
 | **Multi-encoding Protection** | Decodifica URL e headers recursivamente (máx. 8x), inclusive `%uXXXX` e `+` como espaço na query | Previne bypass `%2525252e`, XSS percent-encoded em header |
 | **Upstream timeouts** | `HttpPeer` com connect/read/write; body do cliente tem deadline próprio | Upstream morto não segura o worker |
 | **Rate limit com evicção** | Sliding window por site/rede; chaves expiradas saem do mapa; teto configurável | Flood de identidades não cresce a memória para sempre |
 | **Trusted proxies** | Só aceita XFF/X-Forwarded-Proto de redes em `TRUSTED_PROXIES` | Evita spoof e rate limit compartilhado pelo balanceador |
 | **Limites e backpressure** | Limita headers, requisições em voo, keep-alive e escrita ao cliente | Rejeita exaustão cedo com 431/503 |
-| **Dependency Audit** | `cargo audit` roda no build Docker — falha em vulnerabilidades sem exceção documentada e justificada | Build falha |
+| **Supply chain no CI** | `cargo audit` no build Docker; fuzz (waf/protocol/dlp) e SBOM CycloneDX em todo pull request | Job vermelho se o audit achar CVE ou o fuzz crashar |
 
 #### Security headers — filosofia "não quebrar"
 
@@ -316,7 +317,7 @@ cliente). `viewer` lê métricas; `operator` pode POST `/api/reload` com CSRF no
 formulário. Sem `DASHBOARD_OIDC_*` e sem CA de cliente, o comportamento atual
 (token) permanece. Isto não é production-grade.
 
-O painel Next (preto e branco, `web/`) é a interface: Visão geral e Eventos, atualização a cada 5 s. Se o proxy não estiver no ar, o painel mostra dados de demonstração.
+O painel Next (preto e branco, `web/`) é a interface: Visão geral e Eventos, atualização a cada 5 s. Se o proxy não estiver no ar, o painel mostra zeros e `unavailable` — não inventa tráfego. Dados de demonstração só com `FERROADA_ALLOW_DEMO=true`.
 
 ```bash
 cd web
@@ -504,6 +505,10 @@ Toda a configuração é feita por variáveis de ambiente:
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `FERROADA_OTLP_ENDPOINT` | *(unset = off)* | Base HTTP do Collector OTLP (`http://127.0.0.1:4318`). Sem isto o processo não abre socket extra. HTTPS e userinfo na URL são recusados; o export nunca manda `Authorization`. |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `1000` | Timeout do POST OTLP em milissegundos (teto 5s). Collector morto incrementa `ferroada_otel_export_failed_total` e o proxy continua. |
 | `TRUSTED_PROXIES` | *(vazio)* | CIDRs autorizados a enviar XFF/X-Forwarded-Proto |
+| `PROXY_PROTOCOL` | `false` | Parser PROXY v2 (não é flag do Pingora). `true` só atrás de HAProxy/nginx/Caddy/NLB TCP. Prefix inválido recusa a conexão. Cloudflare **não** liga isto |
+| `CLIENT_IP_ORDER` | `proxy_protocol,x-forwarded-for` | Ordem das fontes de IP. `Forwarded` (RFC 7239) só entra se listado; default continua a stripar hop-by-hop |
+| `CLIENT_IP_HEADER` | *(unset)* | Header extra (ex. `cf-connecting-ip`) só se `CLIENT_IP_ORDER` incluir `header` |
+| `FERROADA_ALLOW_DEMO` | *(unset)* | Se `true`, o painel Next inventa métricas com o proxy down. Produção: não ligue |
 | `SECURITY_HEADERS` | `true` | Injetar headers seguros nas respostas (nosniff, X-Frame, Referrer) |
 | `FRAME_OPTIONS` | `SAMEORIGIN` | Valor de X-Frame-Options; `off` preserva o upstream |
 | `CSP_POLICY` | *(desativada)* | Content-Security-Policy — só ative sabendo o que está fazendo |
@@ -543,8 +548,7 @@ Toda a configuração é feita por variáveis de ambiente:
 Para proteger vários backends com um único deploy, crie um arquivo `ferroada.toml`:
 
 ```toml
-# Backend padrão para hosts não configurados (opcional)
-# default_backend = "http://fallback:8080"
+# Completo e comentado: ferroada.toml.example
 
 [[sites]]
 hosts = ["meusite.com", "www.meusite.com"]
@@ -556,10 +560,13 @@ require_complete_waf_inspection = ["/api/payment", "/api/admin/"]
 [[sites]]
 hosts = ["api.meusite.com"]
 backend = "http://backend-b:3000"
-
-[[sites]]
-hosts = ["outrosite.com", "www.outrosite.com"]
-backend = "https://backend-c:443"
+# Opt-in. Sem o bloco, o site continua só HTTP/WAF/DLP.
+# openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }
+# jwt = { jwks = "https://auth.exemplo.com/.well-known/jwks.json", issuer = "https://auth.exemplo.com", audience = "api.meusite.com", bindings = ["jwt.sub == path.account_id"] }
+# abuse = { stuffing_max = 10, challenge = "pow" }
+# [[sites.routes]]
+# prefix = "/accounts/"
+# authorization = { socket = "unix:///run/authz.sock", action = "account:read", resource = "path.account_id", fail_mode = "closed" }
 ```
 
 O roteamento é feito automaticamente pelo Host header de cada request. Hosts não
@@ -698,23 +705,22 @@ e retorna 503 se algum estiver indisponível. Essas rotas não exigem token;
 
 ```
 src/
-├── lib.rs           # Biblioteca compartilhada pelo binário, testes e fuzzing
-├── main.rs          # Bootstrap: server, TLS, dashboard
-├── client_ip.rs     # Trusted proxies e identidade por site/rede/rota/sessão/API key
-├── config.rs        # Multi-site (ferroada.toml) ou single-site (TARGET_URL)
-├── proxy.rs         # ProxyHttp: pipeline HTTPS → Host → Route → Method → Size → Rate Limit → Behavioral → WAF (todos os chunks, gzip) → Upstream (com timeout) → Headers → DLP
-├── waf.rs           # WAF: SQLi + XSS + Path Traversal + CRLF + JNDI + Smuggling + Sensitive Paths + body gzip/deflate + decode 8x + headers
-├── behavioral.rs    # Score por site/rede: scoring, decay, ban, LRU e testes
-├── headers.rs       # Injeção de security headers + remoção de headers de servidor
-├── shield.rs        # Restrição de métodos + limites de tamanho + validação de Host + bad bots
-├── dlp.rs           # DLP: identity/gzip/deflate, limites e integridade de headers
-├── graphql.rs       # GraphQL AST: profundidade, aliases, fragments, batch, introspection
-├── grpc.rs          # gRPC: FileDescriptorSet, allowlist de método, tamanho de frame, reflection
-├── rate_limit.rs    # Sliding window isolado por site/rede, evicção e teto de chaves
-├── metrics.rs       # Contadores atômicos + ring buffer de eventos
-└── dashboard.rs     # API JSON /api/metrics + HTML mínimo
-web/                 # Painel Next.js (preto e branco)
-fuzz/                # Harnesses cargo-fuzz para WAF, parser HTTP/1, frames HTTP/2, smuggling, buffers por chunks e DLP
+├── proxy.rs         # Pipeline: Host → rota → method/size → rate → behavioral → abuse → WAF L0/L1 → OpenAPI/JWT/GraphQL/gRPC/authz → origin → DLP
+├── protocol.rs      # Matriz inspect/deny/monitor/bypass (e quarantine = 403 + tag)
+├── waf.rs / waf_engine.rs / waf_l1.rs  # L0 regex; L1 sidecar Coraza
+├── spool.rs         # Body > 64 KiB só em rota fail-closed com max_decoded_body
+├── openapi.rs / jwt.rs / graphql.rs / grpc.rs / authz.rs
+├── abuse.rs         # Quota por fingerprint (opt-in)
+├── dlp.rs           # Blob + path JSON; monitor/redact/block
+├── policy.rs        # Snapshot assinado e last-known-good
+├── origin.rs        # Vários backends, health, circuit
+├── otel.rs          # OTLP opt-in
+├── proxy_protocol.rs / client_ip.rs
+└── dashboard.rs / dashboard_oidc.rs / dashboard_auth.rs
+deploy/topologies/   # Packs VPS / Hostinger / Vercel / CDN
+deploy/helm/ferroada/
+web/                 # Painel Next (zeros se o proxy cair, sem demo)
+fuzz/                # waf, protocol, dlp — corre no CI de PR
 ```
 
 ### Pipeline de request
@@ -744,13 +750,13 @@ Cliente
 [Behavioral Score] ──403──→ Cliente (IP acima do threshold de ban)
   │ ok
   ▼
-[WAF: Sensitive Paths] ──403──→ Cliente (Access Denied)
+[Abuse quotas] ──403──→ stuffing/enumeração (opt-in; mesmo fingerprint, IPs diferentes)
   │ ok
   ▼
-[WAF: URI + Headers] ──403──→ Cliente (SQLi/XSS/Traversal/CRLF/JNDI) [com double-decode]
+[WAF L0 + L1] ──403──→ regex e, se ligado, sidecar Coraza
   │ ok
   ▼
-[WAF: Body Inspection] ──403──→ Cliente (injeção no body)
+[OpenAPI / JWT / GraphQL / gRPC / authz] ──403/401──→ só se o site tiver o bloco no TOML
   │ ok
   ▼
 [Upstream Backend]
