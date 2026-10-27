@@ -40,7 +40,7 @@ Quem self-hosta o Ferroada não cai num único desenho. Os casos reais são:
 - Build estático na Hostinger
 - App só na Vercel
 
-Hoje o README mostra um `docker run` e dois snippets de Compose (`README.md:259-500`). Não há pack por topologia, não há `ferroada init`, não há checklist de origin-lock, e o Compose de exemplo **publica o dashboard** (`-p 9000:9000` + `DASHBOARD_BIND=0.0.0.0`, `README.md:270-279` e `452-464`). Quem sobe “como no README” erra o default de produção.
+Hoje o README mostra um `docker run` e dois snippets de Compose (`README.pt-BR.md:362-667`). Não há pack por topologia, não há `ferroada init`, não há checklist de origin-lock, e o Compose de exemplo **publica o dashboard** (`-p 9000:9000` + `DASHBOARD_BIND=0.0.0.0`, `README.pt-BR.md:374-385` e `619-637`). Quem sobe “como no README” erra o default de produção.
 
 ### O que o roadmap de segurança pede
 
@@ -51,7 +51,7 @@ O material em `D:\ferroada.txt` trata o Ferroada atual como **alpha de seguranç
 - O painel Next devolve **números de demonstração** quando o proxy falha (`web/src/lib/get-metrics.ts:16-31`). As páginas SSR já nascem com demo (`web/src/app/page.tsx:5`, `web/src/app/eventos/page.tsx:5`). Há banner, mas o operador pode ler 12 840 requisições e achar que o origin está vivo.
 - O rewrite `/proxy-metrics` em `web/next.config.ts:2-4` encaminha para `/api/metrics` do dashboard **sem** `FERROADA_WEB_TOKEN` e **sem** injetar `FERROADA_TOKEN`. Se o Next e o dashboard compartilham o host e o dashboard está em loopback sem token, qualquer visitante do painel lê métricas.
 - `Forwarded` / `CF-Connecting-IP` são **apagados** como hop-by-hop (`src/proxy.rs:1116-1130`) e **não** entram na identidade. Só `X-Forwarded-For` de `TRUSTED_PROXIES` conta (`src/client_ip.rs:115-139`).
-- Body fail-closed já existe, mas só até 64 KiB — o teto do replay seguro do Pingora 0.8.1 (`src/shield.rs:10-36`, `README.md:114-116`). Rotas que precisam inspecionar upload/JSON maior não têm spool.
+- Body fail-closed já existe, mas só até 64 KiB — o teto do replay seguro do Pingora 0.8.1 (`src/shield.rs:10-36`, `README.pt-BR.md:197-202`). Rotas que precisam inspecionar upload/JSON maior não têm spool.
 - DLP **mascara por padrão** (`DLP_ENABLED` default `true`, `src/dlp.rs:19-22`) e, se o buffer estoura, **libera o restante sem inspecionar** (`src/proxy.rs:1068-1082`). O txt pede default monitor e commit-point para `block`.
 
 ---
@@ -90,9 +90,9 @@ Não repropor o que 0.6.0 já entrega. Tabela honesta contra o código atual.
 | Sem strip de hop-by-hop nomeados por `Connection` | nenhum `remove_header("Connection")` no repo | Fase 1 HTTP |
 | Sem checagem Host vs `:authority` | só Host allowlist (`src/shield.rs:178-204`) | Fase 1 HTTP |
 | DLP default muta; overflow falha aberto | `src/dlp.rs:19-22`; `src/proxy.rs:1068-1082` | Fase 1 / 5 |
-| Sem quota de memória/eventos por tenant | rate/behavior por site, métricas globais (`README.md:414`) | Fase 3 |
+| Sem quota de memória/eventos por tenant | rate/behavior por site, métricas globais (`README.pt-BR.md:583`) | Fase 3 |
 | WAF = regex própria | `src/waf.rs` (SQLi/XSS/…); não há Coraza/CRS | Fase 2 |
-| Sem OpenAPI / GraphQL AST / gRPC protobuf | GraphQL textual cai na canonicalização de texto (`README.md:122`) | Fases 4–6 |
+| Sem OpenAPI / GraphQL AST / gRPC protobuf | GraphQL textual cai na canonicalização de texto (`README.pt-BR.md:213`) | Fases 4–6 |
 | Sem control plane, snapshots assinados, last-known-good | TOML + env no processo (`src/config.rs:63-84`) | Fase 3 |
 | Sem Helm, unit systemd in-tree, OTel, SBOM, `SECURITY.md` | árvore: `src/`, `web/`, `fuzz/`, `Dockerfile`, CI | Fases 7–9 |
 | Testes de socket de smuggling citados no audit | `SMAUG_AUDIT.md:12` descreve dois testes de socket; no código visível só o unitário `raw_framing_headers_preserve_cl_te_ambiguity` (`src/proxy.rs:1250-1256`) | Fase 1 HTTP |
@@ -227,7 +227,7 @@ Packs sem edge (`vps-site` nu): `TRUSTED_PROXIES` vazio + WARNING, igual ao proc
 - **B como default** — `init` **não** busca live. Dois `init` com uma semana de diferença dariam `TRUSTED_PROXIES` diferentes sem rasto no git.
 - **D como default** — lista vazia / “cola tu”. Escape hatch `--trusted-proxies none` já loga que headers de IP serão ignorados (`src/main.rs:36-38`); **não** é o default do `cdn-edge`.
 
-**Listen (lei):** o binário 0.6.0 hardcoda `0.0.0.0:3000` e TLS `0.0.0.0:3443` (`src/main.rs:70-77`). Docker já mapeia `"80:3000"` / `"443:3443"` (`README.md:440-442`). `CAP_NET_BIND_SERVICE` **não** muda a porta que o processo abre. Knob novo (PR de listen, antes do unit systemd prometer :80):
+**Listen (lei):** o binário 0.6.0 hardcoda `0.0.0.0:3000` e TLS `0.0.0.0:3443` (`src/main.rs:70-77`). Docker já mapeia `"80:3000"` / `"443:3443"` (`README.pt-BR.md:608-609`). `CAP_NET_BIND_SERVICE` **não** muda a porta que o processo abre. Knob novo (PR de listen, antes do unit systemd prometer :80):
 
 | Env | Default | Uso |
 | --- | --- | --- |
@@ -399,7 +399,7 @@ Internet → Cloudflare/Fastly/Akamai → mTLS ou origin privado → Ferroada �
 - `PROXY_PROTOCOL=true` só quando o hop imediatamente à frente é HAProxy/nginx/Caddy/NLB **TCP** que de facto prefixa v2.
 - **F — Authenticated Origin Pulls (onda 0, checklist, não mTLS do Pingora):** o `CHECKLIST.md` do pack diz em pt-BR que produção atrás da Cloudflare **deve** ligar Authenticated Origin Pulls: o Caddy (ou o terminador TLS **à frente** do Ferroada) verifica o client cert da Cloudflare. CIDRs continuam no firewall e em `TRUSTED_PROXIES` (o mínimo que arranca). Origin pulls é a prova de que o peer é a Cloudflare. Client-auth no Pingora = Fase 7.
 - `FORCE_HTTPS=true`, HSTS ligado (já condicionado a `FORCE_HTTPS`, `src/headers.rs:57-64`).
-- `VISIBILIDADE.md`: DDoS L3/L4 é do CDN; se o link da VPS saturar, o Ferroada não responde 429 milagroso (`README.md:521-527` já é honesto — o pack repete).
+- `VISIBILIDADE.md`: DDoS L3/L4 é do CDN; se o link da VPS saturar, o Ferroada não responde 429 milagroso (`README.pt-BR.md:688-695` já é honesto — o pack repete).
 
 ### 3. Fase 0 — Contrato de protocolo (código, não wiki)
 
@@ -474,7 +474,7 @@ Até o TOML aninhado existir, `on_truncated=deny` é o significado de `require_c
 
 ### 4. Fase 1 — Boundary HTTP que ainda falta
 
-O pipeline atual (`README.md:561-609`, `src/proxy.rs:367+`):
+O pipeline atual (`README.pt-BR.md:730-779`, `src/proxy.rs:367+`):
 
 ```text
 HTTPS → Host → rota → method → size → rate → behavioral → WAF URI/headers
@@ -616,7 +616,7 @@ A Fase 1.3 do txt pede uma lista longa. Cobertura explícita (não fingir que a 
 | bytes WAF em voo | **0.6.0** `WAF_MAX_IN_FLIGHT_BYTES` (`src/proxy.rs:261-264`) |
 | bytes DLP em voo | **0.6.0** `DLP_MAX_IN_FLIGHT_BYTES` (`src/proxy.rs:257-260`) |
 | keep-alive / retries | **0.6.0** (`src/proxy.rs:32-44`, `src/main.rs:123-128`, teto 3) |
-| streams HTTP/2 e header list 64 KiB | **0.6.0** via `ServerConf { ..Default::default() }` (`src/main.rs:40-54`, `README.md:35-37`). Se um patch do Pingora mudar o default, **pinar** no `ServerConf` no mesmo PR que subir o crate — não confiar em memória. |
+| streams HTTP/2 e header list 64 KiB | **0.6.0** via `ServerConf { ..Default::default() }` (`src/main.rs:40-54`, `README.pt-BR.md:39-42`). Se um patch do Pingora mudar o default, **pinar** no `ServerConf` no mesmo PR que subir o crate — não confiar em memória. |
 | camadas de Content-Encoding | **0.6.0** rejeita lista ≠ 1 (`src/waf.rs:709-710`) |
 | spool agregado / ficheiros | **onda 1** PR 8 |
 | profundidade JSON | **onda 1** PR 9 (32 → `ParseError`) |
@@ -739,7 +739,7 @@ Migração: zero. Packs novos ao lado do `ferroada.toml.example` atual (`ferroad
 ### 1. Só README por topologia, sem generator
 
 - Prós: zero código.
-- Contras: o README atual **já** ensina a publicar o dashboard (`README.md:270-279`). Prosa não impede o default errado. Rejeitado como produto; prosa no pack (`VISIBILIDADE.md`) é complemento.
+- Contras: o README atual **já** ensina a publicar o dashboard (`README.pt-BR.md:374-385`). Prosa não impede o default errado. Rejeitado como produto; prosa no pack (`VISIBILIDADE.md`) é complemento.
 
 ### 2. Helm/operator como superfície principal
 
@@ -774,7 +774,7 @@ Migração: zero. Packs novos ao lado do `ferroada.toml.example` atual (`ferroad
 ### 8. Painel Next dentro da imagem distroless
 
 - Prós: um container.
-- Contras: distroless ~20 MB é promessa (`README.md:10`, `Dockerfile:17-20`); Next 16.3.3 (`web/package.json:11`) não cabe nisso. Dashboard Rust em :9000 loopback é o admin de produção; Next é opt-in.
+- Contras: distroless ~20 MB é promessa (`README.pt-BR.md:15`, `Dockerfile:17-20`); Next 16.3.3 (`web/package.json:11`) não cabe nisso. Dashboard Rust em :9000 loopback é o admin de produção; Next é opt-in.
 
 ### 9. Só mapear `80:3000` vs knob de listen vs Caddy obrigatório
 
