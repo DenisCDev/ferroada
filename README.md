@@ -1,54 +1,58 @@
 <h1 align="center">Ferroada</h1>
 
 <p align="center">
-  <b>Na frente do seu app. No seu servidor.</b><br>
-  Bloqueia o ataque e segura o que não podia vazar. Você não mexe no código e não manda o tráfego pra nuvem de ninguém.<br>
+  <b>English</b> · <a href="README.pt-BR.md">Português</a>
+</p>
+
+<p align="center">
+  <b>In front of your app. On your server.</b><br>
+  It blocks the attack and holds back what should never leak. You don't touch your code and you don't send your traffic to anyone else's cloud.<br>
   <sub><i>"I will give you a name, and I shall call you Sting."</i></sub>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/rust-pingora%200.8.1-D4A24E?labelColor=171310" alt="Rust com Pingora 0.8.1">
-  <img src="https://img.shields.io/badge/bin%C3%A1rio%20%C3%BAnico-distroless%20~20MB-43A48E?labelColor=171310" alt="binário único, container distroless de ~20MB">
-  <img src="https://img.shields.io/badge/deps%20externas-zero-43A48E?labelColor=171310" alt="zero dependências externas">
-  <img src="https://img.shields.io/badge/cargo%20audit-no%20build-D4A24E?labelColor=171310" alt="cargo audit roda no build">
+  <img src="https://img.shields.io/badge/rust-pingora%200.8.1-D4A24E?labelColor=171310" alt="Rust with Pingora 0.8.1">
+  <img src="https://img.shields.io/badge/single%20binary-distroless%20~20MB-43A48E?labelColor=171310" alt="single binary, ~20MB distroless container">
+  <img src="https://img.shields.io/badge/external%20deps-zero-43A48E?labelColor=171310" alt="zero external dependencies">
+  <img src="https://img.shields.io/badge/cargo%20audit-in%20build-D4A24E?labelColor=171310" alt="cargo audit runs in the build">
 </p>
 
 <p align="center">
-  <img src="assets/mtg-sting.jpg" width="640" alt="Ferroada, o Punhal Reluzente — arte de Nino Is, Tales of Middle-earth (2023)">
+  <img src="assets/mtg-sting.jpg" width="640" alt="Sting, the Glinting Dagger — art by Nino Is, Tales of Middle-earth (2023)">
 </p>
 
-> *"Sting, the Glinting Dagger"*, que a edição brasileira de **Magic: The Gathering** imprimiu como
-> **"Ferroada, o Punhal Reluzente"**. Arte de Nino Is, Tales of Middle-earth (2023).
-> A lâmina acende quando o inimigo se aproxima. É exatamente o serviço.
+> *"Sting, the Glinting Dagger"*, which the Brazilian edition of **Magic: The Gathering** printed as
+> **"Ferroada, o Punhal Reluzente"**. Art by Nino Is, Tales of Middle-earth (2023).
+> The blade glows when the enemy draws near. That is exactly the job.
 
-**Todo ataque chega pela mesma porta que o tráfego legítimo.** SQL injection, XSS,
-path traversal, scanner rodando a lista de sempre — tudo entra como requisição HTTP
-comum, e a maioria dos sistemas só percebe quando o estrago já está no log. Corrigir
-o backend é o caminho certo, e também o mais lento: cada framework, cada versão,
-cada sistema legado é uma frente nova.
+**Every attack comes in through the same door as legitimate traffic.** SQL injection, XSS,
+path traversal, a scanner running the usual list — it all arrives as an ordinary HTTP
+request, and most systems only notice once the damage is already in the log. Fixing
+the backend is the right path, and also the slowest: every framework, every version,
+every legacy system is a new front.
 
-O Ferroada ataca o problema pela infraestrutura: fica **na frente do seu app,
-no seu servidor**, sem alterar uma linha dele. Bloqueia ataque conhecido
-na entrada, mascara dado sensível na saída e mantém um score por site e rede do cliente
-— quem age como scanner é freado antes de achar alguma coisa. DDoS fica no CDN.
-Quem olha a request da sua API é o Ferroada, no seu servidor. Construído com
-[Pingora 0.8.1](https://github.com/cloudflare/pingora/releases/tag/0.8.1), o motor de proxy da Cloudflare,
-compilado num binário único e distribuído como container distroless de ~20MB.
-Esta versão limita por padrão os headers HTTP/2 decodificados a 64 KiB e cada
-conexão HTTP/2 a 100 streams simultâneos, rejeitando headers excessivos com 431
-antes da aplicação. O Ferroada fixa a versão exata no manifesto e no lockfile
-para que build local, container e CI usem a mesma base.
+Ferroada tackles the problem at the infrastructure level: it sits **in front of your app,
+on your server**, without changing a single line of it. It blocks known attacks
+on the way in, masks sensitive data on the way out, and keeps a score per site and client network
+— anyone acting like a scanner is slowed down before finding anything. DDoS stays with the CDN.
+The one looking at your API's requests is Ferroada, on your server. Built with
+[Pingora 0.8.1](https://github.com/cloudflare/pingora/releases/tag/0.8.1), Cloudflare's proxy engine,
+compiled into a single binary and shipped as a ~20MB distroless container.
+This version limits decoded HTTP/2 headers to 64 KiB by default and each
+HTTP/2 connection to 100 concurrent streams, rejecting oversized headers with 431
+before they reach the application. Ferroada pins the exact version in the manifest and in the lockfile
+so that the local build, the container and CI all use the same base.
 
-O Ferroada **não** é production-grade: falta auditoria de segurança externa
-e não há linha LTS. Relatar falhas e o que isto cobre: [SECURITY.md](SECURITY.md).
+Ferroada is **not** production-grade: it lacks an external security audit
+and there is no LTS line. Reporting vulnerabilities and what this covers: [SECURITY.md](SECURITY.md).
 
 ```
-Internet → [Ferroada :3000] → Seu Sistema :8080
+Internet → [Ferroada :3000] → Your System :8080
                 ↓
          Dashboard 127.0.0.1:9000
 ```
 
-**Multi-site:** um único deploy protege vários backends simultaneamente:
+**Multi-site:** a single deployment protects several backends at once:
 
 ```
 Internet
@@ -64,41 +68,41 @@ Internet
 
 ---
 
-## O que o Ferroada protege
+## What Ferroada protects
 
-### Camada de entrada (WAF)
+### Inbound layer (WAF)
 
-| Ataque | Onde inspeciona | Exemplo bloqueado |
+| Attack | Where it inspects | Blocked example |
 |--------|----------------|-------------------|
-| **SQL Injection** | URI, headers e qualquer body HTTP | `?id=1 UNION SELECT * FROM users` |
-| **XSS (Cross-Site Scripting)** | URI, headers e qualquer body HTTP | `<script>alert(1)</script>`, `onerror=`, `javascript:` |
+| **SQL Injection** | URI, headers and any HTTP body | `?id=1 UNION SELECT * FROM users` |
+| **XSS (Cross-Site Scripting)** | URI, headers and any HTTP body | `<script>alert(1)</script>`, `onerror=`, `javascript:` |
 | **Path Traversal** | URI, headers | `../../etc/passwd`, `%2e%2e%2f` |
-| **CRLF Injection** | URI, headers, body | `%0d%0aSet-Cookie:` (com skip de multipart no body) |
-| **JNDI / Log4Shell** | URI, headers, body | `${jndi:ldap://...}`, inclusive ofuscado |
-| **Request Smuggling** | Headers | `Content-Length` duplicado, `CL`+`TE`, `TE` inválido → 400 |
+| **CRLF Injection** | URI, headers, body | `%0d%0aSet-Cookie:` (multipart is skipped in the body) |
+| **JNDI / Log4Shell** | URI, headers, body | `${jndi:ldap://...}`, including obfuscated forms |
+| **Request Smuggling** | Headers | Duplicate `Content-Length`, `CL`+`TE`, invalid `TE` → 400 |
 | **Sensitive Path Access** | URI path + profile | `/.env`, `/.git/`, `/phpmyadmin`, `/.aws/credentials` |
-| **Bad Bots** | User-Agent | 18 assinaturas: sqlmap, nikto, nuclei, etc. (sinal fraco; a quota de abuse não depende disto) |
-| **Brute Force / DDoS básico** | Site + IPv4 ou prefixo IPv6 /64 | Rate limit sliding window (config via env) |
-| **Stuffing / enumeração / signup** | Identidade composta (opt-in `abuse`) | Mesmo fingerprint em IPs diferentes partilha o teto; site sem bloco `abuse` não muda |
+| **Bad Bots** | User-Agent | 18 signatures: sqlmap, nikto, nuclei, etc. (weak signal; the abuse quota does not depend on it) |
+| **Brute Force / basic DDoS** | Site + IPv4 or IPv6 /64 prefix | Sliding-window rate limit (configured via env) |
+| **Stuffing / enumeration / signup** | Composite identity (opt-in `abuse`) | The same fingerprint across different IPs shares the cap; a site without an `abuse` block is unchanged |
 
-Abuse de aplicação é opt-in no TOML (`abuse = { stuffing_max = 10, challenge = "pow" }`).
-A identidade soma site, rede /64, fingerprint TLS (hash do ClientHello — versão,
-ciphers oferecidos e compressão; **não** é a string JA4 pública), fingerprint HTTP
-(nomes dos headers, sem valores), sessão, API key e `jwt.sub`. Sem ficheiro MMDB
-o ASN fica vazio e o processo arranca. Challenge `pow` só para browser
-(`Accept: text/html`) depois do score; API com JWT ou JSON não recebe HTML.
-Não há ML no caminho quente.
+Application abuse protection is opt-in in the TOML (`abuse = { stuffing_max = 10, challenge = "pow" }`).
+The identity combines site, /64 network, TLS fingerprint (hash of the ClientHello — version,
+offered ciphers and compression; it is **not** the public JA4 string), HTTP fingerprint
+(header names, without values), session, API key and `jwt.sub`. Without an MMDB file
+the ASN stays empty and the process still starts. The `pow` challenge is only for browsers
+(`Accept: text/html`) after the score; an API with JWT or JSON never receives HTML.
+There is no ML in the hot path.
 
-A detecção de SQLi cobre cinco categorias — clássica (`UNION SELECT`, `OR 1=1`),
+SQLi detection covers five categories — classic (`UNION SELECT`, `OR 1=1`),
 stacked queries (`;DROP`), blind/time-based (`SLEEP`, `BENCHMARK`, `WAITFOR`),
-abuso de função (`EXTRACTVALUE`, `LOAD_FILE`) e evasão por comentário
-(`/*!UNION*/`). A de XSS reconhece ~40 event handlers (`ontoggle`,
-`onpointerover`, `onbegin`, ...) além de `confirm()`, `prompt()`, `Function()`,
-`<math>`, `<base>` e `url(javascript:)`.
+function abuse (`EXTRACTVALUE`, `LOAD_FILE`) and comment evasion
+(`/*!UNION*/`). XSS detection recognizes ~40 event handlers (`ontoggle`,
+`onpointerover`, `onbegin`, ...) plus `confirm()`, `prompt()`, `Function()`,
+`<math>`, `<base>` and `url(javascript:)`.
 
-#### Paths bloqueados por padrão
+#### Paths blocked by default
 
-Arquivos e diretórios que nunca deveriam ser expostos publicamente:
+Files and directories that should never be publicly exposed:
 
 ```
 /.env  /.git/  /.svn/  /.hg/  /.DS_Store  /.htaccess  /.htpasswd
@@ -111,149 +115,149 @@ Arquivos e diretórios que nunca deveriam ser expostos publicamente:
 /.bash_history  /.npmrc  /.vscode  /.idea  /web.config
 ```
 
-O profile `generic` não presume que `/wp-admin`, `/wp-login.php` e `xmlrpc.php`
-sejam ataques. `wordpress` monitora esses acessos sem bloquear; `strict` os
-bloqueia. Arquivos realmente sensíveis, como `wp-config.php`, continuam
-bloqueados em todos os profiles.
+The `generic` profile does not assume that `/wp-admin`, `/wp-login.php` and `xmlrpc.php`
+are attacks. `wordpress` monitors those requests without blocking; `strict`
+blocks them. Truly sensitive files, such as `wp-config.php`, remain
+blocked in every profile.
 
-L0 (regex) fica sempre ligado. L1 é um sidecar Coraza com CRS 4.25 LTS no
-Unix socket, opt-in (`WAF_ENGINE=coraza`). O binário do Ferroada não liga
-Coraza: um crash no ruleset não derruba o proxy. Timeout default 500 ms;
-o processo só marca o engine `coraza` depois do ready probe. Sidecar
-ausente numa rota `require_complete` responde 403 e conta
-`waf_engine_unavailable` — não desliga o WAF em silêncio.
+L0 (regex) is always on. L1 is a Coraza sidecar with CRS 4.25 LTS over a
+Unix socket, opt-in (`WAF_ENGINE=coraza`). The Ferroada binary does not link
+Coraza: a crash in the ruleset does not take down the proxy. Default timeout 500 ms;
+the process only marks the engine as `coraza` after the ready probe. A missing
+sidecar on a `require_complete` route responds 403 and counts
+`waf_engine_unavailable` — it does not silently turn the WAF off.
 
-Paranoia CRS separa `blocking` de `executing`: regras do nível executing
-correm sem necessariamente bloquear. Shadow avalia L1, grava rule ID e
-anomaly score no evento, e não devolve 403. Exclusões por site, rota,
-parâmetro e content-type ficam no TOML (`[waf.l1]`, `[[sites.l1.exclusions]]`).
-Ver `deploy/coraza/`.
+CRS paranoia separates `blocking` from `executing`: rules at the executing level
+run without necessarily blocking. Shadow mode evaluates L1, records the rule ID and
+anomaly score in the event, and does not return 403. Exclusions per site, route,
+parameter and content-type live in the TOML (`[waf.l1]`, `[[sites.l1.exclusions]]`).
+See `deploy/coraza/`.
 
-OpenAPI 3.0/3.1 é opt-in por site: um path no TOML (`openapi = "./openapi.yaml"`
-ou `openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }`).
-O spec é compilado no arranque. Sem spec o proxy continua exatamente como
-hoje. Com spec, o Ferroada valida método, rota, path/query/header, content-type
-e o JSON do body (tipos, required, enum, campos a mais). Endpoint desconhecido
-é observe ou deny (no pack o default é observe; em rota `require_complete`
-sem a chave, deny). Método ou content-type fora do contrato: deny. O evento
-diz o path e o campo; o body não entra no log.
+OpenAPI 3.0/3.1 is opt-in per site: a path in the TOML (`openapi = "./openapi.yaml"`
+or `openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }`).
+The spec is compiled at startup. Without a spec the proxy behaves exactly as
+it does today. With a spec, Ferroada validates method, route, path/query/header, content-type
+and the JSON body (types, required, enum, extra fields). An unknown endpoint
+is observe or deny (in the pack the default is observe; on a `require_complete` route
+without the key, deny). A method or content-type outside the contract: deny. The event
+reports the path and the field; the body never goes into the log.
 
-JWT/JWKS é opt-in por site (`jwt = { jwks = "...", issuer = "...", audience = "..." }`).
-Sem o bloco o site continua igual, inclusive sem `Authorization`. Com o bloco,
-o token é a chave de identidade: allowlist de alg (default só RS256/ES256;
-`none` recusado; HS* só com `algorithms` explícito e `hmac_secret_env`),
-`iss` e `aud` obrigatórios, `exp`/`nbf`/`iat`/`jti` validados, JWKS cacheado
-com timeout no fetch e last-known-good se o IdP cair. Bindings no TOML
-(`jwt.sub == path.account_id`, `jwt.tenant_id == body.tenant_id`). Rate e
-comportamento passam a usar o hash de `sub`/tenant, não só o IP. O token e o
-payload não entram no log.
+JWT/JWKS is opt-in per site (`jwt = { jwks = "...", issuer = "...", audience = "..." }`).
+Without the block the site stays the same, including without `Authorization`. With the block,
+the token is the identity key: alg allowlist (default only RS256/ES256;
+`none` rejected; HS* only with explicit `algorithms` and `hmac_secret_env`),
+`iss` and `aud` required, `exp`/`nbf`/`iat`/`jti` validated, JWKS cached
+with a fetch timeout and last-known-good if the IdP goes down. Bindings in the TOML
+(`jwt.sub == path.account_id`, `jwt.tenant_id == body.tenant_id`). Rate and
+behavior then use the hash of `sub`/tenant, not just the IP. The token and the
+payload never go into the log.
 
-Autorização é um callback opt-in por rota (`authorization = { socket =
+Authorization is an opt-in callback per route (`authorization = { socket =
 "unix:///run/authz.sock", action = "transfer:create", resource =
-"path.account_id", fail_mode = "closed" }`). Sem o bloco a rota continua
-como hoje: bindings JWT se existirem, senão o proxy não decide ownership.
-Com o bloco, o Ferroada pergunta ao serviço da aplicação — só Unix socket,
-timeout 50 ms (teto 200 ms) — se aquele `jwt.sub` pode a ação naquele
-recurso. A resposta é `{ "allow": true|false }`. Socket caído ou timeout:
-`fail_mode = closed` devolve 403; `open` deixa passar e sobe a métrica.
-O Ferroada não embarca OPA/Cedar e não inventa se o objeto pertence ao
-usuário — o contrato é com o serviço da app. O evento não leva token nem body.
+"path.account_id", fail_mode = "closed" }`). Without the block the route stays
+as it is today: JWT bindings if they exist, otherwise the proxy does not decide ownership.
+With the block, Ferroada asks the application's service — Unix socket only,
+50 ms timeout (200 ms cap) — whether that `jwt.sub` may perform the action on that
+resource. The response is `{ "allow": true|false }`. Socket down or timeout:
+`fail_mode = closed` returns 403; `open` lets the request through and increments the metric.
+Ferroada does not embed OPA/Cedar and does not guess whether the object belongs to the
+user — the contract is with the app's service. The event carries neither token nor body.
 
-GraphQL é opt-in por site/rota (`graphql = { max_depth = 8, max_operations = 5, introspection = false }`).
-Sem o bloco, `POST /graphql` continua só com HTTP/WAF/OpenAPI. Com o bloco, o
-proxy parseia o AST (JSON `{"query":...}`, batch em array, ou
-`application/graphql`) e aplica tetos de profundidade, complexidade, aliases,
-fragments e quantidade de operações. Introspection (`__schema` / `__type`)
-nasce desligada em produção. Persisted queries são uma allowlist local de
-SHA-256; `persisted_only = true` recusa query solta fora da lista. Quota de
-custo usa `jwt.sub` se o site tem JWT, senão o IP. Parse falhou vira
-`ParseError` e segue a política da rota (403 em `require_complete`). O evento
-diz o limite que estourou (`depth`, `aliases`, …), nunca a query.
+GraphQL is opt-in per site/route (`graphql = { max_depth = 8, max_operations = 5, introspection = false }`).
+Without the block, `POST /graphql` only gets HTTP/WAF/OpenAPI. With the block, the
+proxy parses the AST (JSON `{"query":...}`, array batch, or
+`application/graphql`) and enforces caps on depth, complexity, aliases,
+fragments and number of operations. Introspection (`__schema` / `__type`)
+starts disabled in production. Persisted queries are a local allowlist of
+SHA-256 hashes; `persisted_only = true` rejects ad-hoc queries outside the list. The cost
+quota uses `jwt.sub` if the site has JWT, otherwise the IP. A failed parse becomes
+`ParseError` and follows the route's policy (403 on `require_complete`). The event
+reports which limit was exceeded (`depth`, `aliases`, …), never the query.
 
-gRPC é opt-in por site (`grpc = { descriptor = "./api.pb", allow = ["pkg.Service/Method"], max_message_bytes = "64KiB", reflection = false }`).
-Sem o bloco, `application/grpc` (e `+proto`) segue a matriz de protocolo — hoje
-`deny`, ou `bypass-explicit` se o operador trocar; o proxy **não** passa a
-inspecionar sozinho. Com o bloco, o FileDescriptorSet é compilado no arranque.
-Método fora da allowlist devolve 403 e zero bytes no origin. Tamanho por
-message (lido no prefixo de 5 bytes do frame) acima de `max_message_bytes`
-também 403. O teto conta o payload; o frame no fio tem 5 bytes a mais, então
-64KiB de message não cabe no replay HTTP de 64KiB sem `max_decoded_body`. Reflection (`grpc.reflection.v1` / `ServerReflectionInfo`) nasce
-desligada; só passa com `reflection = true`. Se o cliente não manda
-`grpc-timeout`, o proxy injeta o teto (default 10s) ou nega se
-`require_deadline = true`. Protobuf que não casa com o descriptor vira
-`ParseError` e segue a política da rota. O evento traz service/method, nunca
-o payload. DLP em campo protobuf não existe neste recorte.
+gRPC is opt-in per site (`grpc = { descriptor = "./api.pb", allow = ["pkg.Service/Method"], max_message_bytes = "64KiB", reflection = false }`).
+Without the block, `application/grpc` (and `+proto`) follows the protocol matrix — currently
+`deny`, or `bypass-explicit` if the operator changes it; the proxy does **not** start
+inspecting on its own. With the block, the FileDescriptorSet is compiled at startup.
+A method outside the allowlist returns 403 and zero bytes reach the origin. A per-message
+size (read from the frame's 5-byte prefix) above `max_message_bytes`
+also returns 403. The cap counts the payload; the frame on the wire is 5 bytes larger, so
+a 64KiB message does not fit in the 64KiB HTTP replay without `max_decoded_body`. Reflection (`grpc.reflection.v1` / `ServerReflectionInfo`) starts
+disabled; it only passes with `reflection = true`. If the client does not send
+`grpc-timeout`, the proxy injects the cap (default 10s) or denies if
+`require_deadline = true`. Protobuf that does not match the descriptor becomes
+`ParseError` and follows the route's policy. The event carries service/method, never
+the payload. DLP on protobuf fields does not exist in this scope.
 
-#### Inspeção de body
+#### Body inspection
 
-O body de qualquer método permitido é inspecionado antes de chegar ao backend.
-O proxy lê **todos** os chunks, aplica o teto de `MAX_BODY_SIZE` também em
-`Transfer-Encoding: chunked`, limita a soma dos buffers simultâneos com
-`WAF_MAX_IN_FLIGHT_BYTES` e, antes de ler o body, reserva de forma conservadora
-o limite das duas cópias simultâneas (inspeção local + replay do Pingora). Se o
-cliente mandou `Content-Encoding: gzip`
-ou `deflate` o WAF infla uma cópia só para inspecionar — os bytes originais
-seguem para o upstream somente depois da decisão. No Pingora 0.8.1, o replay
-seguro antes do upstream é limitado a 64KB; por isso `MAX_BODY_SIZE` também é
-limitado a 65536 bytes, **exceto** rotas `require_complete` com
-`max_decoded_body` — aí os três tetos (bytes no fio, texto do WAF, inflate)
-sobem juntos para esse número, o body fica num spool e o origin só recebe
-depois do outcome. Sem `max_decoded_body` o processo não cria
-`/var/lib/ferroada/spool`. A inspeção registra `complete`, `truncated`,
+The body of any allowed method is inspected before it reaches the backend.
+The proxy reads **all** chunks, applies the `MAX_BODY_SIZE` cap to
+`Transfer-Encoding: chunked` as well, limits the sum of concurrent buffers with
+`WAF_MAX_IN_FLIGHT_BYTES` and, before reading the body, conservatively reserves
+the limit for both concurrent copies (local inspection + Pingora replay). If the
+client sent `Content-Encoding: gzip`
+or `deflate`, the WAF inflates a copy only for inspection — the original bytes
+go to the upstream only after the decision. In Pingora 0.8.1, the safe replay
+before the upstream is limited to 64KB; that is why `MAX_BODY_SIZE` is also
+limited to 65536 bytes, **except** on `require_complete` routes with
+`max_decoded_body` — there the three caps (bytes on the wire, WAF text, inflate)
+rise together to that number, the body goes to a spool and the origin only receives it
+after the outcome. Without `max_decoded_body` the process does not create
+`/var/lib/ferroada/spool`. The inspection records `complete`, `truncated`,
 `unsupported_encoding`, `unsupported_content_type`, `parse_error`,
-`budget_exceeded` ou `timed_out`. Um gzip gigante é
-cortado no teto de inflate da rota (256KB no default), então um zip bomb não
-estoura a memória. Rotas sensíveis podem exigir inspeção completa e rejeitar
-qualquer outro estado.
-JSON é parseado para expor escapes como `\u003c`; form-urlencoded trata `+` e
-percent-encoding; GraphQL textual passa pela mesma canonicalização de texto.
-gRPC/binário, encodings desconhecidos e multipart não textual ficam explícitos
-como inspeção incompleta, de modo que rotas fail-closed não os encaminham por
-engano.
+`budget_exceeded` or `timed_out`. A giant gzip is
+cut off at the route's inflate cap (256KB by default), so a zip bomb does not
+exhaust memory. Sensitive routes can require complete inspection and reject
+any other state.
+JSON is parsed to expose escapes such as `<`; form-urlencoded handles `+` and
+percent-encoding; textual GraphQL goes through the same text canonicalization.
+gRPC/binary, unknown encodings and non-textual multipart are explicitly marked
+as incomplete inspection, so fail-closed routes do not forward them by
+mistake.
 
-### Análise de comportamento (behavioral scoring)
+### Behavioral analysis (behavioral scoring)
 
-Regra de assinatura pega o ataque conhecido; o score de comportamento pega quem
-está **procurando** um. Cada IP acumula pontos por ação suspeita e perde 5
-pontos por segundo de bom comportamento:
+Signature rules catch the known attack; the behavior score catches whoever
+is **looking** for one. Each IP accumulates points per suspicious action and loses 5
+points per second of good behavior:
 
-| Sinal | Pontos |
+| Signal | Points |
 |-------|--------|
-| Bloqueio do WAF | +20 |
-| Resposta 401 | +5 |
-| Resposta 404 | +3 |
-| Request sem User-Agent | +8 |
-| Path scan (>30 paths únicos/min) | detectado |
-| Rotação de User-Agent (>3 UAs) | detectada |
+| WAF block | +20 |
+| 401 response | +5 |
+| 404 response | +3 |
+| Request without User-Agent | +8 |
+| Path scan (>30 unique paths/min) | detected |
+| User-Agent rotation (>3 UAs) | detected |
 
-Cruzou 50 pontos, o cliente é freado; cruzou 80, é banido por 10 minutos. A
-identidade inclui site e endereço de rede; IPv6 é agrupado por /64 para evitar
-rotação barata dentro do mesmo prefixo. Os
-thresholds são configuráveis, o tracking tem teto de 50 mil IPs com limpeza
-LRU, e a lógica de decay, scoring e ban tem testes unitários
+Past 50 points, the client is slowed down; past 80, it is banned for 10 minutes. The
+identity includes site and network address; IPv6 is grouped by /64 to prevent
+cheap rotation within the same prefix. The
+thresholds are configurable, tracking is capped at 50 thousand IPs with LRU
+cleanup, and the decay, scoring and ban logic has unit tests
 (`src/behavioral.rs`).
 
-### Hardening de infraestrutura
+### Infrastructure hardening
 
-| Proteção | O que faz | Resposta |
+| Protection | What it does | Response |
 |----------|-----------|----------|
-| **Security Headers** | Injeta X-Content-Type-Options, X-Frame-Options, Referrer-Policy, X-Permitted-Cross-Domain-Policies em toda resposta | Headers automáticos |
-| **Server Header Stripping** | Remove `Server`, `X-Powered-By`, `X-AspNet-Version`, `X-Debug-Token`, `X-Runtime` | Informação de infra oculta |
-| **HTTP Method Restriction** | Bloqueia TRACE, CONNECT e métodos não configurados | 405 Method Not Allowed |
-| **Request Size Limiting** | Limita o body a 64KB antes do upstream e a URI a 8KB | 413 / 414 |
-| **Host Validation** | Valida o Host header contra a allowlist `ALLOWED_HOSTS` (previne DNS rebinding) | 421 Misdirected Request |
-| **HTTPS Enforcement** | Redireciona HTTP → HTTPS quando TLS está configurado + injeta HSTS | 301 Moved Permanently |
-| **Dashboard seguro** | Escuta loopback por padrão; bind externo exige token, OIDC ou mTLS | 401 Não autorizado |
-| **Multi-encoding Protection** | Decodifica URL e headers recursivamente (máx. 8x), inclusive `%uXXXX` e `+` como espaço na query | Previne bypass `%2525252e`, XSS percent-encoded em header |
-| **Upstream timeouts** | `HttpPeer` com connect/read/write; body do cliente tem deadline próprio | Upstream morto não segura o worker |
-| **Rate limit com evicção** | Sliding window por site/rede; chaves expiradas saem do mapa; teto configurável | Flood de identidades não cresce a memória para sempre |
-| **Trusted proxies** | Só aceita XFF/X-Forwarded-Proto de redes em `TRUSTED_PROXIES` | Evita spoof e rate limit compartilhado pelo balanceador |
-| **Limites e backpressure** | Limita headers, requisições em voo, keep-alive e escrita ao cliente | Rejeita exaustão cedo com 431/503 |
-| **Supply chain no CI** | `cargo audit` no build Docker; fuzz (waf/protocol/dlp) e SBOM CycloneDX em todo pull request | Job vermelho se o audit achar CVE ou o fuzz crashar |
+| **Security Headers** | Injects X-Content-Type-Options, X-Frame-Options, Referrer-Policy, X-Permitted-Cross-Domain-Policies into every response | Automatic headers |
+| **Server Header Stripping** | Removes `Server`, `X-Powered-By`, `X-AspNet-Version`, `X-Debug-Token`, `X-Runtime` | Infrastructure details hidden |
+| **HTTP Method Restriction** | Blocks TRACE, CONNECT and unconfigured methods | 405 Method Not Allowed |
+| **Request Size Limiting** | Limits the body to 64KB before the upstream and the URI to 8KB | 413 / 414 |
+| **Host Validation** | Validates the Host header against the `ALLOWED_HOSTS` allowlist (prevents DNS rebinding) | 421 Misdirected Request |
+| **HTTPS Enforcement** | Redirects HTTP → HTTPS when TLS is configured + injects HSTS | 301 Moved Permanently |
+| **Secure dashboard** | Listens on loopback by default; an external bind requires a token, OIDC or mTLS | 401 Unauthorized |
+| **Multi-encoding Protection** | Decodes URL and headers recursively (max. 8x), including `%uXXXX` and `+` as a space in the query | Prevents `%2525252e` bypass, percent-encoded XSS in headers |
+| **Upstream timeouts** | `HttpPeer` with connect/read/write; the client body has its own deadline | A dead upstream does not hold the worker |
+| **Rate limit with eviction** | Sliding window per site/network; expired keys leave the map; configurable cap | A flood of identities does not grow memory forever |
+| **Trusted proxies** | Only accepts XFF/X-Forwarded-Proto from networks in `TRUSTED_PROXIES` | Prevents spoofing and a rate limit shared through the load balancer |
+| **Limits and backpressure** | Limits headers, in-flight requests, keep-alive and writes to the client | Rejects exhaustion early with 431/503 |
+| **Supply chain in CI** | `cargo audit` in the Docker build; fuzz (waf/protocol/dlp) and CycloneDX SBOM on every pull request | The job goes red if the audit finds a CVE or the fuzzer crashes |
 
-#### Security headers — filosofia "não quebrar"
+#### Security headers — the "don't break things" philosophy
 
-**Defaults conservadores** (ainda devem ser validados com a aplicação):
+**Conservative defaults** (still need to be validated against the application):
 ```
 X-Content-Type-Options: nosniff
 X-Frame-Options: SAMEORIGIN
@@ -262,62 +266,62 @@ X-XSS-Protection: 0
 X-Permitted-Cross-Domain-Policies: none
 ```
 
-`X-Frame-Options` pode ser alterado com `FRAME_OPTIONS` ou preservado do
-upstream com `FRAME_OPTIONS=off`; `SAMEORIGIN` pode quebrar embeds legítimos de
-outro origin.
+`X-Frame-Options` can be changed with `FRAME_OPTIONS` or preserved from the
+upstream with `FRAME_OPTIONS=off`; `SAMEORIGIN` can break legitimate embeds from
+another origin.
 
-**Condicionais** (só ativam quando você explicitamente configura):
+**Conditional** (only enabled when you explicitly configure them):
 ```
-Strict-Transport-Security    → só quando FORCE_HTTPS=true
-Content-Security-Policy      → só quando CSP_POLICY está definido
-Permissions-Policy           → só quando PERMISSIONS_POLICY está definido
+Strict-Transport-Security    → only when FORCE_HTTPS=true
+Content-Security-Policy      → only when CSP_POLICY is set
+Permissions-Policy           → only when PERMISSIONS_POLICY is set
 ```
 
-**Removidos** da resposta (sempre):
+**Removed** from the response (always):
 ```
 Server, X-Powered-By, X-AspNet-Version, X-Debug-Token, X-Runtime
 ```
 
-### Camada de saída (DLP)
+### Outbound layer (DLP)
 
-| Dado sensível | Padrão detectado | Resultado mascarado |
+| Sensitive data | Detected pattern | Masked result |
 |---------------|------------------|---------------------|
-| **CPF** | `390.533.447-05` (dígito verificador) | `***.***.***-**` |
-| **CNPJ** | `04.252.011/0001-10` (dígito verificador) | `**.***.***/****-**` |
-| **Cartão** | 13–19 dígitos com Luhn | dígitos viram `*` |
+| **CPF** | `390.533.447-05` (check digit) | `***.***.***-**` |
+| **CNPJ** | `04.252.011/0001-10` (check digit) | `**.***.***/****-**` |
+| **Card** | 13–19 digits with Luhn | digits become `*` |
 | **Bearer Token** | `Bearer eyJhbGciOi...` | `Bearer [REDACTED]` |
 
-CPF/CNPJ com dígito errado não são mascarados. Paths JSON (`$.user.cpf`) são
-opt-in no TOML por site ou rota; sem eles o DLP de blob continua. `DLP_ACTION=block`
-não libera nenhum byte ao cliente antes do fim da inspeção.
+CPF (Brazilian individual taxpayer ID) and CNPJ (Brazilian company ID) values with a wrong check digit are not masked. JSON paths (`$.user.cpf`) are
+opt-in in the TOML per site or route; without them blob DLP still applies. `DLP_ACTION=block`
+does not release a single byte to the client before inspection finishes.
 
-Se o backend vazar um CPF ou token em resposta textual identity, gzip,
-deflate ou brotli, o Ferroada descomprime com limite, mascara e recomprime.
-Brotli sem orçamento de inflate é skip observável, não “limpo”. Quando pode
-transformar uma resposta, remove `Content-Length`, `ETag`, `Content-MD5`,
-`Digest`, `Content-Digest` e `Repr-Digest`, pois deixariam de representar os
-bytes enviados. SSE, gRPC, NDJSON, WebSocket e respostas assinadas passam sem
-transformação para não corromper o protocolo; cada skip vira evento observável.
-Pedidos de range são removidos antes do upstream e respostas textuais parciais
-inesperadas são rejeitadas, impedindo que `206` contorne o mascaramento. O buffer é limitado a
-1MB por resposta e 64MB no processo por padrão.
+If the backend leaks a CPF or token in a textual identity, gzip,
+deflate or brotli response, Ferroada decompresses it within a limit, masks it and recompresses it.
+Brotli without an inflate budget is an observable skip, not "clean". When it may
+transform a response, it removes `Content-Length`, `ETag`, `Content-MD5`,
+`Digest`, `Content-Digest` and `Repr-Digest`, since they would no longer represent the
+bytes sent. SSE, gRPC, NDJSON, WebSocket and signed responses pass through without
+transformation so the protocol is not corrupted; each skip becomes an observable event.
+Range requests are removed before the upstream and unexpected partial textual
+responses are rejected, preventing a `206` from bypassing the masking. The buffer is limited to
+1MB per response and 64MB per process by default.
 
-### Monitoramento
+### Monitoring
 
 <p align="center">
-  <img src="assets/dashboard.png" width="880" alt="Painel do Ferroada: visão geral com requisições, bloqueios, tráfego limpo e lista de eventos">
+  <img src="assets/dashboard.png" width="880" alt="Ferroada dashboard: overview with requests, blocks, clean traffic and an event list">
 </p>
 
-O binário serve a API em `http://localhost:9000`: `/healthz`, `/readyz`,
-`/api/metrics` e `/metrics`. GET `/` não é um painel — só um índice em texto.
-Com `DASHBOARD_TOKEN`, o login é POST `/api/login` (token no corpo, nunca na
-query) e abre uma sessão curta em cookie HttpOnly. Fora de loopback, token
-sozinho não chega: ligue OIDC (authorization code + PKCE) ou mTLS (certificado
-cliente). `viewer` lê métricas; `operator` pode POST `/api/reload` com CSRF da sessão
-ou Bearer. Sem `DASHBOARD_OIDC_*` e sem CA de cliente, o comportamento atual
-(token) permanece. Isto não é production-grade.
+The binary serves the API at `http://localhost:9000`: `/healthz`, `/readyz`,
+`/api/metrics` and `/metrics`. GET `/` is not a dashboard — just a plain-text index.
+With `DASHBOARD_TOKEN`, login is POST `/api/login` (token in the body, never in the
+query) and opens a short session in an HttpOnly cookie. Outside loopback, a token
+alone is not enough: enable OIDC (authorization code + PKCE) or mTLS (client
+certificate). `viewer` reads metrics; `operator` can POST `/api/reload` with the session's CSRF
+or Bearer. Without `DASHBOARD_OIDC_*` and without a client CA, the current behavior
+(token) remains. This is not production-grade.
 
-O painel Next (`web/`) é a interface: Visão geral e Eventos, atualização a cada 5 s. Se o proxy não estiver no ar, o painel mostra zeros e `unavailable` — não inventa tráfego. Dados de demonstração só com `FERROADA_ALLOW_DEMO=true`.
+The Next dashboard (`web/`) is the interface: Overview and Events, refreshed every 5 s. If the proxy is not running, the dashboard shows zeros and `unavailable` — it does not make up traffic. Demo data only with `FERROADA_ALLOW_DEMO=true`.
 
 ```bash
 cd web
@@ -326,38 +330,38 @@ cp .env.example .env.local
 npm run dev    # http://localhost:3100
 ```
 
-`FERROADA_URL` (default `http://127.0.0.1:9000`) e `FERROADA_TOKEN` (se
-`DASHBOARD_TOKEN` estiver setado) ficam no servidor Next, não no browser. O
-painel só entrega métricas depois que o visitante informa `FERROADA_WEB_TOKEN`;
-essa credencial separada fica no `sessionStorage` da aba e é enviada como Bearer
-apenas para o mesmo servidor Next.
+`FERROADA_URL` (default `http://127.0.0.1:9000`) and `FERROADA_TOKEN` (if
+`DASHBOARD_TOKEN` is set) stay on the Next server, not in the browser. The
+dashboard only delivers metrics after the visitor enters `FERROADA_WEB_TOKEN`;
+that separate credential stays in the tab's `sessionStorage` and is sent as a Bearer
+only to the same Next server.
 
 ---
 
-## O que o Ferroada NÃO protege
+## What Ferroada does NOT protect
 
-Estas vulnerabilidades são de **lógica de aplicação** e precisam ser corrigidas
-no código do backend — um proxy que prometesse resolvê-las estaria mentindo:
+These vulnerabilities are **application logic** issues and must be fixed
+in the backend code — a proxy that promised to solve them would be lying:
 
-| Vulnerabilidade | Por que proxy não resolve |
+| Vulnerability | Why a proxy does not solve it |
 |----------------|--------------------------|
-| **IDOR** (Insecure Direct Object Reference) | Bindings JWT conferem claim == path/body. Ownership (este principal pode este objeto?) só o serviço de autorização da app responde, via Unix socket opt-in. Sem o bloco, o proxy não inventa essa decisão. |
-| **Mass Assignment** | Só o backend sabe quais campos são permitidos em cada request |
-| **Race Condition** | Controle de concorrência é responsabilidade do banco/backend |
-| **JWT / secret fraco** | Configuração de autenticação do backend |
-| **Senha em texto puro / hash sem salt** | Decisão de armazenamento no banco de dados |
-| **Manipulação de roles** | Autorização é lógica de negócio do backend |
-| **Engenharia social** | Fator humano — nenhum software resolve |
-| **Game hacking / WebSocket** | O Ferroada não inspeciona tráfego WebSocket |
+| **IDOR** (Insecure Direct Object Reference) | JWT bindings check claim == path/body. Ownership (may this principal access this object?) can only be answered by the app's authorization service, via the opt-in Unix socket. Without the block, the proxy does not invent that decision. |
+| **Mass Assignment** | Only the backend knows which fields are allowed in each request |
+| **Race Condition** | Concurrency control is the responsibility of the database/backend |
+| **Weak JWT / secret** | Backend authentication configuration |
+| **Plain-text passwords / unsalted hashes** | A storage decision in the database |
+| **Role manipulation** | Authorization is backend business logic |
+| **Social engineering** | Human factor — no software solves it |
+| **Game hacking / WebSocket** | Ferroada does not inspect WebSocket traffic |
 
-**O Ferroada é a primeira linha de defesa (infraestrutura), não a única.** Para
-segurança completa, o backend precisa de validação própria.
+**Ferroada is the first line of defense (infrastructure), not the only one.** For
+complete security, the backend needs its own validation.
 
 ---
 
 ## Quick start
 
-Laboratório na sua máquina. Produção: copie um pack em [`deploy/topologies/`](deploy/topologies/) — o dashboard fica em loopback e **não** se publica na internet.
+A lab on your machine. For production: copy a pack from [`deploy/topologies/`](deploy/topologies/) — the dashboard stays on loopback and is **not** published to the internet.
 
 ### 1. Build
 
@@ -380,12 +384,12 @@ docker run -d \
   ferroada
 ```
 
-O dashboard escuta `127.0.0.1:9000` **dentro** do contêiner. No laboratório, entre com `docker exec` ou publique só no loopback do anfitrião. Em produção use o túnel `ssh -L 9000:127.0.0.1:9000`.
+The dashboard listens on `127.0.0.1:9000` **inside** the container. In the lab, get in with `docker exec` or publish it only on the host's loopback. In production use the tunnel `ssh -L 9000:127.0.0.1:9000`.
 
-### 3. Testar
+### 3. Test
 
 ```bash
-# Request normal (passthrough)
+# Normal request (passthrough)
 curl -i http://localhost:3000/
 
 # SQL Injection → 403
@@ -406,149 +410,149 @@ curl -i -X POST http://localhost:3000/api/login \
   -H "Content-Type: application/json" \
   -d '{"user":"admin","pass":"x\" OR 1=1--"}'
 
-# Rate limit → 429 (após 100 requests)
+# Rate limit → 429 (after 100 requests)
 for i in $(seq 1 105); do
   curl -s -o /dev/null -w "%{http_code} " http://localhost:3000/
 done
 
-# Dashboard (só se publicou o loopback do anfitrião)
+# Dashboard (only if you published the host's loopback)
 curl -H 'Authorization: Bearer troque-por-um-token-longo' \
   http://127.0.0.1:9000/api/metrics
 ```
 
 ---
 
-## Modos de instalação
+## Installation modes
 
-O binário é um processo Pingora. Não corre na Hostinger nem como função na Vercel. Cada pasta em `deploy/topologies/` é um pack fail-closed: toml, env, Compose, unit systemd, origin-lock e um `VISIBILIDADE.md` honesto.
+The binary is a Pingora process. It does not run on Hostinger or as a function on Vercel. Each folder in `deploy/topologies/` is a fail-closed pack: toml, env, Compose, systemd unit, origin-lock and an honest `VISIBILIDADE.md`.
 
-| Modo | Quando usar |
+| Mode | When to use |
 |------|-------------|
-| [`vps-site`](deploy/topologies/vps-site/) | VPS com o site (frontend + backend) |
-| [`vps-api`](deploy/topologies/vps-api/) | VPS só com a API |
-| [`vps-supabase-selfhost`](deploy/topologies/vps-supabase-selfhost/) | API + Supabase auto-hospedado (Kong) |
-| [`vps-supabase-cloud`](deploy/topologies/vps-supabase-cloud/) | API na VPS, Supabase Cloud |
-| [`vps-full`](deploy/topologies/vps-full/) | Tudo na VPS |
-| [`hostinger-origin`](deploy/topologies/hostinger-origin/) | Estático na Hostinger; Ferroada numa VPS à frente |
-| [`vercel-origin`](deploy/topologies/vercel-origin/) | App na Vercel; Ferroada numa VPS à frente |
-| [`cdn-edge`](deploy/topologies/cdn-edge/) | Internet → CDN → Ferroada → backend (recomendado) |
-| [`Helm`](deploy/helm/ferroada/) | Kubernetes (pod rootless; dashboard não é Service) |
+| [`vps-site`](deploy/topologies/vps-site/) | VPS with the site (frontend + backend) |
+| [`vps-api`](deploy/topologies/vps-api/) | VPS with the API only |
+| [`vps-supabase-selfhost`](deploy/topologies/vps-supabase-selfhost/) | API + self-hosted Supabase (Kong) |
+| [`vps-supabase-cloud`](deploy/topologies/vps-supabase-cloud/) | API on the VPS, Supabase Cloud |
+| [`vps-full`](deploy/topologies/vps-full/) | Everything on the VPS |
+| [`hostinger-origin`](deploy/topologies/hostinger-origin/) | Static site on Hostinger; Ferroada on a VPS in front |
+| [`vercel-origin`](deploy/topologies/vercel-origin/) | App on Vercel; Ferroada on a VPS in front |
+| [`cdn-edge`](deploy/topologies/cdn-edge/) | Internet → CDN → Ferroada → backend (recommended) |
+| [`Helm`](deploy/helm/ferroada/) | Kubernetes (rootless pod; the dashboard is not a Service) |
 
-Comece pelo `CHECKLIST.md` do modo. TLS: o Ferroada termina se houver `fullchain.pem`; senão Caddy na frente. Os dois nunca publicam a 443 ao mesmo tempo. CIDRs do edge: `deploy/cidrs/` (snapshot datado, sem fetch no processo).
+Start with the mode's `CHECKLIST.md`. TLS: Ferroada terminates it if there is a `fullchain.pem`; otherwise Caddy sits in front. The two never publish 443 at the same time. Edge CIDRs: `deploy/cidrs/` (dated snapshot, no fetch inside the process).
 
 ```bash
 ferroada init --topology vps-api --origin http://127.0.0.1:8080 --public-host api.exemplo.com --non-interactive
 ferroada init --topology cdn-edge --origin http://127.0.0.1:8080 --public-host api.exemplo.com --trusted-proxies auto --non-interactive
-ferroada healthcheck   # GET 127.0.0.1:9000/healthz; exit 0/1. Distroless não tem curl.
-ferroada reload        # SIGHUP: tenta o TOML novo; se falhar, last-known-good
+ferroada healthcheck   # GET 127.0.0.1:9000/healthz; exit 0/1. Distroless has no curl.
+ferroada reload        # SIGHUP: tries the new TOML; if it fails, last-known-good
 ferroada policy compile --config ferroada.toml -o ferroada.policy.json
 ferroada policy sign --key priv.pem --in ferroada.policy.json -o ferroada.policy.sig
 ```
 
-`--trusted-proxies auto` copia o snapshot em `deploy/cidrs/` (embutido no binário). Zero HTTP. Para actualizar a lista: `ferroada cidrs update` (HTTP só neste comando; `--cidrs-from-network` não existe no `init`). `--listen-mode privileged` emite :80/:443 **e** `CAP_NET_BIND_SERVICE`; `proxied` deixa o processo em 127.0.0.1:3000 com Caddy na frente.
+`--trusted-proxies auto` copies the snapshot in `deploy/cidrs/` (embedded in the binary). Zero HTTP. To update the list: `ferroada cidrs update` (HTTP only in this command; `--cidrs-from-network` does not exist in `init`). `--listen-mode privileged` emits :80/:443 **and** `CAP_NET_BIND_SERVICE`; `proxied` keeps the process on 127.0.0.1:3000 with Caddy in front.
 
 ---
 
-## Configuração
+## Configuration
 
-Toda a configuração é feita por variáveis de ambiente:
+All configuration is done through environment variables:
 
-| Variável | Default | Descrição |
+| Variable | Default | Description |
 |----------|---------|-----------|
-| `TARGET_URL` | *(obrigatória\*)* | URL do sistema upstream — modo single-site (ex.: `http://meu-sistema:8080`) |
-| `RUST_LOG` | `info` | Nível de log (`debug`, `info`, `warn`, `error`) |
-| `RATE_LIMIT_MAX` | `100` | Máximo de requests por site/rede na janela |
-| `RATE_LIMIT_WINDOW` | `60` | Janela de tempo em segundos |
-| `RATE_LIMIT_MAX_IPS` | `50000` | Teto de identidades de risco no mapa (evicção acima disso) |
-| `REPLICA_COUNT` | `1` | Divide conservadoramente os budgets de rate/behavior entre as réplicas |
-| `RISK_SESSION_COOKIE` | `session` | Cookie de sessão incluído por hash na identidade de risco |
-| `RISK_API_KEY_HEADER` | `X-API-Key` | Header de API key incluído por hash na identidade de risco |
-| `UPSTREAM_CONNECT_TIMEOUT` | `5` | Segundos para o `connect()` no backend |
-| `UPSTREAM_READ_TIMEOUT` | `30` | Segundos máximos lendo a resposta do backend |
-| `UPSTREAM_WRITE_TIMEOUT` | `30` | Segundos máximos escrevendo no backend |
-| `BODY_READ_TIMEOUT` | `10` | Segundos máximos lendo o body do cliente |
-| `DOWNSTREAM_WRITE_TIMEOUT` | `30` | Segundos máximos escrevendo a resposta para o cliente |
-| `DOWNSTREAM_KEEPALIVE_SECS` | `30` | Idle timeout da conexão HTTP/1 com o cliente |
-| `DOWNSTREAM_KEEPALIVE_REQUESTS` | `100` | Máximo de requests reutilizando a mesma conexão HTTP/1 |
-| `MAX_IN_FLIGHT_REQUESTS` | `1024` | Teto de requisições simultâneas; excedentes recebem 503 |
-| `CONNECTION_RATE_MAX` | `60` | Novas conexões aceitas por IP na janela, antes de TLS/HTTP |
-| `CONNECTION_RATE_WINDOW` | `1` | Janela do limite de conexões, em segundos |
-| `CONNECTION_RATE_MAX_IPS` | `50000` | Teto de IPs rastreados no filtro de conexão |
-| `GLOBAL_CONNECTION_RATE_MAX` | `10000` | Novas conexões globais aceitas por janela, antes de TLS/HTTP |
-| `MAX_ACTIVE_CONNECTIONS` | `10000` | Teto de sessões downstream ativas, incluindo espera por headers HTTP/1 |
-| `MAX_HEADER_COUNT` | `100` | Máximo de headers por request |
-| `MAX_HEADER_BYTES` | `65536` | Soma máxima de nomes e valores dos headers |
-| `MAX_UPSTREAM_RETRIES` | `0` | Novas tentativas após a primeira; limitado a no máximo 3. Com vários origins, GET/HEAD/OPTIONS ganha ao menos 1 retry se o origin resetar antes de responder. POST/PATCH não retentam. |
-| `PROXY_THREADS` | CPUs disponíveis (máx. 64) | Threads por serviço |
-| `GRACE_PERIOD_SECS` | `5` | Espera antes da fase final de shutdown gracioso |
-| `GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `30` | Limite da fase final de shutdown gracioso |
-| `TLS_CERT_PATH` | *(opcional)* | Caminho para o certificado TLS (fullchain.pem) |
-| `TLS_KEY_PATH` | *(opcional)* | Caminho para a chave privada TLS |
-| `PROXY_LISTEN` | `0.0.0.0:3000` | Endereço do listener HTTP |
-| `TLS_LISTEN` | `0.0.0.0:3443` | Endereço do listener HTTPS (só se `TLS_CERT_PATH`/`TLS_KEY_PATH`) |
-| `DASHBOARD_PORT` | `9000` | Porta do dashboard de monitoramento |
-| `DASHBOARD_BIND` | `127.0.0.1` | IP do dashboard; bind não-loopback exige token (ou OIDC/mTLS) |
-| `DASHBOARD_TOKEN` | *(vazio em loopback)* | Token Bearer. `FERROADA_PRODUCTION=true` exige-o mesmo em loopback, mesmo com OIDC/mTLS. Sem production, bind fora de loopback aceita token **ou** OIDC/mTLS. Em loopback o token sozinho continua válido. |
-| `DASHBOARD_OIDC_ISSUER` / `DASHBOARD_OIDC_CLIENT_ID` / `DASHBOARD_OIDC_REDIRECT_URI` | *(unset = off)* | Opt-in OIDC (authorization code + PKCE). Sem estas e sem `DASHBOARD_MTLS_CA` o dashboard permanece só com token. |
-| `DASHBOARD_OIDC_CLIENT_SECRET` | *(opcional)* | Segredo confidencial; nunca vai na URL. PKCE corre na mesma. |
-| `DASHBOARD_OIDC_ROLE_CLAIM` | `ferroada_role` | Claim do ID token mapeada para `viewer` ou `operator`. |
-| `DASHBOARD_OIDC_OPERATORS` / `DASHBOARD_OIDC_VIEWERS` | `operator` / `viewer` | Valores da claim que dão cada papel. Sem operator, POST `/api/reload` é 403. |
-| `DASHBOARD_MTLS_CA` | *(unset)* | CA dos certificados cliente. Exige `DASHBOARD_TLS_CERT_PATH`/`DASHBOARD_TLS_KEY_PATH`. O handshake verifica o cert se o cliente o enviar. Fora de loopback a API exige o cert (ou sessão OIDC). |
-| `DASHBOARD_MTLS_OPERATORS` / `DASHBOARD_MTLS_VIEWERS` | *(vazio = viewer)* | CNs com papel operator/viewer. |
-| `DASHBOARD_SESSION_TTL_SECS` | `900` | Cookie `HttpOnly`, `SameSite=Strict`, `Secure` se o dashboard fala TLS. Mín. 60, máx. 8h. |
-| `DASHBOARD_AUDIT_LOG` | *(unset)* | Ficheiro JSONL append-only (login, reload, falha de auth). Não grava token nem código OIDC. |
-| `DASHBOARD_API_RATE_MAX` / `DASHBOARD_API_RATE_WINDOW` | `60` / `60` | Teto de pedidos a `/api` por IP e janela em segundos. |
-| `FERROADA_PRODUCTION` | *(unset)* | Se `true`, o token é obrigatório mesmo em 127.0.0.1. GET `/` na `:9000` é só o índice em texto; `/api/metrics` e `/metrics` exigem sessão, Bearer (loopback) ou mTLS. |
-| `FERROADA_POLICY_PUBKEY` | *(unset)* | Chave pública Ed25519 (PEM, hex ou base64). Opt-in: sem ela o TOML solto arranca. Com ela, o snapshot precisa de `ferroada.policy.sig` válida |
-| `FERROADA_POLICY_SIG` | `ferroada.policy.sig` | Assinatura Ed25519 do snapshot (`ferroada policy compile`) |
-| `FERROADA_PID_FILE` | `ferroada.pid` | Gravado no boot; `ferroada reload --pid-file` lê daqui |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` / `FERROADA_OTLP_ENDPOINT` | *(unset = off)* | Base HTTP do Collector OTLP (`http://127.0.0.1:4318`). Sem isto o processo não abre socket extra. HTTPS e userinfo na URL são recusados; o export nunca manda `Authorization`. |
-| `OTEL_EXPORTER_OTLP_TIMEOUT` | `1000` | Timeout do POST OTLP em milissegundos (teto 5s). Collector morto incrementa `ferroada_otel_export_failed_total` e o proxy continua. |
-| `TRUSTED_PROXIES` | *(vazio)* | CIDRs autorizados a enviar XFF/X-Forwarded-Proto |
-| `PROXY_PROTOCOL` | `false` | Parser PROXY v2 (não é flag do Pingora). `true` só atrás de HAProxy/nginx/Caddy/NLB TCP. Prefix inválido recusa a conexão. Cloudflare **não** liga isto |
-| `CLIENT_IP_ORDER` | `proxy_protocol,x-forwarded-for` | Ordem das fontes de IP. `Forwarded` (RFC 7239) só entra se listado; default continua a stripar hop-by-hop |
-| `CLIENT_IP_HEADER` | *(unset)* | Header extra (ex. `cf-connecting-ip`) só se `CLIENT_IP_ORDER` incluir `header` |
-| `FERROADA_ALLOW_DEMO` | *(unset)* | Se `true`, o painel Next inventa métricas com o proxy down. Produção: não ligue |
-| `SECURITY_HEADERS` | `true` | Injetar headers seguros nas respostas (nosniff, X-Frame, Referrer) |
-| `FRAME_OPTIONS` | `SAMEORIGIN` | Valor de X-Frame-Options; `off` preserva o upstream |
-| `CSP_POLICY` | *(desativada)* | Content-Security-Policy — só ative sabendo o que está fazendo |
-| `PERMISSIONS_POLICY` | *(desativada)* | Permissions-Policy — só ative se não usar câmera/mic/geolocalização |
-| `ALLOWED_METHODS` | `GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS` | Métodos HTTP permitidos |
-| `MAX_BODY_SIZE` | `65536` | Tamanho máximo do body; valores maiores são limitados a 64KB pelo replay seguro do Pingora 0.8.1. Rotas com `max_decoded_body` usam esse teto no lugar. |
-| `SPOOL_DIR` | *(unset = off)* | Diretório de spool; só é validado/limpo se alguma rota tem `max_decoded_body`. Default nesse modo: `/var/lib/ferroada/spool` |
-| `SPOOL_MAX_BYTES` | `536870912` | Teto agregado de bytes de spool (512 MiB) |
-| `SPOOL_MAX_FILES` | `256` | Teto de ficheiros `spool-*` simultâneos |
-| `WAF_MAX_IN_FLIGHT_BYTES` | `67108864` | Reserva global para a cópia local, o replay do Pingora e o buffer de inspeção descompactada (256 KiB + byte sentinela) |
-| `MAX_URI_LENGTH` | `8192` | Tamanho máximo da URI em bytes (8KB) |
-| `ALLOWED_HOSTS` | *(desativada)* | Allowlist de domínios no Host header (ex.: `meusite.com,www.meusite.com`) |
-| `FORCE_HTTPS` | `false` | Redirecionar HTTP → HTTPS (requer TLS configurado) |
-| `HTTPS_REDIRECT_HOST` | *(vazio)* | Host público confiável para redirect no modo single-site/default |
-| `DLP_ENABLED` | `true` | Liga a inspeção DLP de CPF/CNPJ/cartão e tokens nas respostas |
-| `DLP_ACTION` | `redact` se unset e `DLP_ENABLED=true` | `monitor` (conta, não mascara), `redact` (mascara), `block` (502 se achar PII ou o buffer estourar). Packs de produção emitem `monitor` |
-| `ORIGIN_SECRET_HEADER` | `X-Ferroada-Origin` se só `ORIGIN_SECRET` existir | Nome do header injetado no upstream. Unset com secret vazio = não injeta |
-| `ORIGIN_SECRET` | *(unset)* | Valor do header de origem. Nunca logado. Vazio = não injeta |
-| `DLP_MAX_RESPONSE_BYTES` | `1048576` | Buffer máximo por resposta textual inspecionada pelo DLP |
-| `DLP_MAX_IN_FLIGHT_BYTES` | `67108864` | Budget global de memória para buffers DLP simultâneos |
-| `BAD_BOT_ENABLED` | `true` | Bloqueio por assinatura de User-Agent (sqlmap, nikto, ...) |
-| `WAF_PROFILE` | `generic` | `generic`, `wordpress` (monitor) ou `strict` para paths operacionais do WordPress |
-| `WAF_REQUIRE_COMPLETE_PATHS` | *(vazio)* | Prefixos fail-closed no modo single-site, separados por vírgula |
-| `WAF_ENGINE` | `native` | `native` (só L0) ou `coraza` (L1 sidecar; exige Unix socket e ready probe) |
-| `WAF_SIDECAR_SOCKET` | `/run/coraza/waf.sock` | Socket do sidecar L1 |
-| `WAF_SIDECAR_TIMEOUT_MS` | `500` | Teto da chamada L1. 20 ms devolveria 403 em tráfego limpo no cold start do CRS |
-| `BEHAVIORAL_ENABLED` | `true` | Score de comportamento por site/rede |
-| `BEHAVIORAL_SLOW_THRESHOLD` | `50` | Pontos para começar a frear o IP |
-| `BEHAVIORAL_BLOCK_THRESHOLD` | `80` | Pontos para banir o IP |
-| `BEHAVIORAL_BAN_SECS` | `600` | Duração do ban em segundos |
-| `BEHAVIORAL_MAX_IPS` | `50000` | Teto de IPs rastreados (limpeza LRU acima disso) |
+| `TARGET_URL` | *(required\*)* | URL of the upstream system — single-site mode (e.g. `http://meu-sistema:8080`) |
+| `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `RATE_LIMIT_MAX` | `100` | Maximum requests per site/network within the window |
+| `RATE_LIMIT_WINDOW` | `60` | Time window in seconds |
+| `RATE_LIMIT_MAX_IPS` | `50000` | Cap on risk identities in the map (eviction above it) |
+| `REPLICA_COUNT` | `1` | Conservatively splits the rate/behavior budgets across replicas |
+| `RISK_SESSION_COOKIE` | `session` | Session cookie included (hashed) in the risk identity |
+| `RISK_API_KEY_HEADER` | `X-API-Key` | API key header included (hashed) in the risk identity |
+| `UPSTREAM_CONNECT_TIMEOUT` | `5` | Seconds for `connect()` to the backend |
+| `UPSTREAM_READ_TIMEOUT` | `30` | Maximum seconds reading the backend's response |
+| `UPSTREAM_WRITE_TIMEOUT` | `30` | Maximum seconds writing to the backend |
+| `BODY_READ_TIMEOUT` | `10` | Maximum seconds reading the client's body |
+| `DOWNSTREAM_WRITE_TIMEOUT` | `30` | Maximum seconds writing the response to the client |
+| `DOWNSTREAM_KEEPALIVE_SECS` | `30` | Idle timeout of the HTTP/1 connection with the client |
+| `DOWNSTREAM_KEEPALIVE_REQUESTS` | `100` | Maximum requests reusing the same HTTP/1 connection |
+| `MAX_IN_FLIGHT_REQUESTS` | `1024` | Cap on concurrent requests; the excess receives 503 |
+| `CONNECTION_RATE_MAX` | `60` | New connections accepted per IP within the window, before TLS/HTTP |
+| `CONNECTION_RATE_WINDOW` | `1` | Window of the connection limit, in seconds |
+| `CONNECTION_RATE_MAX_IPS` | `50000` | Cap on IPs tracked by the connection filter |
+| `GLOBAL_CONNECTION_RATE_MAX` | `10000` | New global connections accepted per window, before TLS/HTTP |
+| `MAX_ACTIVE_CONNECTIONS` | `10000` | Cap on active downstream sessions, including those waiting for HTTP/1 headers |
+| `MAX_HEADER_COUNT` | `100` | Maximum headers per request |
+| `MAX_HEADER_BYTES` | `65536` | Maximum sum of header names and values |
+| `MAX_UPSTREAM_RETRIES` | `0` | Retries after the first attempt; capped at 3. With several origins, GET/HEAD/OPTIONS get at least 1 retry if the origin resets before responding. POST/PATCH are not retried. |
+| `PROXY_THREADS` | Available CPUs (max. 64) | Threads per service |
+| `GRACE_PERIOD_SECS` | `5` | Wait before the final phase of graceful shutdown |
+| `GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `30` | Limit of the final phase of graceful shutdown |
+| `TLS_CERT_PATH` | *(optional)* | Path to the TLS certificate (fullchain.pem) |
+| `TLS_KEY_PATH` | *(optional)* | Path to the TLS private key |
+| `PROXY_LISTEN` | `0.0.0.0:3000` | HTTP listener address |
+| `TLS_LISTEN` | `0.0.0.0:3443` | HTTPS listener address (only with `TLS_CERT_PATH`/`TLS_KEY_PATH`) |
+| `DASHBOARD_PORT` | `9000` | Monitoring dashboard port |
+| `DASHBOARD_BIND` | `127.0.0.1` | Dashboard IP; a non-loopback bind requires a token (or OIDC/mTLS) |
+| `DASHBOARD_TOKEN` | *(empty on loopback)* | Bearer token. `FERROADA_PRODUCTION=true` requires it even on loopback, even with OIDC/mTLS. Without production, a bind outside loopback accepts a token **or** OIDC/mTLS. On loopback the token alone remains valid. |
+| `DASHBOARD_OIDC_ISSUER` / `DASHBOARD_OIDC_CLIENT_ID` / `DASHBOARD_OIDC_REDIRECT_URI` | *(unset = off)* | Opt-in OIDC (authorization code + PKCE). Without these and without `DASHBOARD_MTLS_CA` the dashboard remains token-only. |
+| `DASHBOARD_OIDC_CLIENT_SECRET` | *(optional)* | Confidential secret; never goes in the URL. PKCE runs anyway. |
+| `DASHBOARD_OIDC_ROLE_CLAIM` | `ferroada_role` | ID token claim mapped to `viewer` or `operator`. |
+| `DASHBOARD_OIDC_OPERATORS` / `DASHBOARD_OIDC_VIEWERS` | `operator` / `viewer` | Claim values that grant each role. Without operator, POST `/api/reload` is 403. |
+| `DASHBOARD_MTLS_CA` | *(unset)* | CA for client certificates. Requires `DASHBOARD_TLS_CERT_PATH`/`DASHBOARD_TLS_KEY_PATH`. The handshake verifies the cert if the client sends one. Outside loopback the API requires the cert (or an OIDC session). |
+| `DASHBOARD_MTLS_OPERATORS` / `DASHBOARD_MTLS_VIEWERS` | *(empty = viewer)* | CNs with the operator/viewer role. |
+| `DASHBOARD_SESSION_TTL_SECS` | `900` | `HttpOnly`, `SameSite=Strict` cookie, `Secure` if the dashboard speaks TLS. Min. 60, max. 8h. |
+| `DASHBOARD_AUDIT_LOG` | *(unset)* | Append-only JSONL file (login, reload, auth failure). Does not record the token or the OIDC code. |
+| `DASHBOARD_API_RATE_MAX` / `DASHBOARD_API_RATE_WINDOW` | `60` / `60` | Cap on requests to `/api` per IP and window in seconds. |
+| `FERROADA_PRODUCTION` | *(unset)* | If `true`, the token is required even on 127.0.0.1. GET `/` on `:9000` is only the plain-text index; `/api/metrics` and `/metrics` require a session, Bearer (loopback) or mTLS. |
+| `FERROADA_POLICY_PUBKEY` | *(unset)* | Ed25519 public key (PEM, hex or base64). Opt-in: without it a bare TOML starts. With it, the snapshot needs a valid `ferroada.policy.sig` |
+| `FERROADA_POLICY_SIG` | `ferroada.policy.sig` | Ed25519 signature of the snapshot (`ferroada policy compile`) |
+| `FERROADA_PID_FILE` | `ferroada.pid` | Written at boot; `ferroada reload --pid-file` reads from here |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `FERROADA_OTLP_ENDPOINT` | *(unset = off)* | HTTP base of the OTLP Collector (`http://127.0.0.1:4318`). Without it the process opens no extra socket. HTTPS and userinfo in the URL are rejected; the export never sends `Authorization`. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `1000` | OTLP POST timeout in milliseconds (5s cap). A dead Collector increments `ferroada_otel_export_failed_total` and the proxy keeps going. |
+| `TRUSTED_PROXIES` | *(empty)* | CIDRs allowed to send XFF/X-Forwarded-Proto |
+| `PROXY_PROTOCOL` | `false` | PROXY v2 parser (not a Pingora flag). `true` only behind HAProxy/nginx/Caddy/TCP NLB. An invalid prefix rejects the connection. Cloudflare does **not** turn this on |
+| `CLIENT_IP_ORDER` | `proxy_protocol,x-forwarded-for` | Order of IP sources. `Forwarded` (RFC 7239) is only used if listed; the default still strips hop-by-hop |
+| `CLIENT_IP_HEADER` | *(unset)* | Extra header (e.g. `cf-connecting-ip`) only if `CLIENT_IP_ORDER` includes `header` |
+| `FERROADA_ALLOW_DEMO` | *(unset)* | If `true`, the Next dashboard makes up metrics while the proxy is down. Production: do not enable |
+| `SECURITY_HEADERS` | `true` | Inject secure headers into responses (nosniff, X-Frame, Referrer) |
+| `FRAME_OPTIONS` | `SAMEORIGIN` | X-Frame-Options value; `off` preserves the upstream's |
+| `CSP_POLICY` | *(disabled)* | Content-Security-Policy — only enable it if you know what you are doing |
+| `PERMISSIONS_POLICY` | *(disabled)* | Permissions-Policy — only enable it if you don't use camera/mic/geolocation |
+| `ALLOWED_METHODS` | `GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS` | Allowed HTTP methods |
+| `MAX_BODY_SIZE` | `65536` | Maximum body size; larger values are capped at 64KB by Pingora 0.8.1's safe replay. Routes with `max_decoded_body` use that cap instead. |
+| `SPOOL_DIR` | *(unset = off)* | Spool directory; only validated/cleaned if some route has `max_decoded_body`. Default in that mode: `/var/lib/ferroada/spool` |
+| `SPOOL_MAX_BYTES` | `536870912` | Aggregate cap on spool bytes (512 MiB) |
+| `SPOOL_MAX_FILES` | `256` | Cap on concurrent `spool-*` files |
+| `WAF_MAX_IN_FLIGHT_BYTES` | `67108864` | Global reservation for the local copy, the Pingora replay and the decompressed inspection buffer (256 KiB + sentinel byte) |
+| `MAX_URI_LENGTH` | `8192` | Maximum URI size in bytes (8KB) |
+| `ALLOWED_HOSTS` | *(disabled)* | Allowlist of domains in the Host header (e.g. `meusite.com,www.meusite.com`) |
+| `FORCE_HTTPS` | `false` | Redirect HTTP → HTTPS (requires TLS to be configured) |
+| `HTTPS_REDIRECT_HOST` | *(empty)* | Trusted public host for redirects in single-site/default mode |
+| `DLP_ENABLED` | `true` | Enables DLP inspection of CPF/CNPJ/card numbers and tokens in responses |
+| `DLP_ACTION` | `redact` if unset and `DLP_ENABLED=true` | `monitor` (counts, does not mask), `redact` (masks), `block` (502 if PII is found or the buffer overflows). Production packs emit `monitor` |
+| `ORIGIN_SECRET_HEADER` | `X-Ferroada-Origin` if only `ORIGIN_SECRET` exists | Name of the header injected upstream. Unset with an empty secret = not injected |
+| `ORIGIN_SECRET` | *(unset)* | Value of the origin header. Never logged. Empty = not injected |
+| `DLP_MAX_RESPONSE_BYTES` | `1048576` | Maximum buffer per textual response inspected by DLP |
+| `DLP_MAX_IN_FLIGHT_BYTES` | `67108864` | Global memory budget for concurrent DLP buffers |
+| `BAD_BOT_ENABLED` | `true` | Blocking by User-Agent signature (sqlmap, nikto, ...) |
+| `WAF_PROFILE` | `generic` | `generic`, `wordpress` (monitor) or `strict` for WordPress operational paths |
+| `WAF_REQUIRE_COMPLETE_PATHS` | *(empty)* | Fail-closed prefixes in single-site mode, comma-separated |
+| `WAF_ENGINE` | `native` | `native` (L0 only) or `coraza` (L1 sidecar; requires Unix socket and ready probe) |
+| `WAF_SIDECAR_SOCKET` | `/run/coraza/waf.sock` | Socket of the L1 sidecar |
+| `WAF_SIDECAR_TIMEOUT_MS` | `500` | Cap on the L1 call. 20 ms would return 403 on clean traffic during the CRS cold start |
+| `BEHAVIORAL_ENABLED` | `true` | Behavior score per site/network |
+| `BEHAVIORAL_SLOW_THRESHOLD` | `50` | Points before the IP starts being slowed down |
+| `BEHAVIORAL_BLOCK_THRESHOLD` | `80` | Points to ban the IP |
+| `BEHAVIORAL_BAN_SECS` | `600` | Ban duration in seconds |
+| `BEHAVIORAL_MAX_IPS` | `50000` | Cap on tracked IPs (LRU cleanup above it) |
 
-*\* `TARGET_URL` é obrigatória apenas no modo single-site. No modo multi-site, use o `ferroada.toml`.*
+*\* `TARGET_URL` is required only in single-site mode. In multi-site mode, use `ferroada.toml`.*
 
 ### Multi-site
 
-Para proteger vários backends com um único deploy, crie um arquivo `ferroada.toml`:
+To protect several backends with a single deployment, create a `ferroada.toml` file:
 
 ```toml
-# Completo e comentado: ferroada.toml.example
+# Complete and commented: ferroada.toml.example
 
 [[sites]]
 hosts = ["meusite.com", "www.meusite.com"]
@@ -560,7 +564,7 @@ require_complete_waf_inspection = ["/api/payment", "/api/admin/"]
 [[sites]]
 hosts = ["api.meusite.com"]
 backend = "http://backend-b:3000"
-# Opt-in. Sem o bloco, o site continua só HTTP/WAF/DLP.
+# Opt-in. Without the block, the site stays HTTP/WAF/DLP only.
 # openapi = { spec = "./openapi.yaml", unknown_endpoint = "observe" }
 # jwt = { jwks = "https://auth.exemplo.com/.well-known/jwks.json", issuer = "https://auth.exemplo.com", audience = "api.meusite.com", bindings = ["jwt.sub == path.account_id"] }
 # abuse = { stuffing_max = 10, challenge = "pow" }
@@ -569,18 +573,18 @@ backend = "http://backend-b:3000"
 # authorization = { socket = "unix:///run/authz.sock", action = "account:read", resource = "path.account_id", fail_mode = "closed" }
 ```
 
-O roteamento é feito automaticamente pelo Host header de cada request. Hosts não
-configurados recebem `421 Misdirected Request`.
+Routing is done automatically by each request's Host header. Unconfigured
+hosts receive `421 Misdirected Request`.
 
-**Regras:**
-- Se o `ferroada.toml` existe → modo multi-site (ignora `TARGET_URL`)
-- Se não existe → usa `TARGET_URL` como antes (backward compatible)
-- Rate limit e behavioral são isolados por site; IPv6 é agregado por /64
-- WAF/DLP não mantêm decisões entre sites; métricas continuam globais ao processo
-- A env `ALLOWED_HOSTS` continua funcionando como restrição adicional
+**Rules:**
+- If `ferroada.toml` exists → multi-site mode (ignores `TARGET_URL`)
+- If it does not exist → uses `TARGET_URL` as before (backward compatible)
+- Rate limit and behavioral scoring are isolated per site; IPv6 is aggregated by /64
+- WAF/DLP do not keep decisions across sites; metrics remain global to the process
+- The `ALLOWED_HOSTS` env var still works as an additional restriction
 
 ```bash
-# Multi-site com Docker (laboratório). Produção: deploy/topologies/
+# Multi-site with Docker (lab). Production: deploy/topologies/
 docker run -d \
   -v ./ferroada.toml:/ferroada.toml:ro \
   -e DASHBOARD_BIND=127.0.0.1 \
@@ -591,7 +595,7 @@ docker run -d \
 
 ### HTTPS (TLS termination)
 
-Para produção, configure TLS para aceitar HTTPS na porta 3443:
+For production, configure TLS to accept HTTPS on port 3443:
 
 ```bash
 docker run -d \
@@ -608,7 +612,7 @@ docker run -d \
 
 ---
 
-## Integração com sistemas existentes
+## Integration with existing systems
 
 ### Docker Compose (single-site)
 
@@ -632,7 +636,7 @@ services:
       - "8080"
 ```
 
-O dashboard não se publica na internet. Túnel: `ssh -L 9000:127.0.0.1:9000`. Nos packs Docker o mapa é só `127.0.0.1:9000` no anfitrião. Packs completos: `deploy/topologies/`.
+The dashboard is not published to the internet. Tunnel: `ssh -L 9000:127.0.0.1:9000`. In the Docker packs the mapping is only `127.0.0.1:9000` on the host. Complete packs: `deploy/topologies/`.
 
 ### Docker Compose (multi-site)
 
@@ -662,7 +666,7 @@ services:
       - "3000"
 ```
 
-### Nginx (apontar para o Ferroada)
+### Nginx (pointing to Ferroada)
 
 ```nginx
 location / {
@@ -672,114 +676,114 @@ location / {
 }
 ```
 
-Configure `TRUSTED_PROXIES` com o CIDR real da rede do Nginx. Sem isso, o
-Ferroada ignora XFF e usa o socket remoto. Um peer fora dessa allowlist não
-consegue trocar de identidade enviando headers próprios.
+Set `TRUSTED_PROXIES` to the actual CIDR of the Nginx network. Without it,
+Ferroada ignores XFF and uses the remote socket. A peer outside that allowlist
+cannot change its identity by sending its own headers.
 
 ### AWS / Cloud
 
-Aponte o ALB/Target Group para a porta 3000 do container Ferroada em vez do
-backend direto.
+Point the ALB/Target Group at port 3000 of the Ferroada container instead of
+directly at the backend.
 
-### Produção atrás de uma borda
+### Production behind an edge
 
-O desenho recomendado é `Internet → Cloudflare/CDN/LB → Ferroada → backend`.
-DDoS fica no CDN. Quem olha a request da sua API é o Ferroada, no seu servidor.
-Restrinja a origem para aceitar somente a borda (firewall, tunnel privado ou
-mTLS) e cadastre os CIDRs dela em `TRUSTED_PROXIES`. O Ferroada não substitui
-Anycast nem mitigação DDoS L3/L4: se o link da máquina saturar, o processo não
-tem como responder 429.
+The recommended design is `Internet → Cloudflare/CDN/LB → Ferroada → backend`.
+DDoS stays with the CDN. The one looking at your API's requests is Ferroada, on your server.
+Restrict the origin to accept only the edge (firewall, private tunnel or
+mTLS) and register its CIDRs in `TRUSTED_PROXIES`. Ferroada does not replace
+Anycast or L3/L4 DDoS mitigation: if the machine's link saturates, the process
+has no way to respond with 429.
 
-O estado continua local a cada réplica. Em múltiplas réplicas, configure
-`REPLICA_COUNT`: o Ferroada divide os budgets de rate e os thresholds de
-comportamento para manter o limite agregado conservador mesmo sem store. Bans e
-histórico não são replicados; mantenha afinidade por cliente ou aplique a camada
-distribuída na borda. Logs saem em stdout para o coletor da plataforma.
-`GET /healthz` confirma o processo; `GET /readyz` testa os backends com deadline
-e retorna 503 se algum estiver indisponível. Essas rotas não exigem token;
-`/api/metrics` e `/metrics` usam a autenticação do dashboard.
+State remains local to each replica. With multiple replicas, configure
+`REPLICA_COUNT`: Ferroada splits the rate budgets and the behavior
+thresholds to keep the aggregate limit conservative even without a store. Bans and
+history are not replicated; keep client affinity or apply the distributed
+layer at the edge. Logs go to stdout for the platform's collector.
+`GET /healthz` confirms the process; `GET /readyz` checks the backends with a deadline
+and returns 503 if any of them is unavailable. These routes do not require a token;
+`/api/metrics` and `/metrics` use the dashboard's authentication.
 
 ---
 
-## Arquitetura
+## Architecture
 
 ```
 src/
-├── proxy.rs         # Pipeline: Host → rota → method/size → rate → behavioral → abuse → WAF L0/L1 → OpenAPI/JWT/GraphQL/gRPC/authz → origin → DLP
-├── protocol.rs      # Matriz inspect/deny/monitor/bypass (e quarantine = 403 + tag)
-├── waf.rs / waf_engine.rs / waf_l1.rs  # L0 regex; L1 sidecar Coraza
-├── spool.rs         # Body > 64 KiB só em rota fail-closed com max_decoded_body
+├── proxy.rs         # Pipeline: Host → route → method/size → rate → behavioral → abuse → WAF L0/L1 → OpenAPI/JWT/GraphQL/gRPC/authz → origin → DLP
+├── protocol.rs      # inspect/deny/monitor/bypass matrix (and quarantine = 403 + tag)
+├── waf.rs / waf_engine.rs / waf_l1.rs  # L0 regex; L1 Coraza sidecar
+├── spool.rs         # Body > 64 KiB only on a fail-closed route with max_decoded_body
 ├── openapi.rs / jwt.rs / graphql.rs / grpc.rs / authz.rs
-├── abuse.rs         # Quota por fingerprint (opt-in)
-├── dlp.rs           # Blob + path JSON; monitor/redact/block
-├── policy.rs        # Snapshot assinado e last-known-good
-├── origin.rs        # Vários backends, health, circuit
-├── otel.rs          # OTLP opt-in
+├── abuse.rs         # Per-fingerprint quota (opt-in)
+├── dlp.rs           # Blob + JSON path; monitor/redact/block
+├── policy.rs        # Signed snapshot and last-known-good
+├── origin.rs        # Multiple backends, health, circuit
+├── otel.rs          # Opt-in OTLP
 ├── proxy_protocol.rs / client_ip.rs
 └── dashboard.rs / dashboard_oidc.rs / dashboard_auth.rs
-deploy/topologies/   # Packs VPS / Hostinger / Vercel / CDN
+deploy/topologies/   # VPS / Hostinger / Vercel / CDN packs
 deploy/helm/ferroada/
-web/                 # Painel Next (zeros se o proxy cair, sem demo)
-fuzz/                # waf, protocol, dlp — corre no CI de PR
+web/                 # Next dashboard (zeros if the proxy goes down, no demo)
+fuzz/                # waf, protocol, dlp — runs in PR CI
 ```
 
-### Pipeline de request
+### Request pipeline
 
 ```
-Cliente
+Client
   │
   ▼
-[HTTPS Redirect] ──301──→ Cliente (se FORCE_HTTPS e request HTTP)
+[HTTPS Redirect] ──301──→ Client (if FORCE_HTTPS and HTTP request)
   │ ok
   ▼
-[Host Check] ──421──→ Cliente (Host não permitido, DNS rebinding)
+[Host Check] ──421──→ Client (Host not allowed, DNS rebinding)
   │ ok
   ▼
-[Route Backend] ──421──→ Cliente (Host sem site configurado, multi-site)
+[Route Backend] ──421──→ Client (Host without a configured site, multi-site)
   │ ok
   ▼
-[Method Check] ──405──→ Cliente (TRACE, CONNECT, etc.)
+[Method Check] ──405──→ Client (TRACE, CONNECT, etc.)
   │ ok
   ▼
-[Size Check] ──413/414──→ Cliente (body/URI grande demais)
+[Size Check] ──413/414──→ Client (body/URI too large)
   │ ok
   ▼
-[Rate Limiter] ──429──→ Cliente (Too Many Requests)
+[Rate Limiter] ──429──→ Client (Too Many Requests)
   │ ok
   ▼
-[Behavioral Score] ──403──→ Cliente (IP acima do threshold de ban)
+[Behavioral Score] ──403──→ Client (IP above the ban threshold)
   │ ok
   ▼
-[Abuse quotas] ──403──→ stuffing/enumeração (opt-in; mesmo fingerprint, IPs diferentes)
+[Abuse quotas] ──403──→ stuffing/enumeration (opt-in; same fingerprint, different IPs)
   │ ok
   ▼
-[WAF L0 + L1] ──403──→ regex e, se ligado, sidecar Coraza
+[WAF L0 + L1] ──403──→ regex and, if enabled, the Coraza sidecar
   │ ok
   ▼
-[OpenAPI / JWT / GraphQL / gRPC / authz] ──403/401──→ só se o site tiver o bloco no TOML
+[OpenAPI / JWT / GraphQL / gRPC / authz] ──403/401──→ only if the site has the block in the TOML
   │ ok
   ▼
 [Upstream Backend]
   │
   ▼
-[Strip Server Headers] → Remove Server, X-Powered-By, etc.
+[Strip Server Headers] → Removes Server, X-Powered-By, etc.
   │
   ▼
 [Inject Security Headers] → HSTS, CSP, X-Frame-Options, etc.
   │
   ▼
-[DLP: Response Masking] → CPF/CNPJ/cartão e tokens mascarados
+[DLP: Response Masking] → CPF/CNPJ/card numbers and tokens masked
   │
   ▼
-Cliente (resposta limpa e hardened)
+Client (clean, hardened response)
 ```
 
 ---
 
 ## Stack
 
-- **Pingora 0.8** (Cloudflare) — proxy HTTP de alta performance
-- **Rust** — binário único, sem runtime, sem garbage collector
-- **Distroless** — imagem Docker sem shell, sem package manager (~20MB)
-- **Zero dependências externas** — não precisa de Redis, banco de dados nem serviço auxiliar
-- **Ainda não é production-grade** — falta auditoria externa e LTS. Ver [SECURITY.md](SECURITY.md).
+- **Pingora 0.8** (Cloudflare) — high-performance HTTP proxy
+- **Rust** — single binary, no runtime, no garbage collector
+- **Distroless** — Docker image with no shell and no package manager (~20MB)
+- **Zero external dependencies** — no need for Redis, a database or any auxiliary service
+- **Not production-grade yet** — lacks an external audit and LTS. See [SECURITY.md](SECURITY.md).
